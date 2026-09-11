@@ -13,11 +13,11 @@ Zeron bundles the following syntax-highlighting components. Unless noted otherwi
 | Tree-sitter TOML, Markdown, YAML, Swift, SQL, Lua, Nix, Make and Containerfile grammars and queries | pinned in `Cargo.lock` | MIT-compatible; see each crate | Crate repositories recorded in `Cargo.lock` |
 | Tree-sitter Kotlin grammar | 1.1.0 | MIT | https://github.com/tree-sitter-grammars/tree-sitter-kotlin |
 
-Zeron also uses the following editor foundations from the pinned `zeronsh/gpui-component` fork. The fork aligns these crates with the same GPUI revision used by Comet.
+Zeron also uses the following editor foundations from the pinned `wasimysaid/gpui-component` fork. The fork aligns these crates with the same GPUI revision used by Comet.
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
-| gpui-base | 0.5.2 (`ed27327`) | Apache-2.0 | https://github.com/zeronsh/gpui-component |
+| gpui-base | 0.5.2 (`ed27327`) | Apache-2.0 | https://github.com/wasimysaid/gpui-component |
 | mermaid-rs-renderer | 0.3.1 | MIT | https://github.com/1jehuang/mermaid-rs-renderer |
 | Ropey | 2.0.0-beta.1 | MIT | https://github.com/cessen/ropey |
 
