@@ -64,16 +64,16 @@ loro-protocol = "0.3"
 # stopped vending CABackdropLayer for Selection — window blur went dead);
 # b68970e rasterizes BackdropBlur in the wgpu renderer (frosted floats on
 # Linux — the Metal path's snapshot/blur/composite, ported).
-gpui = { git = "https://github.com/zeronsh/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
-gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d", features = [
+gpui = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+gpui_platform = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+gpui_tokio = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
 # Keep gpui-base and the app on the same Zui revision to share GPUI types.
-gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "3a8c45875c79648242e42b8c87c80c473d366473" }
+gpui-base = { git = "https://github.com/wasimysaid/gpui-component", rev = "3a8c45875c79648242e42b8c87c80c473d366473" }
 
 # diffs
 similar = "2"
@@ -138,3 +138,21 @@ opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# gpui-base still sources its GPUI crates from zeronsh/zui. Redirect every
+# crate that resolves through that URL to our wasimysaid/zui fork (same
+# revision) so the graph builds exactly one GPUI copy.
+[patch."https://github.com/zeronsh/zui"]
+collections = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+derive_refineable = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+gpui = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+gpui_macros = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+gpui_shared_string = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+gpui_util = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+http_client = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+media = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+perf = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+refineable = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+scheduler = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+sum_tree = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }
+util_macros = { git = "https://github.com/wasimysaid/zui", rev = "3151ad1dbd9187bf47e716d4735d811f1055ed1d" }

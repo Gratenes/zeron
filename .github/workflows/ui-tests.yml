@@ -66,7 +66,7 @@ jobs:
         run: |
           rev=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["dependencies"]["gpui"]["rev"])')
           git init frame-source-tests
-          git -C frame-source-tests remote add origin https://github.com/zeronsh/zui
+          git -C frame-source-tests remote add origin https://github.com/wasimysaid/zui
           git -C frame-source-tests fetch --depth=1 origin "$rev"
           git -C frame-source-tests checkout --detach FETCH_HEAD
       - uses: Swatinem/rust-cache@v2
