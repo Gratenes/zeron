@@ -1103,6 +1103,21 @@ mod tests {
     }
 
     #[test]
+    fn common_upload_sizes_use_consecutive_relay_safe_chunks() {
+        for (bytes, expected_chunks) in [(200usize * 1024, 1), (1024 * 1024, 3)] {
+            let b64_len = bytes.div_ceil(3) * 4;
+            let ranges = chunk_ranges(b64_len);
+            assert_eq!(ranges.len(), expected_chunks, "{bytes} byte upload");
+            assert!(
+                ranges
+                    .iter()
+                    .all(|(_, range)| range.len() <= UPLOAD_CHUNK_B64_CHARS)
+            );
+            assert_eq!(ranges.last().unwrap().1.end, b64_len);
+        }
+    }
+
+    #[test]
     fn chunk_ranges_cover_the_buffer_exactly() {
         // Empty file: one empty chunk (the commit needs the id staged).
         assert_eq!(chunk_ranges(0), vec![(0, 0..0)]);

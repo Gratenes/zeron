@@ -50,7 +50,30 @@ const CHANNEL_CAPACITY: usize = 2;
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 const MAX_QUEUE: usize = 128;
 const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
-const MAX_BUFFERED: u32 = 256 * 1024;
+/// WebSocket high-water mark; a single relay frame may exceed it.
+pub(crate) const MAX_BUFFERED: u32 = 256 * 1024;
+/// Cloudflare's per-WebSocket-message ceiling for encoded relay frames.
+pub(crate) const MAX_OUTBOUND_FRAME: usize = 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutboundFramePolicy {
+    Send,
+    Wait,
+    Reject,
+}
+
+/// Decide whether an encoded relay frame can be sent at the current browser
+/// WebSocket buffer level. A frame is allowed to exceed the high-water mark by
+/// itself; only the existing buffered amount controls draining.
+pub(crate) fn outbound_frame_policy(buffered: u32, frame_len: usize) -> OutboundFramePolicy {
+    if frame_len > MAX_OUTBOUND_FRAME {
+        OutboundFramePolicy::Reject
+    } else if buffered > MAX_BUFFERED {
+        OutboundFramePolicy::Wait
+    } else {
+        OutboundFramePolicy::Send
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SocketState {
@@ -116,7 +139,7 @@ pub(crate) fn signal(sender: &watch::Sender<Signal>, state: SocketState) {
 }
 
 pub(crate) trait SocketSink {
-    fn send(&self, text: &str) -> Result<(), ()>;
+    async fn send(&self, text: &str) -> Result<(), ()>;
 }
 
 pub(crate) async fn pump<S: SocketSink>(
@@ -160,11 +183,63 @@ pub(crate) async fn pump<S: SocketSink>(
                     continue;
                 }
                 tokio::select! {
-                    frame = outbound.recv() => match frame {
-                        Some(frame) if socket.send(&frame).is_ok() => {},
-                        Some(_) | None => break,
+                    biased;
+                    changed = signal_rx.changed() => {
+                        if changed.is_err() || signal_rx.borrow().state == SocketState::Closed {
+                            break 'pump;
+                        }
                     },
-                    changed = signal_rx.changed() => if changed.is_err() { break; },
+                    frame = outbound.recv() => match frame {
+                        Some(frame) => {
+                            // Keep this exact future while Open notifications
+                            // wake the pump. Recreating it could replay a
+                            // mutation after the browser accepted its frame.
+                            let mut send = Box::pin(socket.send(&frame));
+                            'send: loop {
+                                let has_queued = { !inbox.borrow().frames.is_empty() };
+                                if has_queued {
+                                    tokio::select! {
+                                        biased;
+                                        result = &mut send => {
+                                            if result.is_err() {
+                                                break 'pump;
+                                            }
+                                            break 'send;
+                                        },
+                                        permit = inbound.reserve() => match permit {
+                                            Ok(permit) => {
+                                                if let Some(frame) = inbox.borrow_mut().pop() {
+                                                    permit.send(frame);
+                                                }
+                                            },
+                                            Err(_) => break 'pump,
+                                        },
+                                        changed = signal_rx.changed() => {
+                                            if changed.is_err() || signal_rx.borrow().state == SocketState::Closed {
+                                                break 'pump;
+                                            }
+                                        },
+                                    }
+                                } else {
+                                    tokio::select! {
+                                        biased;
+                                        result = &mut send => {
+                                            if result.is_err() {
+                                                break 'pump;
+                                            }
+                                            break 'send;
+                                        },
+                                        changed = signal_rx.changed() => {
+                                            if changed.is_err() || signal_rx.borrow().state == SocketState::Closed {
+                                                break 'pump;
+                                            }
+                                        },
+                                    }
+                                }
+                            }
+                        }
+                        None => break 'pump,
+                    },
                 }
             }
         }
@@ -195,11 +270,11 @@ mod browser {
     };
 
     use super::{
-        CHANNEL_CAPACITY, Inbox, MAX_BUFFERED, MAX_FRAME, Signal, SocketSink, SocketState, pump,
-        signal,
+        CHANNEL_CAPACITY, Inbox, MAX_FRAME, Signal, SocketSink, SocketState, pump, signal,
     };
 
     const HANDSHAKE_TIMEOUT_MS: i32 = 30_000;
+    const BUFFER_POLL_MS: i32 = 16;
 
     #[derive(Default)]
     struct Liveness {
@@ -308,28 +383,22 @@ mod browser {
     }
 
     impl SocketSink for BrowserSocket {
-        fn send(&self, text: &str) -> Result<(), ()> {
-            if self.socket.ready_state() != WebSocket::OPEN
-                || self
-                    .socket
-                    .buffered_amount()
-                    .saturating_add(text.len() as u32)
-                    > MAX_BUFFERED
-            {
-                return Err(());
-            }
+        async fn send(&self, text: &str) -> Result<(), ()> {
             let frame =
                 encode_device_frame(&DeviceFrameHeader::new(RPC_KIND, RPC_KIND), text.as_bytes())
                     .map_err(|_| ())?;
-            if self
-                .socket
-                .buffered_amount()
-                .saturating_add(frame.len() as u32)
-                > MAX_BUFFERED
-            {
-                return Err(());
+            loop {
+                if self.socket.ready_state() != WebSocket::OPEN {
+                    return Err(());
+                }
+                match super::outbound_frame_policy(self.socket.buffered_amount(), frame.len()) {
+                    super::OutboundFramePolicy::Send => return send_binary(&self.socket, &frame),
+                    super::OutboundFramePolicy::Wait => {
+                        BrowserTimeout::new(BUFFER_POLL_MS).map_err(|_| ())?.await;
+                    }
+                    super::OutboundFramePolicy::Reject => return Err(()),
+                }
             }
-            send_binary(&self.socket, &frame)
         }
     }
 
