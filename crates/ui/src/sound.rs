@@ -68,6 +68,7 @@ fn run_player(path: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn run_player(path: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
     // SoundPlayer handles WAV natively; PlaySync keeps the process alive for
     // the chime's duration.
     let script = format!(
@@ -82,6 +83,7 @@ fn run_player(path: &Path) -> Result<(), String> {
             "-Command",
             &script,
         ])
+        .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("powershell failed: {e}"))?;
     if output.status.success() {
