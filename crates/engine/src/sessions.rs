@@ -2128,6 +2128,24 @@ async fn drive_run(
                     Err(error) => tracing::warn!(%error, "public child doc open failed"),
                 }
             }
+            if snapshot.is_none()
+                && !matches!(child.status.as_str(), "running" | "queued")
+                && let Some(doc_id) = child_doc.as_deref()
+                && let Some(host) = inner.doc_host()
+            {
+                match host.open(doc_id) {
+                    Ok(handle) => {
+                        if let Err(error) = handle
+                            .doc()
+                            .set_message_status("public-child", MessageStatus::Complete)
+                        {
+                            tracing::warn!(%error, "public child settlement failed");
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "public child doc open failed"),
+                }
+            }
+
             if let Some(id) = &child.tool_call_id {
                 for part in &mut folded {
                     link_child_part(part, child, child_doc.as_deref());

@@ -11,12 +11,12 @@ use std::{
     },
     time::Duration,
 };
-use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload};
+use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionCommandPayload, SubagentStatus};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{AcpHarness, Harness, HarnessError, RunControls};
 use zeron_proto::{
-    AgentEvent, ChatConfig, DoneStatus, GoalPhase, HarnessId, Model, ReasoningLevel, RunRequest,
-    SandboxLevel, SessionStatus, SteeringMode,
+    AgentChild, AgentEvent, ChatConfig, ChildTranscript, DoneStatus, GoalPhase, HarnessId, Model,
+    ReasoningLevel, RunRequest, SandboxLevel, SessionStatus, SteeringMode, ToolCall,
 };
 const CHAT: &str = "native-goal";
 
@@ -187,6 +187,177 @@ impl Harness for LifecycleMimir {
         });
         Ok(futures::stream::iter(initial).chain(tail).boxed())
     }
+}
+
+struct StatusOnlyChildMimir {
+    terminal_snapshot: Arc<tokio::sync::Notify>,
+}
+
+impl StatusOnlyChildMimir {
+    fn child(status: &str) -> AgentChild {
+        AgentChild {
+            child_id: "status-child".into(),
+            tool_call_id: Some("launch-1".into()),
+            title: "Inspect files".into(),
+            agent: "explore".into(),
+            status: status.into(),
+            transcript: true,
+        }
+    }
+
+    fn snapshot(revision: &str, text: &str) -> ChildTranscript {
+        ChildTranscript {
+            revision: revision.into(),
+            events: vec![AgentEvent::TextDelta { text: text.into() }],
+            omitted_updates: 0,
+        }
+    }
+}
+
+#[async_trait]
+impl Harness for StatusOnlyChildMimir {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mimir
+    }
+
+    fn display_name(&self) -> &str {
+        "Mimir status-only child fixture"
+    }
+
+    fn supports_steering(&self) -> bool {
+        false
+    }
+
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(Vec::new())
+    }
+
+    async fn run(
+        &self,
+        request: RunRequest,
+        _controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let initial = vec![
+            Ok(AgentEvent::SessionStarted {
+                harness: HarnessId::Mimir,
+                model: "fixture".into(),
+                tools: Vec::new(),
+                cwd: request.cwd,
+                session_id: "status-only-child".into(),
+                assistant_message_id: "assistant-status-only".into(),
+            }),
+            Ok(AgentEvent::ToolCall {
+                id: "launch-1".into(),
+                call: ToolCall::Unknown {
+                    name: "Agent: Inspect files".into(),
+                    input: None,
+                },
+            }),
+            Ok(AgentEvent::SubagentView {
+                child: Self::child("running"),
+                snapshot: Some(Self::snapshot("running", "RUNNING_PUBLIC_CHILD")),
+            }),
+            Ok(AgentEvent::SubagentView {
+                child: Self::child("completed"),
+                snapshot: None,
+            }),
+        ];
+        let notify = self.terminal_snapshot.clone();
+        let terminal = futures::stream::once(async move {
+            notify.notified().await;
+            Ok(AgentEvent::SubagentView {
+                child: Self::child("completed"),
+                snapshot: Some(Self::snapshot("completed", "FINAL_PUBLIC_CHILD")),
+            })
+        });
+        let done = futures::stream::once(async {
+            Ok(AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: Some("status-only-child".into()),
+            })
+        });
+        Ok(futures::stream::iter(initial)
+            .chain(terminal)
+            .chain(done)
+            .boxed())
+    }
+}
+
+#[tokio::test]
+async fn terminal_status_only_settles_existing_public_child_until_final_snapshot_arrives() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new();
+    let terminal_snapshot = Arc::new(tokio::sync::Notify::new());
+    registry.register(Arc::new(StatusOnlyChildMimir {
+        terminal_snapshot: terminal_snapshot.clone(),
+    }));
+    let core =
+        EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mimir, None).unwrap();
+    create(&core, dir.path());
+
+    core.sessions
+        .dispatch(
+            CHAT,
+            HarnessId::Mimir,
+            request(dir.path(), "status-only child"),
+            None,
+        )
+        .await
+        .unwrap();
+    wait(|| {
+        core.doc_host
+            .open(CHAT)
+            .unwrap()
+            .doc()
+            .read_entries()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| &entry.parts)
+            .any(|part| {
+                matches!(part,
+                    MessagePart::Tool { id, subagent_status: Some(SubagentStatus::Done), .. }
+                        if id == "launch-1"
+                )
+            })
+    })
+    .await;
+
+    let child = child_ref(&core).expect("running snapshot linked a public child doc");
+    let entries = core
+        .doc_host
+        .open(&child)
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "public-child");
+    assert_eq!(entries[0].status, Some(MessageStatus::Complete));
+    assert_eq!(text(&core, &child), "RUNNING_PUBLIC_CHILD");
+
+    terminal_snapshot.notify_one();
+    wait(|| text(&core, &child) == "FINAL_PUBLIC_CHILD").await;
+    let entries = core
+        .doc_host
+        .open(&child)
+        .unwrap()
+        .doc()
+        .read_entries()
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].status, Some(MessageStatus::Complete));
+    assert_eq!(text(&core, &child), "FINAL_PUBLIC_CHILD");
+    core.shutdown().await;
 }
 
 #[tokio::test]
