@@ -16,10 +16,10 @@ use std::time::Duration;
 
 use chrono::Utc;
 use gpui::{
-    Action, AnyElement, App, ClipboardItem, Context, Empty, Entity, FocusHandle, Focusable as _,
-    IntoElement, KeyBinding, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseUpEvent, Pixels, Point, Render, SharedString, Subscription, Task, Window,
-    WindowControlArea, actions, div, prelude::*, px,
+    Action, AnyElement, App, ClipboardItem, Context, CursorStyle, Decorations, Empty, Entity,
+    FocusHandle, Focusable as _, IntoElement, KeyBinding, Keystroke, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseUpEvent, Pixels, Point, Render, ResizeEdge, SharedString,
+    Subscription, Task, Tiling, Window, WindowControlArea, actions, div, prelude::*, px,
 };
 
 use gpui_tokio::Tokio;
@@ -173,6 +173,181 @@ impl SidebarDisclosureMotion {
 const PANE_RESIZE_HITBOX_HALF_WIDTH: f32 = 6.0;
 const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
 
+/// Narrow outer-frame targets preserve app content while still providing the
+/// native compositor resize affordance expected from client decorations.
+const WINDOW_RESIZE_EDGE_HIT_SIZE: f32 = 4.0;
+const WINDOW_RESIZE_CORNER_HIT_SIZE: f32 = 10.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowResizeLayout {
+    Top,
+    Right,
+    Bottom,
+    Left,
+    TopLeft,
+    TopRight,
+    BottomRight,
+    BottomLeft,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowResizeZone {
+    edge: ResizeEdge,
+    id: &'static str,
+    cursor: CursorStyle,
+    layout: WindowResizeLayout,
+}
+
+const fn resize_zone(
+    edge: ResizeEdge,
+    id: &'static str,
+    cursor: CursorStyle,
+    layout: WindowResizeLayout,
+) -> WindowResizeZone {
+    WindowResizeZone {
+        edge,
+        id,
+        cursor,
+        layout,
+    }
+}
+
+/// Straight edges paint first; larger corners paint last and win overlap hit-testing.
+const WINDOW_RESIZE_ZONES: [WindowResizeZone; 8] = [
+    resize_zone(
+        ResizeEdge::Top,
+        "window-resize-top",
+        CursorStyle::ResizeUpDown,
+        WindowResizeLayout::Top,
+    ),
+    resize_zone(
+        ResizeEdge::Right,
+        "window-resize-right",
+        CursorStyle::ResizeLeftRight,
+        WindowResizeLayout::Right,
+    ),
+    resize_zone(
+        ResizeEdge::Bottom,
+        "window-resize-bottom",
+        CursorStyle::ResizeUpDown,
+        WindowResizeLayout::Bottom,
+    ),
+    resize_zone(
+        ResizeEdge::Left,
+        "window-resize-left",
+        CursorStyle::ResizeLeftRight,
+        WindowResizeLayout::Left,
+    ),
+    resize_zone(
+        ResizeEdge::TopLeft,
+        "window-resize-top-left",
+        CursorStyle::ResizeUpLeftDownRight,
+        WindowResizeLayout::TopLeft,
+    ),
+    resize_zone(
+        ResizeEdge::TopRight,
+        "window-resize-top-right",
+        CursorStyle::ResizeUpRightDownLeft,
+        WindowResizeLayout::TopRight,
+    ),
+    resize_zone(
+        ResizeEdge::BottomRight,
+        "window-resize-bottom-right",
+        CursorStyle::ResizeUpLeftDownRight,
+        WindowResizeLayout::BottomRight,
+    ),
+    resize_zone(
+        ResizeEdge::BottomLeft,
+        "window-resize-bottom-left",
+        CursorStyle::ResizeUpRightDownLeft,
+        WindowResizeLayout::BottomLeft,
+    ),
+];
+
+#[derive(Debug, Clone, Copy)]
+struct WindowResizePolicy {
+    client_decorations: bool,
+    resizable: bool,
+    maximized: bool,
+    fullscreen: bool,
+    tiling: Tiling,
+}
+
+impl WindowResizePolicy {
+    fn allows(self, edge: ResizeEdge) -> bool {
+        if !self.client_decorations || !self.resizable || self.maximized || self.fullscreen {
+            return false;
+        }
+        match edge {
+            ResizeEdge::Top => !self.tiling.top,
+            ResizeEdge::TopRight => !self.tiling.top && !self.tiling.right,
+            ResizeEdge::Right => !self.tiling.right,
+            ResizeEdge::BottomRight => !self.tiling.bottom && !self.tiling.right,
+            ResizeEdge::Bottom => !self.tiling.bottom,
+            ResizeEdge::BottomLeft => !self.tiling.bottom && !self.tiling.left,
+            ResizeEdge::Left => !self.tiling.left,
+            ResizeEdge::TopLeft => !self.tiling.top && !self.tiling.left,
+        }
+    }
+}
+
+fn window_resize_zones(policy: WindowResizePolicy) -> impl Iterator<Item = WindowResizeZone> {
+    WINDOW_RESIZE_ZONES
+        .into_iter()
+        .filter(move |zone| policy.allows(zone.edge))
+}
+
+fn window_resize_zone(zone: WindowResizeZone) -> AnyElement {
+    let element = div()
+        .id(zone.id)
+        .absolute()
+        .cursor(zone.cursor)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            window.prevent_default();
+            window.start_window_resize(zone.edge);
+        });
+
+    match zone.layout {
+        WindowResizeLayout::Top => element
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(WINDOW_RESIZE_EDGE_HIT_SIZE)),
+        WindowResizeLayout::Right => element
+            .top_0()
+            .right_0()
+            .bottom_0()
+            .w(px(WINDOW_RESIZE_EDGE_HIT_SIZE)),
+        WindowResizeLayout::Bottom => element
+            .right_0()
+            .bottom_0()
+            .left_0()
+            .h(px(WINDOW_RESIZE_EDGE_HIT_SIZE)),
+        WindowResizeLayout::Left => element
+            .top_0()
+            .bottom_0()
+            .left_0()
+            .w(px(WINDOW_RESIZE_EDGE_HIT_SIZE)),
+        WindowResizeLayout::TopLeft => element
+            .top_0()
+            .left_0()
+            .size(px(WINDOW_RESIZE_CORNER_HIT_SIZE)),
+        WindowResizeLayout::TopRight => element
+            .top_0()
+            .right_0()
+            .size(px(WINDOW_RESIZE_CORNER_HIT_SIZE)),
+        WindowResizeLayout::BottomRight => element
+            .right_0()
+            .bottom_0()
+            .size(px(WINDOW_RESIZE_CORNER_HIT_SIZE)),
+        WindowResizeLayout::BottomLeft => element
+            .bottom_0()
+            .left_0()
+            .size(px(WINDOW_RESIZE_CORNER_HIT_SIZE)),
+    }
+    .into_any_element()
+}
 fn stable_panel_content_width(target: f32, transition: Option<(f32, f32)>) -> f32 {
     transition.map(|(from, to)| from.max(to)).unwrap_or(target)
 }
@@ -4361,6 +4536,39 @@ impl Shell {
             })
     }
 
+    /// Transparent root-level resize targets for Linux client decorations. Each
+    /// target immediately delegates the press to the compositor; Kratos never
+    /// changes window bounds while dragging.
+    fn render_window_resize_overlays(&self, window: &Window) -> Option<AnyElement> {
+        if !cfg!(target_os = "linux") {
+            return None;
+        }
+        let (client_decorations, tiling) = match window.window_decorations() {
+            Decorations::Server => (false, Tiling::default()),
+            Decorations::Client { tiling } => (true, tiling),
+        };
+        let policy = WindowResizePolicy {
+            client_decorations,
+            resizable: crate::MAIN_WINDOW_RESIZABLE,
+            maximized: window.is_maximized(),
+            fullscreen: window.is_fullscreen(),
+            tiling,
+        };
+        let zones = window_resize_zones(policy)
+            .map(window_resize_zone)
+            .collect::<Vec<_>>();
+        (!zones.is_empty()).then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .left_0()
+                .children(zones)
+                .into_any_element()
+        })
+    }
+
     /// The ONE top-left window-control cluster (sidebar toggle + back/forward —
     /// zeron window-controls.tsx): rendered once, in a paint-only overlay layer
     /// pinned at the window's top-left, ABOVE the sidebar and headers. The
@@ -7020,7 +7228,8 @@ impl Shell {
         };
         let indicator = state.indicator_for(&chat_id, now);
         let strip = strip.children(
-            state.session_for(&chat_id)
+            state
+                .session_for(&chat_id)
                 .and_then(|session| session.goal.as_ref())
                 .and_then(|goal| crate::goal::render(goal, &theme)),
         );
@@ -9100,7 +9309,8 @@ impl Render for Shell {
         };
         let root = root
             .children(self.render_windows_caption_controls(window, cx))
-            .children(self.render_linux_caption_controls(window, cx));
+            .children(self.render_linux_caption_controls(window, cx))
+            .children(self.render_window_resize_overlays(window));
         self.render_time = None;
         root
     }
@@ -9667,6 +9877,179 @@ mod tests {
             TITLEBAR_CLUSTER_PAD + titlebar_spacer_width(true, false, TITLEBAR_CLUSTER_PAD),
             titlebar_cluster_start(false),
             "the rendered row padding and spacer must land on the declared cluster start"
+        );
+    }
+
+    fn free_window_resize_policy() -> WindowResizePolicy {
+        WindowResizePolicy {
+            client_decorations: true,
+            resizable: true,
+            maximized: false,
+            fullscreen: false,
+            tiling: Tiling::default(),
+        }
+    }
+
+    fn resize_edges(policy: WindowResizePolicy) -> Vec<ResizeEdge> {
+        window_resize_zones(policy).map(|zone| zone.edge).collect()
+    }
+
+    #[test]
+    fn window_resize_descriptors_match_native_edges_cursors_and_layouts() {
+        let zones = window_resize_zones(free_window_resize_policy()).collect::<Vec<_>>();
+        assert_eq!(zones.len(), 8);
+        assert_eq!(
+            zones.iter().map(|zone| zone.edge).collect::<Vec<_>>(),
+            vec![
+                ResizeEdge::Top,
+                ResizeEdge::Right,
+                ResizeEdge::Bottom,
+                ResizeEdge::Left,
+                ResizeEdge::TopLeft,
+                ResizeEdge::TopRight,
+                ResizeEdge::BottomRight,
+                ResizeEdge::BottomLeft
+            ]
+        );
+        assert_eq!(
+            zones.iter().map(|zone| zone.id).collect::<Vec<_>>(),
+            vec![
+                "window-resize-top",
+                "window-resize-right",
+                "window-resize-bottom",
+                "window-resize-left",
+                "window-resize-top-left",
+                "window-resize-top-right",
+                "window-resize-bottom-right",
+                "window-resize-bottom-left"
+            ]
+        );
+        assert_eq!(
+            zones.iter().map(|zone| zone.cursor).collect::<Vec<_>>(),
+            vec![
+                CursorStyle::ResizeUpDown,
+                CursorStyle::ResizeLeftRight,
+                CursorStyle::ResizeUpDown,
+                CursorStyle::ResizeLeftRight,
+                CursorStyle::ResizeUpLeftDownRight,
+                CursorStyle::ResizeUpRightDownLeft,
+                CursorStyle::ResizeUpLeftDownRight,
+                CursorStyle::ResizeUpRightDownLeft
+            ]
+        );
+        assert_eq!(
+            zones.iter().map(|zone| zone.layout).collect::<Vec<_>>(),
+            vec![
+                WindowResizeLayout::Top,
+                WindowResizeLayout::Right,
+                WindowResizeLayout::Bottom,
+                WindowResizeLayout::Left,
+                WindowResizeLayout::TopLeft,
+                WindowResizeLayout::TopRight,
+                WindowResizeLayout::BottomRight,
+                WindowResizeLayout::BottomLeft
+            ]
+        );
+        assert_eq!(
+            (WINDOW_RESIZE_EDGE_HIT_SIZE, WINDOW_RESIZE_CORNER_HIT_SIZE),
+            (4.0, 10.0)
+        );
+    }
+
+    #[test]
+    fn window_resize_zones_exclude_ineligible_and_tiled_edges() {
+        let free = free_window_resize_policy();
+        for policy in [
+            WindowResizePolicy {
+                client_decorations: false,
+                ..free
+            },
+            WindowResizePolicy {
+                resizable: false,
+                ..free
+            },
+            WindowResizePolicy {
+                maximized: true,
+                ..free
+            },
+            WindowResizePolicy {
+                fullscreen: true,
+                ..free
+            },
+        ] {
+            assert!(resize_edges(policy).is_empty());
+        }
+
+        assert_eq!(
+            resize_edges(WindowResizePolicy {
+                tiling: Tiling {
+                    top: true,
+                    ..Default::default()
+                },
+                ..free
+            }),
+            vec![
+                ResizeEdge::Right,
+                ResizeEdge::Bottom,
+                ResizeEdge::Left,
+                ResizeEdge::BottomRight,
+                ResizeEdge::BottomLeft
+            ]
+        );
+        assert_eq!(
+            resize_edges(WindowResizePolicy {
+                tiling: Tiling {
+                    right: true,
+                    ..Default::default()
+                },
+                ..free
+            }),
+            vec![
+                ResizeEdge::Top,
+                ResizeEdge::Bottom,
+                ResizeEdge::Left,
+                ResizeEdge::TopLeft,
+                ResizeEdge::BottomLeft
+            ]
+        );
+        assert_eq!(
+            resize_edges(WindowResizePolicy {
+                tiling: Tiling {
+                    bottom: true,
+                    ..Default::default()
+                },
+                ..free
+            }),
+            vec![
+                ResizeEdge::Top,
+                ResizeEdge::Right,
+                ResizeEdge::Left,
+                ResizeEdge::TopLeft,
+                ResizeEdge::TopRight
+            ]
+        );
+        assert_eq!(
+            resize_edges(WindowResizePolicy {
+                tiling: Tiling {
+                    left: true,
+                    ..Default::default()
+                },
+                ..free
+            }),
+            vec![
+                ResizeEdge::Top,
+                ResizeEdge::Right,
+                ResizeEdge::Bottom,
+                ResizeEdge::TopRight,
+                ResizeEdge::BottomRight
+            ]
+        );
+        assert!(
+            resize_edges(WindowResizePolicy {
+                tiling: Tiling::tiled(),
+                ..free
+            })
+            .is_empty()
         );
     }
 
