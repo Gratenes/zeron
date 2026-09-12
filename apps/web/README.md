@@ -54,11 +54,20 @@ Remote project preview is separate from Trunk serving the web bundle. `edge/src/
 
 ## Edge configuration for authenticated integration
 
-The public browser BFF is fail-closed unless the worker has these non-secret values: `AUTH_MODE=workos`, `WORKOS_CLIENT_ID`, exact `WORKOS_BROWSER_ORIGIN`, `WORKOS_BROWSER_OWNER_SUBJECT`, `WORKOS_ISSUER`, and `WORKOS_JWKS_URL`. Register `<WORKOS_BROWSER_ORIGIN>/api/browser/callback` as the WorkOS redirect URI. The owner subject must match the authenticated WorkOS `sub` accepted by this browser deployment.
+The public browser BFF is fail-closed unless the worker has these non-secret values: `AUTH_MODE=workos`, `WORKOS_CLIENT_ID`, exact `WORKOS_BROWSER_ORIGIN`, `WORKOS_ISSUER`, and `WORKOS_JWKS_URL`. Register `<WORKOS_BROWSER_ORIGIN>/api/browser/callback` as the WorkOS redirect URI. Multiple users can authenticate through this WorkOS application; each user's sessions and devices remain scoped to their verified WorkOS `sub`. WorkOS signup/invitation policies still apply.
 
 Set these as Wrangler secrets, never in this README or browser code: `WORKOS_API_KEY` (WorkOS exchange/revocation) and `BROWSER_SESSION_KEY` (browser session credential-encryption key). Public browser routes also need the `BROWSER_SESSIONS` and `DEVICE_ROOMS` Durable Object bindings. For remote project preview, configure `BROWSER_PREVIEW_ORIGIN` as a dedicated HTTPS origin (the current config uses `https://preview.edge.zeron.sh`) with wildcard routing for ticketed preview hosts, and provision `PREVIEW_ROOMS`.
 
 For loopback worker tests only, `AUTH_MODE=dev` requires a loopback `BROWSER_DEV_ORIGIN`, `BROWSER_DEV_OWNER_SUBJECT`, and `BROWSER_SESSION_KEY`; optional `BROWSER_DEV_ORGANIZATION_ID` and trusted-proxy `BROWSER_DEV_PROXY_KEY` are also supported. Never use dev mode in a deployed integration. The separate private `/auth/browser/*` broker routes additionally use `BROWSER_BROKER_TOKEN`; the public web BFF does not send that token.
+
+## Production deployment
+
+See [the production rollout checklist](../../docs/web-production-rollout.md) for
+`web.zeron.sh`, WorkOS prerequisites and the existing edge deployment workflow.
+The production Worker keeps its existing device/session storage; PR validation
+builds and packages it without deploying. [Staging](../../docs/web-staging-deployment.md)
+remains a separate, manually deployed verification target.
+
 
 ## Runtime-first landing and final pin
 

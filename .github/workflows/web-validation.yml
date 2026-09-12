@@ -4,32 +4,28 @@ on:
   pull_request:
     paths:
       - 'apps/web/**'
-      - 'crates/ui/**'
-      - 'crates/proto/**'
-      - 'crates/rpc/**'
-      - 'crates/doc/**'
-      - 'crates/syntax/**'
-      - 'crates/theme/**'
-      - 'vendor/alacritty_terminal/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - '.cargo/**'
       - 'edge/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'rust-toolchain'
+      - '.github/workflows/deploy.yml'
       - '.github/workflows/web-validation.yml'
   push:
     paths:
       - 'apps/web/**'
-      - 'crates/ui/**'
-      - 'crates/proto/**'
-      - 'crates/rpc/**'
-      - 'crates/doc/**'
-      - 'crates/syntax/**'
-      - 'crates/theme/**'
-      - 'vendor/alacritty_terminal/**'
+      - 'crates/**'
+      - 'vendor/**'
+      - '.cargo/**'
       - 'edge/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'rust-toolchain'
+      - '.github/workflows/deploy.yml'
       - '.github/workflows/web-validation.yml'
   workflow_dispatch:
 
@@ -65,8 +61,32 @@ jobs:
           RUSTUP_TOOLCHAIN: nightly-2026-09-08
           CARGO_BUILD_JOBS: 2
         run: env -u NO_COLOR trunk build --release --locked
-      - name: Check generated entry point
-        run: test -s apps/web/dist/index.html
+      - name: Check web assets
+        run: |
+          test -s apps/web/dist/index.html
+          cmp apps/web/_headers apps/web/dist/_headers
+          find apps/web/dist -name '*.wasm' -size +0c | grep .
+          oversized=$(find apps/web/dist -type f -size +26214400c)
+          if [ -n "$oversized" ]; then
+            printf 'Assets exceed the 25 MiB limit:\n%s\n' "$oversized"
+            exit 1
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: edge/package-lock.json
+      - name: Install edge packaging tools
+        working-directory: edge
+        run: npm ci
+      # Uses the production config without credentials or remote mutations.
+      - name: Package production Worker and web assets (dry run)
+        working-directory: edge
+        run: npx wrangler deploy --config wrangler.jsonc --dry-run --outdir dist
+      - name: Local production routing integration
+        working-directory: edge
+        timeout-minutes: 5
+        run: node scripts/production-routing.mjs
 
   lifecycle:
     name: Browser lifecycle tests
@@ -102,4 +122,4 @@ jobs:
       - name: Unit auth and frame tests
         run: npm run test:unit -- src/browser-auth.test.ts src/browser-routes.test.ts src/device-frame.test.ts
       - name: Workerd session and DeviceRoom tests
-        run: npm run test:workerd -- test/workerd/browser-discovery.workerd.test.ts test/workerd/browser-sessions.workerd.test.ts test/workerd/device-browser.workerd.test.ts
+        run: npm run test:workerd -- test/workerd/browser-discovery.workerd.test.ts test/workerd/browser-sessions.workerd.test.ts test/workerd/device-browser.workerd.test.ts test/workerd/browser-multi-user.workerd.test.ts

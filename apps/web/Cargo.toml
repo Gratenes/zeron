@@ -9,6 +9,10 @@ publish = false
 [profile.dev]
 debug = 0
 
+# Omit debug/name sections so the WASM fits Cloudflare's 25 MiB asset limit.
+[profile.release]
+strip = "symbols"
+
 [dependencies]
 zeron-ui = { path = "../../crates/ui" }
 zeron-proto = { path = "../../crates/proto" }

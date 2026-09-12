@@ -26,7 +26,6 @@ export interface Env {
   WORKOS_API_KEY?: string;
   /** Browser BFF deployment inputs; unset makes only browser auth unavailable. */
   WORKOS_BROWSER_ORIGIN?: string;
-  WORKOS_BROWSER_OWNER_SUBJECT?: string;
   /** Dedicated secret used to encrypt recoverable provider refresh credentials. */
   BROWSER_SESSION_KEY?: string;
 

@@ -26,7 +26,7 @@ import {
 const PKCE = /^[A-Za-z0-9._~-]{43,128}$/;
 const noStore = { "cache-control": "no-store", "content-type": "application/json" };
 const json = (value: unknown, status = 200, headers?: HeadersInit) => new Response(JSON.stringify(value), { status, headers: { ...noStore, ...headers } });
-const configured = (env: Env): env is Env & { WORKOS_API_KEY: string; WORKOS_BROWSER_ORIGIN: string; WORKOS_BROWSER_OWNER_SUBJECT: string; BROWSER_SESSION_KEY: string; WORKOS_ISSUER: string; WORKOS_JWKS_URL: string } => Boolean(env.WORKOS_API_KEY && env.WORKOS_BROWSER_ORIGIN && env.WORKOS_BROWSER_OWNER_SUBJECT && env.BROWSER_SESSION_KEY && env.WORKOS_ISSUER && env.WORKOS_JWKS_URL);
+const configured = (env: Env): env is Env & { WORKOS_API_KEY: string; WORKOS_BROWSER_ORIGIN: string; BROWSER_SESSION_KEY: string; WORKOS_ISSUER: string; WORKOS_JWKS_URL: string } => Boolean(env.WORKOS_API_KEY && env.WORKOS_BROWSER_ORIGIN && env.BROWSER_SESSION_KEY && env.WORKOS_ISSUER && env.WORKOS_JWKS_URL);
 
 const loopback = (url: URL): boolean => url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname.endsWith(".localhost") || url.hostname === "[::1]";
 const devOrigin = (env: Env): string | undefined => {
@@ -127,7 +127,7 @@ export const handleBrowserRoute = async (request: Request, env: Env, url: URL): 
     try {
       const result = await exchangeWithVerifier(env, env.WORKOS_API_KEY, code[0]!, consumed.verifier);
       const verified = await verifyBrowserToken(env, result.accessToken);
-      if (!verified?.sessionId || !verified.expiresAt || result.user.id !== verified.userId || verified.userId !== env.WORKOS_BROWSER_OWNER_SUBJECT) return json({ error: "forbidden" }, 403);
+      if (!verified?.sessionId || !verified.expiresAt || result.user.id !== verified.userId) return json({ error: "forbidden" }, 403);
       const raw = token();
       const csrf = token();
       const created = await createBrowserSession(env, {
