@@ -139,8 +139,13 @@ impl TitleGenerator {
             }
         }
 
-        self.inner.workspace.rename_chat(chat_id, &title)?;
-        tracing::info!(chat = %chat_id, title = %title, "chat auto-titled");
+        if self
+            .inner
+            .workspace
+            .title_chat_if_untitled(chat_id, &title)?
+        {
+            tracing::info!(chat = %chat_id, title = %title, "chat auto-titled");
+        }
         Ok(())
     }
 
@@ -246,7 +251,7 @@ fn cheapest_model(models: &[Model]) -> Option<String> {
 }
 
 /// First line, stripped of quote/heading dressing, capped at 60 chars.
-fn clean_title(raw: &str) -> String {
+pub(crate) fn clean_title(raw: &str) -> String {
     let first = raw.trim().lines().next().unwrap_or("");
     first
         .trim_start_matches(['"', '\'', '#', ' ', '\t'])

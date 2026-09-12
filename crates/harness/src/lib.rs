@@ -91,6 +91,19 @@ pub trait Harness: Send + Sync {
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
         Ok(Vec::new())
     }
+    /// Prefer SessionTitle events to a separate title run. The engine waits
+    /// until the first completed turn before falling back for an untitled chat.
+    fn native_titles(&self) -> bool {
+        false
+    }
+
+    /// Refresh model-dependent choices for the selected row. Most catalogs
+    /// are static; ACP agents may advertise effort only after selecting a model.
+    async fn models_for_selection(&self, _model: Option<&str>) -> Result<Vec<Model>, HarnessError> {
+        self.models().await
+    }
+
+
     /// Run an isolated title request. Drivers must opt in with title-specific
     /// instructions and restrictions; never fall back to an ordinary coding run.
     async fn run_title(

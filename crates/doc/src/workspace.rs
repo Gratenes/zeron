@@ -472,6 +472,16 @@ impl WorkspaceDoc {
             "lastCompletedTurn",
             session.last_completed_turn.as_deref(),
         )?;
+        if let Some(goal) = &session.goal {
+            row.insert(
+                "goal",
+                crate::schema::loro_value_from_json(
+                    &serde_json::to_value(goal).map_err(|e| DocError::Schema(e.to_string()))?,
+                ),
+            )?;
+        } else {
+            row.delete("goal")?;
+        }
         set_opt_ms(&row, "startedAt", session.started_at)?;
         row.insert("updatedAt", session.updated_at.timestamp_millis())?;
         self.doc.commit();
@@ -744,6 +754,8 @@ impl From<RawChat> for Chat {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RawSession {
     #[serde(default)]
+    goal: Option<zeron_proto::GoalState>,
+    #[serde(default)]
     last_completed_turn: Option<String>,
     chat_id: String,
     device_id: String,
@@ -757,6 +769,7 @@ pub(crate) struct RawSession {
 impl From<RawSession> for Session {
     fn from(raw: RawSession) -> Self {
         Session {
+            goal: raw.goal,
             last_completed_turn: raw.last_completed_turn,
             chat_id: raw.chat_id,
             device_id: raw.device_id,
@@ -831,6 +844,7 @@ mod tests {
 
     fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         Session {
+            goal: None,
             last_completed_turn: None,
             chat_id: chat_id.into(),
             device_id: device_id.into(),

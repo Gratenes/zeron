@@ -26,7 +26,8 @@ pub(crate) const REASONING_LEVELS: &[ReasoningLevel] = &[
 /// effort (port of codex.ts `toEffort`).
 pub(crate) fn to_effort(reasoning: Option<ReasoningLevel>) -> Option<&'static str> {
     Some(match reasoning? {
-        ReasoningLevel::Minimal | ReasoningLevel::Low => "low",
+        // Off is not offered by this catalog; keep foreign requests at its lowest effort.
+        ReasoningLevel::Off | ReasoningLevel::Minimal | ReasoningLevel::Low => "low",
         ReasoningLevel::Medium => "medium",
         ReasoningLevel::High => "high",
         ReasoningLevel::XHigh | ReasoningLevel::Ultracode | ReasoningLevel::Ultrathink => "xhigh",
@@ -206,6 +207,13 @@ mod tests {
     #[test]
     fn effort_clamps_like_codex_ts() {
         assert_eq!(to_effort(None), None);
+        assert_eq!(to_effort(Some(ReasoningLevel::Off)), Some("low"));
+        assert!(!REASONING_LEVELS.contains(&ReasoningLevel::Off));
+        assert!(
+            static_models()
+                .iter()
+                .all(|model| !model.reasoning_levels.contains(&ReasoningLevel::Off))
+        );
         assert_eq!(to_effort(Some(ReasoningLevel::Minimal)), Some("low"));
         assert_eq!(to_effort(Some(ReasoningLevel::Ultracode)), Some("xhigh"));
         assert_eq!(to_effort(Some(ReasoningLevel::Ultrathink)), Some("xhigh"));

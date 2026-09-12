@@ -218,6 +218,8 @@ pub enum SessionStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<crate::GoalState>,
     /// Last successfully completed assistant turn. Retained while the next turn
     /// runs so coalesced status watches do not lose normal queue completions.
     /// Interrupts, failures and liveness expiry never advance this marker.

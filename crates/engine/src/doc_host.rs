@@ -3754,16 +3754,30 @@ impl DocHost {
         if !valid {
             return Err(EngineError::Other(format!("bad blob ref: {blob_ref}")));
         }
+        // The host's normalized journal is the durable local source, including
+        // offline runs. Do disk replay off the async executor; remote viewers
+        // keep using the existing authenticated sidecar endpoint below.
+        let (chat, part) = blob_ref.split_once('/').expect("validated above");
+        if let Some(sessions) = self.sessions() {
+            let chat = chat.to_owned();
+            let part = part.to_owned();
+            if let Some(output) =
+                tokio::task::spawn_blocking(move || sessions.tool_blob(&chat, &part))
+                    .await
+                    .map_err(|err| EngineError::Other(err.to_string()))??
+            {
+                return Ok(output);
+            }
+        }
+
         let Some(edge) = self.inner.config.edge.clone() else {
             return Err(EngineError::Other("offline: no edge configured".into()));
         };
         let Some(bearer) = edge.bearer().await else {
             return Err(EngineError::Other("signed out".into()));
         };
-        // `valid` above guarantees the split; re-split to encode the part
-        // segment for transport (PART_RE allows `#`, which a raw URL would
-        // truncate as a fragment — the 2026-08-10 silent-collision bug).
-        let (chat, part) = blob_ref.split_once('/').expect("validated above");
+        // Encode the part segment (PART_RE allows `#`, which a raw URL
+        // would truncate as a fragment).
         let url = format!(
             "{}/blob/{}/{}",
             edge.url.trim_end_matches('/'),
@@ -4245,6 +4259,35 @@ impl DocHost {
         }
     }
 
+    /// Latest normalized public child revision, cached for lazy full-output
+    /// reads. The existing snapshot store replaces bytes instead of appending
+    /// the entire history to a journal on each refresh.
+    pub(crate) fn store_public_transcript(
+        &self,
+        doc_id: &str,
+        snapshot: &zeron_proto::ChildTranscript,
+    ) -> Result<(), EngineError> {
+        let bytes = serde_json::to_vec(snapshot).map_err(|e| EngineError::Other(e.to_string()))?;
+        self.inner
+            .store
+            .save_snapshot(&format!("{doc_id}.public"), &bytes)
+            .map_err(|e| EngineError::Other(e.to_string()))
+    }
+
+    pub(crate) fn public_transcript(
+        &self,
+        doc_id: &str,
+    ) -> Result<Option<zeron_proto::ChildTranscript>, EngineError> {
+        self.inner
+            .store
+            .load_snapshot(&format!("{doc_id}.public"))
+            .map_err(|e| EngineError::Other(e.to_string()))?
+            .map(|bytes| {
+                serde_json::from_slice(&bytes).map_err(|e| EngineError::Other(e.to_string()))
+            })
+            .transpose()
+    }
+
     /// Put a typed prompt in front of a live agent: steer it in, or — with no
     /// live steerable run — deliver the durable command as the next turn.
     /// After an engine restart `last_request` is empty too, so rebuild the run
@@ -4335,6 +4378,7 @@ impl DocHost {
         // which is the state a question's own follow-up arrives in. An empty
         // prompt is no message to queue.
         if !sessions.turn_in_flight(chat_id)
+            || sessions.is_control_prompt(chat_id, prompt)
             || prompt.trim().is_empty()
             || sessions.steers_mid_turn(self.harness_for(chat_id))
         {

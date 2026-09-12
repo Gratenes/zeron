@@ -552,6 +552,29 @@ pub fn default_registry() -> HarnessRegistry {
         Box::new(|| zeron_harness::AcpHarness::pi().installed()),
         Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::pi()) as Arc<dyn Harness>)),
     );
+    // Mimir over ACP (`mimir acp`), with discovery deferred until first use.
+    registry.register_lazy(
+        HarnessDescriptor {
+            id: HarnessId::Mimir,
+            name: "Mimir".into(),
+            supports_steering: true,
+            steering_mode: SteeringMode::TurnBoundary,
+            reasoning_levels: vec![
+                ReasoningLevel::Off,
+                ReasoningLevel::Minimal,
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High,
+                ReasoningLevel::XHigh,
+                ReasoningLevel::Max,
+            ],
+            installed: true,
+            enabled: None,
+        },
+        Box::new(|| zeron_harness::AcpHarness::mimir().installed()),
+        Box::new(|| Ok(Arc::new(zeron_harness::AcpHarness::mimir()) as Arc<dyn Harness>)),
+    );
+
     // opencode over its NATIVE HTTP/SSE protocol (the one the opencode
     // desktop app speaks — `opencode serve` + the /global/event bus), same
     // lazy pattern: the static descriptor mirrors OpencodeHarness exactly.
@@ -655,6 +678,7 @@ mod tests {
                 HarnessId::Grok,
                 HarnessId::Hermes,
                 HarnessId::Pi,
+                HarnessId::Mimir,
                 HarnessId::Opencode
             ]
         );
@@ -723,6 +747,44 @@ mod tests {
                 ReasoningLevel::Max
             ]
         );
+    }
+
+    #[test]
+    fn mimir_descriptor_matches_lazy_harness_without_mid_turn_steering() {
+        let registry = default_registry();
+        let before = registry
+            .descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == HarnessId::Mimir)
+            .unwrap();
+        assert!(matches!(
+            registry.slots().get(&HarnessId::Mimir),
+            Some(Slot::Lazy { .. })
+        ));
+        let harness = registry.resolve(HarnessId::Mimir).unwrap();
+        assert_eq!(harness.id(), before.id);
+        assert_eq!(before.name, "Mimir");
+        assert_eq!(before.name, harness.display_name());
+        assert!(before.supports_steering);
+        assert_eq!(before.supports_steering, harness.supports_steering());
+        assert_eq!(before.steering_mode, SteeringMode::TurnBoundary);
+        assert_eq!(before.steering_mode, harness.steering_mode());
+        assert!(!before.steers_mid_turn());
+        assert_eq!(before.reasoning_levels, harness.reasoning_levels());
+        assert_eq!(before.reasoning_levels.first(), Some(&ReasoningLevel::Off));
+        assert!(
+            registry
+                .descriptors()
+                .iter()
+                .filter(|descriptor| descriptor.id != HarnessId::Mimir)
+                .all(|descriptor| !descriptor.reasoning_levels.contains(&ReasoningLevel::Off))
+        );
+        assert_eq!(before.installed, harness.installed());
+        let wire = serde_json::to_value(&before).unwrap();
+        assert_eq!(wire["id"], "mimir");
+        let decoded: HarnessDescriptor = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.id, HarnessId::Mimir);
+        assert_eq!(decoded.reasoning_levels, before.reasoning_levels);
     }
 
     /// Catalogs serialized by engines that predate the `installed`/`enabled`

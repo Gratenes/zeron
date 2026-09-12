@@ -16,7 +16,12 @@
 
 use std::borrow::Cow;
 
+use base64::Engine as _;
 use gpui::{AssetSource, Hsla, Result, SharedString, Styled as _, Svg, svg};
+
+/// Original PNG framed as an SVG alpha mask so it follows the same surface
+/// tint and glyph sizing as the other harness marks, without tracing the logo.
+pub const MIMIR_MARK: &str = "icons/mimir-mark.svg";
 
 macro_rules! icon_assets {
     ($(($const_name:ident, $path:literal)),+ $(,)?) => {
@@ -31,12 +36,18 @@ macro_rules! icon_assets {
                     $(concat!("icons/", $path, ".svg") => Some(Cow::Borrowed(
                         include_bytes!(concat!("../assets/icons/", $path, ".svg")).as_slice(),
                     )),)+
+                    MIMIR_MARK => Some(Cow::Owned(format!(
+                        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="347 347 560 560"><image width="1254" height="1254" href="data:image/png;base64,{}"/></svg>"#,
+                        base64::engine::general_purpose::STANDARD.encode(
+                            include_bytes!("../assets/icons/mimir-mark.png")
+                        ),
+                    ).into_bytes())),
                     _ => None,
                 })
             }
 
             fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-                let all = [$(concat!("icons/", $path, ".svg")),+];
+                let all = [$(concat!("icons/", $path, ".svg")),+, MIMIR_MARK];
                 Ok(all
                     .iter()
                     .filter(|p| p.starts_with(path))
@@ -283,6 +294,32 @@ mod tests {
             assert!(text.contains("<svg"), "{path} is not an svg");
             assert!(text.contains("viewBox"), "{path} lacks a viewBox");
         }
+    }
+
+    #[test]
+    fn mimir_mask_embeds_the_original_cross_platform_logo() {
+        let svg = Assets.load(MIMIR_MARK).unwrap().unwrap();
+        let svg = std::str::from_utf8(&svg).unwrap();
+        let encoded = svg
+            .split("base64,")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        assert_eq!(png, include_bytes!("../assets/icons/mimir-mark.png"));
+        assert_eq!(
+            png,
+            include_bytes!(
+                "../../../apps/ios/Zeron/Assets.xcassets/MimirMark.imageset/mimir-mark.png"
+            )
+        );
+        let image = image::load_from_memory(&png).unwrap();
+        assert_eq!((image.width(), image.height()), (1254, 1254));
+        assert!(svg.contains("viewBox=\"347 347 560 560\""));
     }
 
     #[test]

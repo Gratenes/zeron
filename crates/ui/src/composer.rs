@@ -5442,6 +5442,15 @@ impl Composer {
         if self.editing_queued.is_some() {
             return SendButtonMode::Send;
         }
+        if self
+            .pickers
+            .read(cx)
+            .resolved(cx)
+            .harness
+            .is_some_and(|harness| crate::goal::is_control(harness, self.input.read(cx).text()))
+        {
+            return SendButtonMode::Send;
+        }
         let has_text = composer_has_content(
             self.input.read(cx).text(),
             self.staged().len(),
@@ -5519,6 +5528,19 @@ impl Composer {
         // Fully-resolved model/reasoning/options — concrete values (chat config
         // or defaults), so the engine never has to guess a "default".
         let resolved = self.pickers.read(cx).resolved(cx);
+        let Some(harness) = resolved.harness else {
+            self.failure = Some("No coding agent is available.".into());
+            cx.notify();
+            return;
+        };
+        let goal_control = !is_new && crate::goal::is_control(harness, &text);
+        let queue = queue && !goal_control;
+        if goal_control && (!self.staged().is_empty() || !self.staged_comments(cx).is_empty()) {
+            self.failure =
+                Some("Send goal controls without attachments or review comments.".into());
+            cx.notify();
+            return;
+        }
         let existing_cwd = self
             .state
             .read(cx)
@@ -5713,7 +5735,7 @@ impl Composer {
             if is_new {
                 s.select_chat(Some(chat_id.clone()), cx);
             }
-            if should_publish_optimistic_echo(queue) {
+            if should_publish_optimistic_echo(queue) && !goal_control {
                 s.push_echo(&chat_id, echo);
                 // Working overlay until the host executes the queued command —
                 // without it a remote send flashed Completed (and could ring
@@ -5730,7 +5752,7 @@ impl Composer {
         // A queued row is represented by the queue panel, not the transcript.
         // Claiming an own-turn anchor for it here would replace the live
         // turn's runway with an id that has no transcript row yet.
-        if should_publish_optimistic_echo(queue) {
+        if should_publish_optimistic_echo(queue) && !goal_control {
             cx.emit(ComposerEvent::Sent {
                 chat_id: chat_id.clone(),
                 message_id: message_id.clone(),
@@ -6023,21 +6045,28 @@ impl Composer {
                     return Ok(Some(queue_id.to_string()));
                 }
 
-                let command = SessionCommandPayload::Run {
-                    request: RunRequest {
+                let command = if goal_control {
+                    SessionCommandPayload::Steer {
                         prompt: content.clone(),
-                        harness: resolved.harness,
-                        model: resolved.model.clone(),
-                        reasoning: resolved.reasoning,
-                        model_options: resolved.model_options.clone(),
-                        cwd,
-                        sandbox: SandboxLevel::WorkspaceWrite,
-                        auto_approve: false,
-                        resume: None,
-                        attachments: attachment_paths,
-                        worktree: run_worktree,
-                    },
-                    message_id: message_id.clone(),
+                        message_id: Some(message_id.clone()),
+                    }
+                } else {
+                    SessionCommandPayload::Run {
+                        request: RunRequest {
+                            prompt: content.clone(),
+                            harness: Some(harness),
+                            model: resolved.model.clone(),
+                            reasoning: resolved.reasoning,
+                            model_options: resolved.model_options.clone(),
+                            cwd,
+                            sandbox: SandboxLevel::WorkspaceWrite,
+                            auto_approve: false,
+                            resume: None,
+                            attachments: attachment_paths,
+                            worktree: run_worktree,
+                        },
+                        message_id: message_id.clone(),
+                    }
                 };
                 let command = serde_json::to_value(&command)
                     .map_err(|e| format!("Send failed: {e}"))?;

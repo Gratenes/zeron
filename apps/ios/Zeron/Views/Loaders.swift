@@ -258,10 +258,23 @@ struct HarnessBadge: View {
     var neutral: Color = Theme.text
 
     var body: some View {
-        let mark = BrandMark.forHarness(harness)
-        BrandMarkShape(mark: mark)
-            .fill((BrandMark.brandTint(for: harness) ?? neutral).opacity(dimmed ? 0.6 : 0.9),
-                  style: FillStyle(eoFill: mark.evenOddFill))
-            .frame(width: size, height: size)
+        if harness == "mimir" {
+            // Match the desktop's centered 560px viewBox within the original
+            // 1254px PNG. Template rendering follows the same tint as SVG marks.
+            Image("MimirMark")
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size * 1254 / 560, height: size * 1254 / 560)
+                .frame(width: size, height: size)
+                .clipped()
+                .foregroundStyle(neutral.opacity(dimmed ? 0.6 : 0.9))
+        } else {
+            let mark = BrandMark.forHarness(harness)
+            BrandMarkShape(mark: mark)
+                .fill((BrandMark.brandTint(for: harness) ?? neutral).opacity(dimmed ? 0.6 : 0.9),
+                      style: FillStyle(eoFill: mark.evenOddFill))
+                .frame(width: size, height: size)
+        }
     }
 }

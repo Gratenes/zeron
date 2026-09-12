@@ -27,8 +27,13 @@
 //! - Interrupt: `session/cancel`, escalating SIGTERM → SIGKILL; the stream
 //!   always ends with `Done { status: Interrupted }`.
 
+mod config;
 mod devin_models;
+mod elicitation;
+mod mimir;
+mod mimir_session;
 mod normalize;
+mod prompt;
 mod subagent;
 mod subagent_devin;
 
@@ -52,7 +57,7 @@ use zeron_proto::{
 use crate::jsonrpc::{Incoming, RpcClient};
 use crate::process::{Child, Command, Stdio};
 use crate::{Harness, HarnessError, RunControls, Signal, send_signal, shutdown_child};
-use normalize::{map_update, parse_commands, preferred_allow_option};
+use normalize::{parse_commands, preferred_allow_option};
 use subagent::SubagentTracker;
 use subagent_devin::DevinTracker;
 
@@ -136,6 +141,7 @@ fn default_effort_values(
         return Vec::new();
     };
     match level {
+        ReasoningLevel::Off => vec!["off"],
         ReasoningLevel::Minimal => vec!["minimal", "low"],
         ReasoningLevel::Low => vec!["low", "minimal"],
         ReasoningLevel::Medium => vec!["medium"],
@@ -375,6 +381,46 @@ fn hermes_spec() -> AcpAgentSpec {
     }
 }
 
+fn mimir_install_paths() -> Vec<PathBuf> {
+    crate::executable::home_dir()
+        .map(|home| vec![home.join(".mimir/bin/mimir"), home.join(".local/bin/mimir")])
+        .unwrap_or_default()
+}
+
+fn mimir_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Mimir,
+        display_name: "Mimir",
+        executable: "mimir",
+        env_override: "MIMIR_EXECUTABLE",
+        args: &["acp"],
+        npm_package: None,
+        extra_paths: mimir_install_paths,
+        cli_executable: "mimir",
+        cli_extra_paths: mimir_install_paths,
+        install_hint: "mimir (searched PATH, the login shell's PATH, ~/.mimir/bin and \
+            ~/.local/bin; install and configure the Mimir CLI, or set MIMIR_EXECUTABLE)",
+        // The native ACP catalog reflects the user's configured providers.
+        models: Vec::new,
+        steering_mode: SteeringMode::TurnBoundary,
+        reasoning_levels: &[
+            ReasoningLevel::Off,
+            ReasoningLevel::Minimal,
+            ReasoningLevel::Low,
+            ReasoningLevel::Medium,
+            ReasoningLevel::High,
+            ReasoningLevel::XHigh,
+            ReasoningLevel::Max,
+        ],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "Check Mimir's provider configuration in a terminal.",
+    }
+}
+
 fn pi_spec() -> AcpAgentSpec {
     AcpAgentSpec {
         id: HarnessId::Pi,
@@ -504,6 +550,7 @@ pub struct AcpHarness {
     /// Model discovery cache: only a successful, non-empty probe is cached,
     /// so a mis-authed agent retries on the next picker open.
     models_cache: tokio::sync::OnceCell<Vec<Model>>,
+    model_details: tokio::sync::Mutex<std::collections::HashMap<String, Model>>,
     /// Coalesce concurrent picker/title probes. Starting several OpenCode
     /// processes at once makes cold plugin loading slower and wastes memory.
     models_probe: tokio::sync::Mutex<()>,
@@ -525,6 +572,7 @@ impl AcpHarness {
             model_discovery_timeout: DEFAULT_MODEL_DISCOVERY_TIMEOUT,
             commands: tokio::sync::OnceCell::new(),
             models_cache: tokio::sync::OnceCell::new(),
+            model_details: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             models_probe: tokio::sync::Mutex::new(()),
             devin_models: devin_models::Catalog::default(),
         }
@@ -549,6 +597,11 @@ impl AcpHarness {
     /// pi's RPC mode.
     pub fn pi() -> Self {
         Self::with_spec(pi_spec())
+    }
+
+    /// Mimir's native Agent Client Protocol server (`mimir acp`).
+    pub fn mimir() -> Self {
+        Self::with_spec(mimir_spec())
     }
 
     /// Use a fixed agent binary instead of PATH/known-location resolution.
@@ -799,9 +852,9 @@ impl AcpHarness {
     /// (SessionModelState) with the `model` config option as fallback. The
     /// wire is the source of truth — the spec's static catalog only enriches
     /// matching entries and names the pick when the agent advertises nothing.
-    async fn discover_models(&self) -> Result<Vec<Model>, HarnessError> {
+    async fn discover_models(&self, selected: Option<&str>) -> Result<Vec<Model>, HarnessError> {
         let (mut child, stderr_tail) = self.spawn_agent(None, false, &[]).await?;
-        let (client, _incoming) = match (child.stdin.take(), child.stdout.take()) {
+        let (client, mut incoming) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => RpcClient::new(stdin, stdout),
             _ => {
                 shutdown_child(&mut child, self.kill_grace).await;
@@ -813,10 +866,22 @@ impl AcpHarness {
                 .request("initialize", initialize_params(self.spec.id))
                 .await?;
             let cwd = crate::executable::home_or_current_dir();
-            let session = client
-                .request("session/new", json!({ "cwd": cwd, "mcpServers": [] }))
-                .await?;
-            let mut models = models_from_session(&session, &(self.spec.models)());
+            let mut session = request_draining(
+                &client,
+                &mut incoming,
+                "session/new",
+                json!({ "cwd": cwd, "mcpServers": [] }),
+            )
+            .await?;
+            let mut models = if self.spec.id == HarnessId::Mimir {
+                if let Some(model) = selected {
+                    vec![mimir::selected_model(&client, &mut incoming, &mut session, model).await?]
+                } else {
+                    mimir::discover_models(&client, &mut incoming, &mut session).await?
+                }
+            } else {
+                models_from_session(&session, &(self.spec.models)())
+            };
             // Prompt-convention modes (Claude Ultrathink) extend any real
             // ladder — never an effort-less model's empty one.
             for model in &mut models {
@@ -853,6 +918,7 @@ impl AcpHarness {
 /// Map an advertised `thought_level` value id onto zeron's ladder.
 fn reasoning_from_value(value: &str) -> Option<ReasoningLevel> {
     match norm_id(value).as_str() {
+        "off" => Some(ReasoningLevel::Off),
         "minimal" => Some(ReasoningLevel::Minimal),
         "low" => Some(ReasoningLevel::Low),
         "medium" => Some(ReasoningLevel::Medium),
@@ -1035,10 +1101,33 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
 fn trait_from_config_option(option: &Value) -> Option<ModelOption> {
     if matches!(
         option.get("category").and_then(Value::as_str),
-        Some("mode" | "model" | "thought_level")
+        Some("model" | "thought_level")
     ) {
         return None;
     }
+    // Permission/sandbox modes remain owned by Zeron's approval policy.
+    // Workflow modes (Build/Plan/Ask) are user-selectable traits.
+    if option["category"] == "mode"
+        && option["options"].as_array().is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                matches!(
+                    choice["value"].as_str(),
+                    Some(
+                        "bypassPermissions"
+                            | "bypass_permissions"
+                            | "bypass"
+                            | "yolo"
+                            | "agent-full-access"
+                            | "danger-full-access"
+                            | "full-access"
+                    )
+                )
+            })
+        })
+    {
+        return None;
+    }
+
     let id = option.get("id").and_then(Value::as_str)?;
     let label = option.get("name").and_then(Value::as_str).unwrap_or(id);
     match option.get("type").and_then(Value::as_str)? {
@@ -1102,6 +1191,10 @@ impl Harness for AcpHarness {
     fn display_name(&self) -> &str {
         self.spec.display_name
     }
+    fn native_titles(&self) -> bool {
+        self.spec.id == HarnessId::Mimir
+    }
+
     fn authoritative_prompt_end(&self) -> bool {
         // ACP session/prompt owns the turn until its response. The engine's
         // quiet watchdog must not park a still-pending model request either.
@@ -1151,14 +1244,38 @@ impl Harness for AcpHarness {
         if let Some(models) = self.models_cache.get() {
             return Ok(models.clone());
         }
-        match self.discover_models().await {
+        match self.discover_models(None).await {
             Ok(models) if !models.is_empty() => {
                 let _ = self.models_cache.set(models.clone());
                 Ok(self.models_cache.get().cloned().unwrap_or(models))
             }
             Ok(_) => Ok((self.spec.models)()),
+            Err(error) if self.spec.id == HarnessId::Mimir => Err(error),
             Err(_) => Ok((self.spec.models)()),
         }
+    }
+
+    async fn models_for_selection(
+        &self,
+        selected: Option<&str>,
+    ) -> Result<Vec<Model>, HarnessError> {
+        let mut models = self.models().await?;
+        if self.spec.id != HarnessId::Mimir {
+            return Ok(models);
+        }
+        let mut details = self.model_details.lock().await;
+        if let Some(id) = selected.filter(|id| !details.contains_key(*id)) {
+            let _probe = self.models_probe.lock().await;
+            if let Some(model) = self.discover_models(Some(id)).await?.into_iter().next() {
+                details.insert(id.to_owned(), model);
+            }
+        }
+        for model in &mut models {
+            if let Some(detail) = details.get(&model.id) {
+                *model = detail.clone();
+            }
+        }
+        Ok(models)
     }
 
     async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
@@ -1238,6 +1355,12 @@ struct Session {
     stderr_tail: crate::StderrTail,
 }
 
+fn initialize_live_params(harness: HarnessId) -> Value {
+    let mut params = initialize_params(harness);
+    params["clientCapabilities"]["elicitation"] = json!({ "form": {} });
+    params
+}
+
 fn initialize_params(harness: HarnessId) -> Value {
     let mut capabilities = json!({
         "fs": { "readTextFile": false, "writeTextFile": false },
@@ -1249,6 +1372,9 @@ fn initialize_params(harness: HarnessId) -> Value {
         // update, all of which DevinTracker can route. Do not advertise the
         // separate subagentControl extension: Zeron has no matching UI yet.
         capabilities["_meta"] = json!({ "cognition.ai/subagentSupport": true });
+    }
+    if harness == HarnessId::Mimir {
+        capabilities["_meta"] = json!({ mimir_session::KEY: { "version": 1 } });
     }
     json!({
         "protocolVersion": 1,
@@ -1479,7 +1605,8 @@ fn config_option_sets(
             // `bypass`. Cursor instead exposes agent/plan/ask — those arrive
             // as a Traits "Mode" option and win when the run selected one.
             ("select", Some("mode")) => model_options
-                .get("mode")
+                .get(config_id)
+                .or_else(|| model_options.get("mode"))
                 .and_then(Value::as_str)
                 .filter(|c| available.contains(c))
                 .map(|c| Value::String(c.to_owned()))
@@ -1542,6 +1669,7 @@ fn config_option_sets(
 /// emit its `subagent_*` extension). Both produce the same
 /// [`AgentEvent::Subagent`] contract.
 enum SubagentObserver {
+    Mimir(mimir_session::NativeSession),
     Devin(DevinTracker),
     Grok(SubagentTracker),
 }
@@ -1550,6 +1678,7 @@ impl SubagentObserver {
     fn observe(&mut self, update: &Value) {
         match self {
             SubagentObserver::Devin(_) => {}
+            SubagentObserver::Mimir(_) => {}
             SubagentObserver::Grok(tracker) => tracker.observe(update),
         }
     }
@@ -1558,6 +1687,7 @@ impl SubagentObserver {
         match self {
             SubagentObserver::Devin(tracker) => tracker.finish_open(status),
             SubagentObserver::Grok(_) => Vec::new(),
+            SubagentObserver::Mimir(_) => Vec::new(),
         }
     }
 }
@@ -1573,17 +1703,32 @@ fn session_update_events(
     params: &Value,
     session_id: &str,
     subagents: &mut SubagentObserver,
+    normalizer: &mut normalize::UpdateNormalizer,
 ) -> Vec<AgentEvent> {
     if params.get("sessionId").and_then(Value::as_str) != Some(session_id) {
         return Vec::new();
     }
+    if method == "_mimir/session/state"
+        && let SubagentObserver::Mimir(native) = subagents
+    {
+        return native.state(params);
+    }
     let update = params.get("update").unwrap_or(&Value::Null);
+    if method == "session/update"
+        && matches!(
+            update["sessionUpdate"].as_str(),
+            Some("session_info_update" | "config_option_update" | "current_mode_update")
+        )
+    {
+        return config::metadata_events(update);
+    }
     match method {
         "session/update" => match subagents {
+            SubagentObserver::Mimir(native) => native.map(update, normalizer),
             SubagentObserver::Devin(tracker) => tracker.map(update),
             _ => {
                 subagents.observe(update);
-                map_update(update)
+                normalizer.map_update(update)
             }
         },
         "_x.ai/session_notification" => {
@@ -1647,11 +1792,22 @@ fn prompt_turn(
     text: String,
     prompt_id: Option<String>,
 ) -> BoxFuture<'static, Result<Value, HarnessError>> {
+    prompt_content_turn(
+        client,
+        session_id,
+        vec![json!({ "type": "text", "text": text })],
+        prompt_id,
+    )
+}
+
+fn prompt_content_turn(
+    client: RpcClient,
+    session_id: String,
+    content: Vec<Value>,
+    prompt_id: Option<String>,
+) -> BoxFuture<'static, Result<Value, HarnessError>> {
     Box::pin(async move {
-        let mut params = json!({
-            "sessionId": session_id,
-            "prompt": [{ "type": "text", "text": text }],
-        });
+        let mut params = json!({ "sessionId": session_id, "prompt": content });
         if let Some(id) = prompt_id {
             params["_meta"] = json!({ "promptId": id, "requestId": id });
         }
@@ -1722,13 +1878,37 @@ fn is_user_question(options: &[Value]) -> bool {
 /// engine's input bridge (in a subtask so the message loop keeps flowing)
 /// and answer with the option whose name matches the chosen label. A dropped
 /// resolver degrades to `cancelled` — never a silent allow.
+async fn prompt_outcome(
+    _tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
+    response: &Result<Value, HarnessError>,
+    interrupted: bool,
+) -> (DoneStatus, Option<String>) {
+    if !interrupted
+        && response
+            .as_ref()
+            .ok()
+            .is_some_and(|response| response["_meta"]["mimir"]["outcome"] == "interaction-required")
+    {
+        // Goal details arrive as typed state, not invented transcript notices.
+        return (DoneStatus::Interrupted, None);
+    }
+    stop_outcome(response, interrupted)
+}
+
 fn handle_server_request_live(
     client: &RpcClient,
     id: Value,
     method: &str,
     params: &Value,
     request_input: &std::sync::Arc<RequestInputFn>,
+    forms: &mut elicitation::Elicitations,
+    session_id: &str,
 ) -> Vec<AgentEvent> {
+    if method == "elicitation/create" {
+        forms.handle_request(client, session_id, id, params, request_input);
+        return Vec::new();
+    }
+
     if method != "session/request_permission" {
         return handle_server_request(client, id, method, params);
     }
@@ -1798,25 +1978,21 @@ async fn request_draining(
     method: &'static str,
     params: Value,
 ) -> Result<Value, HarnessError> {
-    let loading_session = matches!(method, "session/new" | "session/load");
     let requested_session = params
         .get("sessionId")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let mut config_updates = std::collections::HashMap::new();
+    let mut state_updates = std::collections::HashMap::new();
     let mut handle_incoming = |inc| match inc {
         Incoming::Request { id, method, params } => {
             handle_server_request(client, id, &method, &params);
         }
-        Incoming::Notification { method, params }
-            if loading_session
-                && method == "session/update"
-                && params["update"]["sessionUpdate"] == "config_option_update" =>
-        {
-            if let Some(id) = params.get("sessionId").and_then(Value::as_str)
-                && params["update"]["configOptions"].is_array()
-            {
-                config_updates.insert(id.to_owned(), params["update"]["configOptions"].clone());
+        Incoming::Notification { method, params } if method == "session/update" => {
+            if let Some(id) = params.get("sessionId").and_then(Value::as_str) {
+                let state = state_updates
+                    .entry(id.to_owned())
+                    .or_insert_with(|| json!({}));
+                config::merge_state(state, &params["update"]);
             }
         }
         _ => {}
@@ -1849,8 +2025,17 @@ async fn request_draining(
             .get("sessionId")
             .and_then(Value::as_str)
             .or(requested_session.as_deref());
-        if let Some(options) = id.and_then(|id| config_updates.remove(id)) {
-            response["configOptions"] = options;
+        if let Some(mut state) = id.and_then(|id| state_updates.remove(id)) {
+            // A setter's response is the authoritative resulting selection.
+            // Notifications from the previous setter can still be queued; do
+            // not let that older snapshot undo the acknowledged new choice.
+            if method == "session/set_config_option"
+                && response.get("configOptions").is_some()
+                && let Some(fields) = state.as_object_mut()
+            {
+                fields.remove("configOptions");
+            }
+            config::merge_state(&mut response, &state);
         }
         response
     })
@@ -1922,11 +2107,12 @@ async fn run_session(session: Session) {
         interrupt,
     } = controls;
     let request_input = std::sync::Arc::new(request_input);
+    let mut forms = elicitation::Elicitations::new();
 
     // ---- handshake + session (interruptible) ------------------------------
     let setup = async {
         let init = client
-            .request("initialize", initialize_params(harness))
+            .request("initialize", initialize_live_params(harness))
             .await?;
         let steer_ext = steering_supported(&init);
         let init_commands = scan_available_commands(&init);
@@ -1935,7 +2121,15 @@ async fn run_session(session: Session) {
         let (session_id, mut session_response) = if let Some(resume) = &request.resume {
             let mut load = session_params.clone();
             load["sessionId"] = Value::String(resume.clone());
-            match request_draining(&client, &mut incoming, "session/load", load).await {
+            let resume_method = if init["agentCapabilities"]["sessionCapabilities"]
+                .get("resume")
+                .is_some()
+            {
+                "session/resume"
+            } else {
+                "session/load"
+            };
+            match request_draining(&client, &mut incoming, resume_method, load).await {
                 Ok(resp) => (resume.clone(), resp),
                 // A missing/foreign session falls back to a fresh one.
                 Err(e) => {
@@ -1987,83 +2181,66 @@ async fn run_session(session: Session) {
             )
             .await?;
         }
-        // ACP has had two model-selection surfaces. Newer config-option agents
-        // use category=model below; Grok Build currently advertises only the
-        // first-class `models` state and requires `session/set_model`. Paseo
-        // follows the same split. Unlike the best-effort auxiliary options,
-        // an explicit model switch is strict: prompting with a different
-        // model than the picker shows is worse than surfacing the RPC error.
-        if let Some(model) = first_class_model_change(&session_response, request.model.as_deref())?
-        {
-            request_draining(
+        let model = if harness == HarnessId::Mimir {
+            mimir::select_provider(
                 &client,
                 &mut incoming,
-                "session/set_model",
-                json!({
-                    "sessionId": session_id,
-                    "modelId": model,
-                }),
+                &session_id,
+                &mut session_response,
+                request.model.as_deref(),
             )
-            .await
-            .map_err(|error| {
-                HarnessError::Protocol(format!("agent rejected model switch to {model}: {error}"))
-            })?;
+            .await?
+        } else {
+            request.model.clone()
+        };
+        let mut efforts = effort_values(request.reasoning, model.as_deref());
+        if harness == HarnessId::Mimir {
+            efforts.truncate(1);
         }
-        // Apply the run's model + effort + model options through the
-        // session's advertised config options. Best-effort for effort and
-        // traits: a rejected auxiliary set is logged and the agent default
-        // runs.
-        let efforts = effort_values(request.reasoning, request.model.as_deref());
-        let requested_model = request.model.as_deref();
-        let options_snapshot = session_response;
-        for (config_id, payload) in config_option_sets(
-            &options_snapshot,
-            requested_model,
+        config::apply(
+            &client,
+            &mut incoming,
+            &session_id,
+            &mut session_response,
+            model.as_deref(),
             &efforts,
             &request.model_options,
-        ) {
-            let mut params = serde_json::Map::new();
-            params.insert("sessionId".into(), session_id.clone().into());
-            params.insert("configId".into(), config_id.clone().into());
-            if let Some(payload) = payload.as_object() {
-                for (k, v) in payload {
-                    params.insert(k.clone(), v.clone());
-                }
-            }
-            if let Err(e) = request_draining(
-                &client,
-                &mut incoming,
-                "session/set_config_option",
-                Value::Object(params),
-            )
-            .await
-            {
-                if harness == HarnessId::Devin
-                    && options_snapshot["configOptions"]
-                        .as_array()
-                        .is_some_and(|options| {
-                            options
-                                .iter()
-                                .any(|o| o["id"] == config_id && o["category"] == "model")
-                        })
-                {
-                    return Err(HarnessError::Protocol(format!(
-                        "Devin rejected requested model {requested_model:?}: {e}"
-                    )));
-                }
-                tracing::debug!(
-                    target: "zeron_harness::acp",
-                    "session/set_config_option {config_id}={payload} rejected (agent default runs): {e}"
-                );
-            }
+        )
+        .await?;
+        if harness == HarnessId::Mimir {
+            mimir::validate_settings(
+                &session_response,
+                model.as_deref(),
+                request.reasoning,
+                &request.model_options,
+            )?;
         }
-        Ok::<(String, bool, Vec<SlashCommand>), HarnessError>((
+        let session_commands = scan_available_commands(&session_response);
+        let commands = if session_commands.is_empty() {
+            init_commands
+        } else {
+            session_commands
+        };
+        let content = prompt::content(
+            prompt_transform(request.reasoning, &request.prompt),
+            &request.attachments,
+            init["agentCapabilities"]["promptCapabilities"]["image"] == true,
+        )
+        .await;
+        Ok::<_, HarnessError>((
             session_id,
             steer_ext,
-            init_commands,
+            commands,
+            config::metadata_events(&session_response),
+            content,
+            if harness == HarnessId::Mimir {
+                mimir_session::Capabilities::parse(&init)
+            } else {
+                mimir_session::Capabilities::default()
+            },
         ))
     };
-    let (session_id, steer_ext, init_commands) = tokio::select! {
+    let (session_id, steer_ext, init_commands, metadata, initial_content, native_caps) = tokio::select! {
         res = tokio::time::timeout(handshake_timeout, setup) => {
             let res = res.unwrap_or_else(|_| {
                 // A hung handshake (agent waiting on a login it can never
@@ -2146,6 +2323,13 @@ async fn run_session(session: Session) {
         shutdown_child(&mut child, kill_grace).await;
         return;
     }
+    for event in metadata {
+        if !send(&event_tx, event).await {
+            shutdown_child(&mut child, kill_grace).await;
+            return;
+        }
+    }
+
     if !init_commands.is_empty()
         && !send(
             &event_tx,
@@ -2162,7 +2346,15 @@ async fn run_session(session: Session) {
     // Subagent correlation + transcript tails: Devin carries nested updates
     // on ACP itself; everything else gets the Grok tracker (inert without
     // Grok's subagent lifecycle extension).
-    let mut subagents = if harness == HarnessId::Devin {
+    let mut normalizer = normalize::UpdateNormalizer::default();
+    let mut subagents = if native_caps.enabled() {
+        SubagentObserver::Mimir(mimir_session::NativeSession::new(
+            client.clone(),
+            session_id.clone(),
+            native_caps,
+            event_tx.clone(),
+        ))
+    } else if harness == HarnessId::Devin {
         SubagentObserver::Devin(DevinTracker::default())
     } else {
         SubagentObserver::Grok(SubagentTracker::new(
@@ -2194,10 +2386,10 @@ async fn run_session(session: Session) {
     let mut turn: Option<BoxFuture<'static, Result<Value, HarnessError>>> = Some({
         prompt_seq += 1;
         current_prompt_id = prompt_complete_extension.then(|| format!("zeron-p{prompt_seq}"));
-        prompt_turn(
+        prompt_content_turn(
             client.clone(),
             session_id.clone(),
-            prompt_transform(request.reasoning, &request.prompt),
+            initial_content,
             current_prompt_id.clone(),
         )
     });
@@ -2211,6 +2403,13 @@ async fn run_session(session: Session) {
     // updates (the reader blocks on the channel and never parses the
     // steering response).
     let mut steering_call: Option<(String, BoxFuture<'static, Result<Value, HarnessError>>)> = None;
+    // Human controls own only their RPC response, never the model turn.
+    // One in flight; a burst is explicitly rejected rather than queued.
+    let mut control_call: Option<(
+        String,
+        Option<String>,
+        BoxFuture<'static, Result<Value, HarnessError>>,
+    )> = None;
     let mut steer_backlog: VecDeque<String> = VecDeque::new();
     let mut steering_open = true;
     let mut interrupted = false;
@@ -2253,7 +2452,23 @@ async fn run_session(session: Session) {
 
     'main: loop {
         tokio::select! {
-            res = async { turn.as_mut().expect("guarded by if").await }, if turn.is_some() => {
+            response = forms.next_response() => response.send(&client),
+            response = async { control_call.as_mut().expect("guarded").2.as_mut().await }, if control_call.is_some() => {
+                let (text, message_id, _) = control_call.take().expect("guarded");
+                let error = match response {
+                    Ok(state) => {
+                        if let SubagentObserver::Mimir(native) = &mut subagents {
+                            for event in native.state(&state) {
+                                if !send(&event_tx, event).await { break 'main; }
+                            }
+                        }
+                        None
+                    }
+                    Err(error) => Some(error.to_string()),
+                };
+                if !send(&event_tx, AgentEvent::ControlResolved { prompt: text, message_id, error }).await { break 'main; }
+            },
+            res = async { turn.as_mut().expect("guarded by if").await }, if turn.is_some() && control_call.is_none() => {
                 turn = None;
                 starve_deadline = None;
                 prompt_stall_deadline = None;
@@ -2320,8 +2535,11 @@ async fn run_session(session: Session) {
                 while let Ok(inc) = incoming.try_recv() {
                     match inc {
                         Incoming::Notification { method, params } => {
+                            if method == "$/cancel_request" && let Some(id) = params.get("requestId") {
+                                forms.cancel(&client, id);
+                            }
                             let events =
-                                session_update_events(&method, &params, &session_id, &mut subagents);
+                                session_update_events(&method, &params, &session_id, &mut subagents, &mut normalizer);
                             for ev in events {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -2336,6 +2554,7 @@ async fn run_session(session: Session) {
                                 &method,
                                 &params,
                                 &request_input,
+                                &mut forms, &session_id,
                             ) {
                                 if !send(&event_tx, ev).await {
                                     consumer_gone = true;
@@ -2368,7 +2587,8 @@ async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
-                let (status, error) = stop_outcome(&res, interrupted);
+                forms.cancel_all(&client);
+                let (status, error) = prompt_outcome(&event_tx, &res, interrupted).await;
                 done_current = true;
                 if interrupted {
                     done_after_interrupt = true;
@@ -2426,6 +2646,9 @@ async fn run_session(session: Session) {
 
             inc = incoming.recv() => match inc {
                 Some(Incoming::Notification { method, params }) => {
+                    if method == "$/cancel_request" && let Some(id) = params.get("requestId") {
+                        forms.cancel(&client, id);
+                    }
                     last_update_at = tokio::time::Instant::now();
                     // Wire traffic is a sign of life for the prompt-stall
                     // watchdog — EXCEPT session boilerplate: opencode emits
@@ -2492,7 +2715,7 @@ async fn run_session(session: Session) {
                     // Other notifications (other sessions, agent noise) are
                     // tolerated by design.
                     let events =
-                        session_update_events(&method, &params, &session_id, &mut subagents);
+                        session_update_events(&method, &params, &session_id, &mut subagents, &mut normalizer);
                     for ev in events {
                         track_open_tools(&ev, &mut open_tools);
                         if !send(&event_tx, ev).await {
@@ -2508,6 +2731,7 @@ async fn run_session(session: Session) {
                         &method,
                         &params,
                         &request_input,
+                        &mut forms, &session_id,
                     ) {
                         if !send(&event_tx, ev).await {
                             break 'main;
@@ -2536,7 +2760,8 @@ async fn run_session(session: Session) {
                         if let Some(usage) = usage_from_response(&res) {
                             let _ = send(&event_tx, usage).await;
                         }
-                        let (status, error) = stop_outcome(&res, interrupted);
+                        forms.cancel_all(&client);
+                        let (status, error) = prompt_outcome(&event_tx, &res, interrupted).await;
                         done_current = true;
                         if interrupted {
                             done_after_interrupt = true;
@@ -2601,8 +2826,11 @@ async fn run_session(session: Session) {
                         while let Ok(inc) = incoming.try_recv() {
                             match inc {
                                 Incoming::Notification { method, params } => {
+                                    if method == "$/cancel_request" && let Some(id) = params.get("requestId") {
+                                        forms.cancel(&client, id);
+                                    }
                                     let events =
-                                        session_update_events(&method, &params, &session_id, &mut subagents);
+                                        session_update_events(&method, &params, &session_id, &mut subagents, &mut normalizer);
                                     for ev in events {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -2617,6 +2845,7 @@ async fn run_session(session: Session) {
                                         &method,
                                         &params,
                                         &request_input,
+                                        &mut forms, &session_id,
                                     ) {
                                         if !send(&event_tx, ev).await {
                                             consumer_gone = true;
@@ -2830,6 +3059,19 @@ async fn run_session(session: Session) {
 
             steer = steering.recv(), if steering_open && !interrupted => match steer {
                 Some(msg) => {
+                    if native_caps.goal && let Some(command) = zeron_proto::goal_control_command(&msg.prompt) {
+                        if control_call.is_some() {
+                            if !send(&event_tx, AgentEvent::ControlResolved { prompt: msg.prompt, message_id: msg.message_id, error: Some("A goal control is already pending; retry after its response.".into()) }).await { break 'main; }
+                        } else {
+                            let rpc = client.clone();
+                            let params = json!({"sessionId": session_id, "command": command});
+                            control_call = Some((msg.prompt, msg.message_id, Box::pin(async move {
+                                tokio::time::timeout(Duration::from_secs(30), rpc.request("_mimir/session/goal", params)).await
+                                    .map_err(|_| HarnessError::Protocol("goal control timed out".into()))?
+                            })));
+                        }
+                        continue 'main;
+                    }
                     // Same transform as the initial prompt: Claude's
                     // Ultrathink prefix rides every steer too.
                     let text = prompt_transform(request.reasoning, &msg.prompt);
@@ -2838,6 +3080,7 @@ async fn run_session(session: Session) {
                         // steer lines up behind it and dispatches at flush.
                         queued_steers.push_back(text);
                     } else if turn.is_none()
+                        && harness != HarnessId::Mimir
                         && (!open_tools.is_empty()
                             || last_update_at.elapsed() < BUSY_RECENT)
                     {
@@ -2909,6 +3152,7 @@ async fn run_session(session: Session) {
             },
 
             _ = interrupt.cancelled(), if !interrupt_sent => {
+                forms.cancel_all(&client);
                 interrupt_sent = true;
                 interrupted = true;
                 if turn.is_some() {
@@ -3017,6 +3261,7 @@ async fn run_session(session: Session) {
     if let Some(handle) = escalation {
         handle.abort();
     }
+    forms.cancel_all(&client);
     shutdown_child(&mut child, kill_grace).await;
 }
 

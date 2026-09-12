@@ -1,6 +1,6 @@
 # Zeron
 
-Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi) locally by default, with optional multi-device sync.
+Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Mimir) locally by default, with optional multi-device sync.
 
 *English | [简体中文](README.zh-CN.md)*
 
@@ -16,6 +16,8 @@ zeron status
 ```
 
 The installer starts the daemon immediately and keeps it running across reboots. No sign-in or sync configuration is required.
+
+Mimir connects natively through `mimir acp`. Install and configure the `mimir` CLI on the run device; Zeron detects it in Settings → Agents and offers it in the existing harness picker.
 
 The desktop sidebar browser also needs the [Linux browser runtime](docs/reference/linux-browser.md).
 
