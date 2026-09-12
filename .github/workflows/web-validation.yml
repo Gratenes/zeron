@@ -1,0 +1,105 @@
+name: Web validation
+
+on:
+  pull_request:
+    paths:
+      - 'apps/web/**'
+      - 'crates/ui/**'
+      - 'crates/proto/**'
+      - 'crates/rpc/**'
+      - 'crates/doc/**'
+      - 'crates/syntax/**'
+      - 'crates/theme/**'
+      - 'vendor/alacritty_terminal/**'
+      - 'edge/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/web-validation.yml'
+  push:
+    paths:
+      - 'apps/web/**'
+      - 'crates/ui/**'
+      - 'crates/proto/**'
+      - 'crates/rpc/**'
+      - 'crates/doc/**'
+      - 'crates/syntax/**'
+      - 'crates/theme/**'
+      - 'vendor/alacritty_terminal/**'
+      - 'edge/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/web-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wasm:
+    name: Locked WASM build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-08
+          targets: wasm32-unknown-unknown
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/web
+          cache-on-failure: true
+      - name: Install Trunk
+        run: cargo install trunk --locked --version 0.21.14
+      - name: Build web bundle
+        working-directory: apps/web
+        env:
+          RUSTUP_TOOLCHAIN: nightly-2026-09-08
+          CARGO_BUILD_JOBS: 2
+        run: env -u NO_COLOR trunk build --release --locked
+      - name: Check generated entry point
+        run: test -s apps/web/dist/index.html
+
+  lifecycle:
+    name: Browser lifecycle tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/web/tests/lifecycle
+          cache-on-failure: true
+      - name: Run lifecycle tests
+        run: cargo test --locked --manifest-path apps/web/tests/lifecycle/Cargo.toml
+
+  edge:
+    name: Focused edge auth and device tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: edge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: edge/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Unit auth and frame tests
+        run: npm run test:unit -- src/browser-auth.test.ts src/browser-routes.test.ts src/device-frame.test.ts
+      - name: Workerd session and DeviceRoom tests
+        run: npm run test:workerd -- test/workerd/browser-discovery.workerd.test.ts test/workerd/browser-sessions.workerd.test.ts test/workerd/device-browser.workerd.test.ts

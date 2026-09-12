@@ -1374,8 +1374,9 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
- "gpui_util 0.1.0",
+ "gpui_util",
  "indexmap",
  "rustc-hash 2.1.3",
 ]
@@ -1999,6 +2000,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2363,7 +2365,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2865,7 +2867,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
+ "windows-link 0.1.3",
  "windows-result 0.4.1",
 ]
 
@@ -3158,6 +3160,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3186,7 +3189,7 @@ dependencies = [
  "getrandom 0.3.4",
  "gpui_macros",
  "gpui_shared_string",
- "gpui_util 0.1.0",
+ "gpui_util",
  "heapless 0.9.3",
  "http_client",
  "image",
@@ -3269,6 +3272,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3283,7 +3287,7 @@ dependencies = [
  "filedescriptor",
  "futures",
  "gpui",
- "gpui_util 0.1.0",
+ "gpui_util",
  "gpui_wgpu",
  "http_client",
  "image",
@@ -3320,6 +3324,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3342,7 +3347,7 @@ dependencies = [
  "foreign-types",
  "futures",
  "gpui",
- "gpui_util 0.1.0",
+ "gpui_util",
  "image",
  "itertools 0.14.0",
  "libc",
@@ -3368,6 +3373,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3378,6 +3384,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "console_error_panic_hook",
  "gpui",
@@ -3390,6 +3397,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "schemars",
  "serde",
@@ -3399,27 +3407,18 @@ dependencies = [
 [[package]]
 name = "gpui_tokio"
 version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=07fd941ad72e7edc812fed317aab66adb69fa8cc#07fd941ad72e7edc812fed317aab66adb69fa8cc"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "anyhow",
  "gpui",
- "gpui_util 0.1.0 (git+https://github.com/zeronsh/zui?rev=07fd941ad72e7edc812fed317aab66adb69fa8cc)",
+ "gpui_util",
  "tokio",
 ]
 
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-dependencies = [
- "anyhow",
- "log",
- "which",
-]
-
-[[package]]
-name = "gpui_util"
-version = "0.1.0"
-source = "git+https://github.com/zeronsh/zui?rev=07fd941ad72e7edc812fed317aab66adb69fa8cc#07fd941ad72e7edc812fed317aab66adb69fa8cc"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "anyhow",
  "log",
@@ -3429,6 +3428,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3441,6 +3441,7 @@ dependencies = [
  "parking_lot",
  "raw-window-handle",
  "smallvec",
+ "unicode-segmentation",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -3452,6 +3453,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3459,7 +3461,7 @@ dependencies = [
  "cosmic-text",
  "etagere",
  "gpui",
- "gpui_util 0.1.0",
+ "gpui_util",
  "itertools 0.14.0",
  "js-sys",
  "log",
@@ -3480,6 +3482,7 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3489,7 +3492,7 @@ dependencies = [
  "etagere",
  "futures",
  "gpui",
- "gpui_util 0.1.0",
+ "gpui_util",
  "image",
  "itertools 0.14.0",
  "log",
@@ -3797,6 +3800,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -4902,6 +4906,7 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 [[package]]
 name = "media"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -6066,6 +6071,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "collections",
  "serde",
@@ -6738,7 +6744,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6751,7 +6757,7 @@ dependencies = [
  "libc",
  "log",
  "socket2",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7072,6 +7078,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "derive_refineable",
 ]
@@ -7601,7 +7608,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7614,7 +7621,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7711,6 +7718,7 @@ checksum = "c62751faa8bc286982334a082fe125184a29fc89d17775766e4f891b7d726980"
 [[package]]
 name = "scheduler"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "async-task",
  "backtrace",
@@ -8456,6 +8464,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "heapless 0.9.3",
  "log",
@@ -8719,7 +8728,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -9691,6 +9700,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "util_macros"
 version = "0.1.0"
+source = "git+https://github.com/Gratenes/zui?rev=c1700b8de27a07b5bc1a190440b64e7323c008f9#c1700b8de27a07b5bc1a190440b64e7323c008f9"
 dependencies = [
  "perf",
  "quote",
@@ -10389,7 +10399,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -11425,7 +11435,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-doc"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "chrono",
  "loro",
@@ -11439,7 +11449,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-engine"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11475,7 +11485,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-harness"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11495,7 +11505,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-preview"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11521,7 +11531,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "chrono",
  "serde",
@@ -11531,7 +11541,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-rpc"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11550,7 +11560,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-sync"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "block2 0.6.2",
  "futures",
@@ -11569,7 +11579,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-syntax"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "thiserror 2.0.20",
  "tree-sitter",
@@ -11603,7 +11613,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-theme"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "anyhow",
  "clap",
@@ -11617,7 +11627,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-ui"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -11673,7 +11683,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-update"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "anyhow",
  "futures",
