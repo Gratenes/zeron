@@ -14,7 +14,9 @@
 //! Text bodies are **LoroText** so streaming appends RLE-merge (1.03x oplog overhead vs
 //! 125x for whole-value rewrites).
 
-use loro::{ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson};
+use loro::{
+    ContainerTrait, ExportMode, LoroDoc, LoroError, LoroList, LoroMap, LoroText, LoroValue, ToJson,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::{SessionCommandEntry, SessionCommandStatus};
@@ -93,6 +95,9 @@ struct DocPartJson {
     /// Full-output byte length (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     output_bytes: Option<u64>,
+    /// Stable full-output identity (additive; never displayed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_digest: Option<u64>,
     /// Sidecar key of the full diff JSON (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     diff_ref: Option<String>,
@@ -134,6 +139,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             diff,
             output_ref,
             output_bytes,
+            output_digest,
             diff_ref,
             diff_stats,
             subagent_ref,
@@ -150,6 +156,7 @@ fn to_doc_part(part: &MessagePart) -> Result<DocPartJson, DocError> {
             diff: diff.as_ref().map(serde_json::to_value).transpose()?,
             output_ref: output_ref.clone(),
             output_bytes: *output_bytes,
+            output_digest: *output_digest,
             diff_ref: diff_ref.clone(),
             diff_stats: diff_stats.as_ref().map(serde_json::to_value).transpose()?,
             subagent_ref: subagent_ref.clone(),
@@ -198,6 +205,7 @@ fn from_doc_part(p: DocPartJson) -> MessagePart {
                 diff: p.diff.and_then(|d| serde_json::from_value(d).ok()),
                 output_ref: p.output_ref,
                 output_bytes: p.output_bytes,
+                output_digest: p.output_digest,
                 diff_ref: p.diff_ref,
                 diff_stats: p.diff_stats.and_then(|s| serde_json::from_value(s).ok()),
                 subagent_ref: p.subagent_ref,
@@ -317,6 +325,101 @@ impl SessionDoc {
         }
         self.doc.commit();
         Ok(())
+    }
+
+    /// Replace a native read-only public child revision, atomically. This is
+    /// not an append feed: replaying an unchanged revision is a no-op.
+    pub fn replace_public_transcript(
+        &self,
+        revision: &str,
+        state: &str,
+        entry: &SessionMessageEntry,
+    ) -> Result<bool, DocError> {
+        let meta = self.doc.get_map("meta");
+        let same = |key: &str, expected: &str| matches!(meta.get(key), Some(loro::ValueOrContainer::Value(LoroValue::String(value))) if value.as_str() == expected);
+        if same("publicRevision", revision) && same("publicState", state) {
+            return Ok(false);
+        }
+        let mut entry = entry.clone();
+        if let Some(loro::ValueOrContainer::Value(LoroValue::I64(created))) =
+            meta.get("publicCreatedAt")
+        {
+            entry.created_at = created;
+        } else {
+            meta.insert("publicCreatedAt", entry.created_at)?;
+        }
+        let messages = self.doc.get_list("messages");
+        messages.delete(0, messages.len())?;
+        let map = messages.push_container(LoroMap::new())?;
+        write_entry_scalar_fields(&map, &entry)?;
+        let parts = map.insert_container("parts", LoroList::new())?;
+        for part in &entry.parts {
+            push_part(&parts, part)?;
+        }
+        meta.insert("publicRevision", revision)?;
+        meta.insert("publicState", state)?;
+        self.doc.commit();
+        Ok(true)
+    }
+
+    /// An explicit server-provided child/tool linkage establishes agent genus.
+    /// Unlike ordinary late ToolCall echoes, this semantic event may annotate
+    /// a launch card that arrived before the child state notification.
+    pub fn link_agent_tool(
+        &self,
+        child: &zeron_proto::AgentChild,
+        child_doc: Option<&str>,
+    ) -> Result<Option<(loro::ContainerID, MessagePart)>, DocError> {
+        let Some(id) = child.tool_call_id.as_deref() else {
+            return Ok(None);
+        };
+        let messages = self.doc.get_list("messages");
+        for i in (0..messages.len()).rev() {
+            let Some(loro::ValueOrContainer::Container(loro::Container::Map(entry))) =
+                messages.get(i)
+            else {
+                continue;
+            };
+            let Some(loro::ValueOrContainer::Container(loro::Container::List(parts))) =
+                entry.get("parts")
+            else {
+                continue;
+            };
+            for j in 0..parts.len() {
+                let map = part_map_at(&parts, j)?;
+                if !matches!(map.get("id"), Some(loro::ValueOrContainer::Value(LoroValue::String(value))) if value.as_str() == id)
+                {
+                    continue;
+                }
+                let mut part = from_doc_part(serde_json::from_value(serde_json::to_value(
+                    map.get_deep_value(),
+                )?)?);
+                if let MessagePart::Tool {
+                    call,
+                    subagent_ref,
+                    subagent_status,
+                    ..
+                } = &mut part
+                {
+                    *call = zeron_proto::ToolCall::Unknown {
+                        name: format!("Agent: {}", child.title),
+                        input: None,
+                    };
+                    if let Some(doc) = child_doc {
+                        *subagent_ref = Some(doc.into());
+                    }
+                    *subagent_status = Some(match child.status.as_str() {
+                        "running" | "queued" => SubagentStatus::Running,
+                        "completed" => SubagentStatus::Done,
+                        _ => SubagentStatus::Failed,
+                    });
+                    update_part_fields(&map, &part)?;
+                    self.doc.commit();
+                    return Ok(Some((map.id(), part)));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Read all entries (continuations NOT joined — see `join_continuation_entries`).
@@ -641,6 +744,42 @@ impl SessionDoc {
         Ok(false)
     }
 
+    /// Refresh one known canonical agent tool without touching its owning
+    /// message's status or text. Container identity survives CRDT insertions;
+    /// callers need not search or rewrite an old transcript entry.
+    pub fn update_agent_tool_part(
+        &self,
+        container_id: &loro::ContainerID,
+        replacement: &MessagePart,
+    ) -> Result<bool, DocError> {
+        let MessagePart::Tool { id, call, .. } = replacement else {
+            return Ok(false);
+        };
+        if !call.is_subagent_spawn() || container_id.container_type() != loro::ContainerType::Map {
+            return Ok(false);
+        }
+        let map = self.doc.get_map(container_id.clone());
+        if !matches!(map.get("id"), Some(loro::ValueOrContainer::Value(LoroValue::String(old))) if old.as_str() == id)
+            || !matches!(map.get("kind"), Some(loro::ValueOrContainer::Value(LoroValue::String(kind))) if kind.as_str() == "tool")
+        {
+            return Ok(false);
+        }
+        let was_agent = map
+            .get("call")
+            .and_then(|v| match v {
+                loro::ValueOrContainer::Value(v) => serde_json::to_value(v).ok(),
+                _ => None,
+            })
+            .and_then(|v| serde_json::from_value::<zeron_proto::ToolCall>(v).ok())
+            .is_some_and(|call| call.is_subagent_spawn());
+        if !was_agent {
+            return Ok(false);
+        }
+        update_part_fields(&map, replacement)?;
+        self.doc.commit();
+        Ok(true)
+    }
+
     /// Export a snapshot (persistence) — `ExportMode::Snapshot`.
     pub fn export_snapshot(&self) -> Result<Vec<u8>, DocError> {
         self.doc
@@ -720,6 +859,9 @@ fn push_part(parts: &LoroList, part: &MessagePart) -> Result<(), DocError> {
     }
     if let Some(output_bytes) = doc_part.output_bytes {
         map.insert("outputBytes", output_bytes as i64)?;
+    }
+    if let Some(output_digest) = doc_part.output_digest {
+        map.insert("outputDigest", output_digest as i64)?;
     }
     if let Some(diff_ref) = &doc_part.diff_ref {
         map.insert("diffRef", diff_ref.as_str())?;
@@ -874,6 +1016,7 @@ fn salvage_part(part: &serde_json::Value, entry_id: &str, ix: usize) -> Option<M
             diff: None,
             output_ref: None,
             output_bytes: None,
+            output_digest: None,
             diff_ref: None,
             diff_stats: None,
             subagent_ref: None,
@@ -978,6 +1121,12 @@ impl<'a> SegmentWriter<'a> {
             entry_index,
             written,
         }
+    }
+
+    /// Stable address of an already-synced part, for lifecycle updates after
+    /// this writer finishes. Unlike list positions it survives peer insertions.
+    pub fn tool_part_container_id(&self, index: usize) -> Result<loro::ContainerID, DocError> {
+        Ok(part_map_at(&self.parts_list()?, index)?.id())
     }
 
     /// The state a later [`Self::resume`] needs.
@@ -1107,15 +1256,26 @@ fn update_part_fields(map: &LoroMap, part: &MessagePart) -> Result<(), DocError>
     }
     if let Some(output) = &doc_part.output {
         map.insert("output", output.as_str())?;
+    } else {
+        map.delete("output")?;
     }
     if let Some(diff) = &doc_part.diff {
         map.insert("diff", loro_value_from_json(diff))?;
     }
     if let Some(output_ref) = &doc_part.output_ref {
         map.insert("outputRef", output_ref.as_str())?;
+    } else {
+        map.delete("outputRef")?;
     }
     if let Some(output_bytes) = doc_part.output_bytes {
         map.insert("outputBytes", output_bytes as i64)?;
+    } else {
+        map.delete("outputBytes")?;
+    }
+    if let Some(output_digest) = doc_part.output_digest {
+        map.insert("outputDigest", output_digest as i64)?;
+    } else {
+        map.delete("outputDigest")?;
     }
     if let Some(diff_ref) = &doc_part.diff_ref {
         map.insert("diffRef", diff_ref.as_str())?;
@@ -1245,6 +1405,7 @@ mod tests {
             diff: None,
             output_ref: None,
             output_bytes: None,
+            output_digest: None,
             diff_ref: None,
             diff_stats: None,
             subagent_ref: None,
@@ -1297,6 +1458,7 @@ mod tests {
             diff: None,
             output_ref: None,
             output_bytes: None,
+            output_digest: None,
             diff_ref: None,
             diff_stats: None,
             subagent_ref: None,
@@ -1504,7 +1666,12 @@ mod tests {
             },
         );
         writer.sync(&folded).unwrap();
-        fold_event_into_parts(&mut folded, &AgentEvent::TextDelta { text: "Done".into() });
+        fold_event_into_parts(
+            &mut folded,
+            &AgentEvent::TextDelta {
+                text: "Done".into(),
+            },
+        );
         writer.sync(&folded).unwrap();
         writer.finish(&folded, MessageStatus::Complete).unwrap();
 
@@ -1531,6 +1698,50 @@ mod tests {
         assert_eq!(part["kind"], "reasoning");
         assert_eq!(part["reasoning"], "let me think");
         assert!(part.get("text").is_none(), "{part:?}");
+    }
+
+    #[test]
+    fn segment_writer_replaces_and_clears_public_tool_output() {
+        let doc = SessionDoc::init("output-replacement").unwrap();
+        let mut writer = SegmentWriter::begin(&doc, "a1", "dev-a", 5).unwrap();
+        let mut folded = Vec::new();
+        for event in [
+            AgentEvent::ToolCall {
+                id: "tool".into(),
+                call: ToolCall::Exec {
+                    command: "echo public".into(),
+                },
+            },
+            AgentEvent::ToolProgress {
+                id: "tool".into(),
+                output: Some("one".into()),
+            },
+            AgentEvent::ToolProgress {
+                id: "tool".into(),
+                output: Some("two".into()),
+            },
+            AgentEvent::ToolProgress {
+                id: "tool".into(),
+                output: None,
+            },
+            AgentEvent::ToolResult {
+                id: "tool".into(),
+                is_error: false,
+                output: Some("final".into()),
+                diff: None,
+            },
+            AgentEvent::ToolResult {
+                id: "tool".into(),
+                is_error: false,
+                output: None,
+                diff: None,
+            },
+        ] {
+            fold_event_into_parts(&mut folded, &event);
+            crate::parts::apply_sidecar_refs("output-replacement", &mut folded);
+            writer.sync(&folded).unwrap();
+            assert_eq!(doc.read_entries().unwrap()[0].parts, folded, "{event:?}");
+        }
     }
 
     /// The ToolResult resolution path goes through `update_part_fields` —
@@ -1581,14 +1792,9 @@ mod tests {
                 diff_stats,
                 ..
             } => {
-                // One-liner chips: the fold drops outputs entirely (journal
-                // only), so even a direct apply_sidecar_refs call has no
-                // output to key — diff stats still get their ref (this test
-                // calls apply_sidecar_refs directly; the live fold no longer
-                // does).
-                assert_eq!(output.as_deref(), None);
-                assert_eq!(output_ref.as_deref(), None);
-                assert_eq!(*output_bytes, None);
+                assert_eq!(output.as_deref(), Some("total 0\nmore lines"));
+                assert_eq!(output_ref.as_deref(), Some("chat-2/t1"));
+                assert_eq!(*output_bytes, Some("total 0\nmore lines".len() as u64));
                 assert!(diff.is_none(), "no inline diff text in the doc");
                 assert_eq!(diff_ref.as_deref(), Some("chat-2/t1.diff"));
                 let stats = diff_stats.as_ref().expect("stats survive");
@@ -1622,6 +1828,7 @@ mod tests {
                 }),
                 output_ref: None,
                 output_bytes: None,
+                output_digest: None,
                 diff_ref: None,
                 diff_stats: None,
                 subagent_ref: None,
@@ -1763,6 +1970,98 @@ mod tests {
         });
         let entry = entry_from_json(v).expect("strict");
         assert_eq!(entry.id, "m1");
+    }
+
+    #[test]
+    fn canonical_agent_part_updates_use_stable_identity_and_preserve_the_message() {
+        use zeron_proto::{AgentEvent, ToolCall};
+        let doc = SessionDoc::init("canonical").unwrap();
+        let mut parts = Vec::new();
+        for (id, call) in [
+            (
+                "child",
+                ToolCall::Unknown {
+                    name: "Agent: Trace callers".into(),
+                    input: None,
+                },
+            ),
+            (
+                "shell",
+                ToolCall::Exec {
+                    command: "pwd".into(),
+                },
+            ),
+        ] {
+            crate::fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolCall {
+                    id: id.into(),
+                    call,
+                },
+            );
+        }
+        crate::fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::TextDelta {
+                text: "Parent finished".into(),
+            },
+        );
+        let mut writer = SegmentWriter::begin(&doc, "original", "dev", 1).unwrap();
+        writer.sync(&parts).unwrap();
+        let child_id = writer.tool_part_container_id(0).unwrap();
+        let shell_id = writer.tool_part_container_id(1).unwrap();
+        writer.finish(&parts, MessageStatus::Complete).unwrap();
+        // A peer can insert ahead of the finished entry. The canonical address
+        // must not be a cached list index or a search of the latest transcript.
+        let inserted = doc
+            .doc
+            .get_list("messages")
+            .insert_container(0, LoroMap::new())
+            .unwrap();
+        write_entry_scalar_fields(&inserted, &user_entry("peer", "Earlier message")).unwrap();
+        inserted.insert_container("parts", LoroList::new()).unwrap();
+        doc.doc.commit();
+        crate::fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolProgress {
+                id: "child".into(),
+                output: Some("Tracing".into()),
+            },
+        );
+        assert!(doc.update_agent_tool_part(&child_id, &parts[0]).unwrap());
+        assert!(
+            !doc.update_agent_tool_part(&shell_id, &parts[0]).unwrap(),
+            "wrong identity"
+        );
+        let mut forged_shell = parts[0].clone();
+        if let MessagePart::Tool { id, .. } = &mut forged_shell {
+            *id = "shell".into();
+        }
+        assert!(
+            !doc.update_agent_tool_part(&shell_id, &forged_shell)
+                .unwrap(),
+            "ordinary tools cannot be promoted by late updates"
+        );
+        assert!(
+            !doc.update_agent_tool_part(&child_id, &parts[2]).unwrap(),
+            "not a tool"
+        );
+        crate::fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolResult {
+                id: "child".into(),
+                is_error: true,
+                output: None,
+                diff: None,
+            },
+        );
+        assert!(doc.update_agent_tool_part(&child_id, &parts[0]).unwrap());
+        let entries = doc.read_entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        let original = entries.iter().find(|entry| entry.id == "original").unwrap();
+        assert_eq!(original.status, Some(MessageStatus::Complete));
+        assert_eq!(original.parts, parts);
+        assert_eq!(original.created_at, 1);
     }
 }
 

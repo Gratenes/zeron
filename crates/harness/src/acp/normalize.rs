@@ -8,13 +8,18 @@
 //! tagged `sessionUpdate`/snake_case; structs are camelCase; tool kinds and
 //! statuses are snake_case).
 
+use std::collections::VecDeque;
+
 use serde_json::Value;
 use zeron_proto::{AgentEvent, SlashCommand, TodoItem, ToolCall, ToolDiff};
 
-/// Byte cap applied to tool output text at the harness boundary. The doc-side
-/// fold applies its own (smaller) cap before anything persists; this one only
-/// bounds what crosses the event stream.
-pub(crate) const OUTPUT_CAP: usize = 16 * 1024;
+/// Full public payload budget for normalized events, journal replay and output
+/// retrieval. Keep Mimir's 64 KiB proposal body plus outline/diagnostics intact;
+/// the doc fold independently derives its tiny synced preview from this text.
+pub(crate) const OUTPUT_CAP: usize = 256 * 1024;
+
+/// Tool identity/argument text has a separate small budget, not the output one.
+const SHAPE_TEXT_CAP: usize = 16 * 1024;
 
 /// Byte cap for each side of an inline diff crossing the event stream.
 pub(crate) const DIFF_TEXT_CAP: usize = 64 * 1024;
@@ -37,12 +42,14 @@ pub(crate) fn cap_text(text: &str, cap: usize) -> String {
     out
 }
 
-/// The text of a `ContentBlock` (`{type: "text", text}`); non-text blocks
-/// (image, audio, resource, resource_link) render as nothing.
+/// Public text in an ACP `ContentBlock`, including embedded text resources.
+/// Binary attachments and resource links are not fetched or decoded here.
 fn content_block_text(block: &Value) -> Option<&str> {
-    (block.get("type").and_then(Value::as_str) == Some("text"))
-        .then(|| block.get("text").and_then(Value::as_str))
-        .flatten()
+    match block.get("type").and_then(Value::as_str)? {
+        "text" => block.get("text")?.as_str(),
+        "resource" => block.get("resource")?.get("text")?.as_str(),
+        _ => None,
+    }
 }
 
 /// A `ContentChunk`'s streamed text (`{content: {type: "text", ...}}`).
@@ -51,20 +58,52 @@ pub(crate) fn chunk_text(update: &Value) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
-/// Joined text of a tool call's `content` array, capped; `None` when empty.
-fn tool_output(update: &Value) -> Option<String> {
-    let parts: Vec<&str> = update
+/// A public embedded Markdown resource is a document, not a title convention.
+fn markdown_resource_text(block: &Value) -> Option<&str> {
+    if block.get("type").and_then(Value::as_str) != Some("resource") {
+        return None;
+    }
+    let resource = block.get("resource")?;
+    (resource.get("mimeType").and_then(Value::as_str) == Some("text/markdown"))
+        .then(|| resource.get("text").and_then(Value::as_str))
+        .flatten()
+}
+
+/// Join only bounded public content, never an unbounded intermediate string.
+/// Documents omit the agent's redundant plain-text outline and retain just the
+/// Markdown resources. Other tools retain all public text, including resources.
+fn tool_output(update: &Value, document: bool) -> Option<String> {
+    let parts = update
         .get("content")?
         .as_array()?
         .iter()
         .filter(|c| c.get("type").and_then(Value::as_str) == Some("content"))
-        .filter_map(|c| content_block_text(c.get("content")?))
-        .filter(|t| !t.is_empty())
-        .collect();
-    if parts.is_empty() {
-        return None;
+        .filter_map(|c| {
+            let block = c.get("content")?;
+            if document {
+                markdown_resource_text(block)
+            } else {
+                content_block_text(block)
+            }
+        })
+        .filter(|text| !text.is_empty());
+    let mut output = String::new();
+    for text in parts {
+        if !output.is_empty() {
+            if output.len() == OUTPUT_CAP {
+                output.push_str("\n… [truncated]");
+                break;
+            }
+            output.push('\n');
+        }
+        let remaining = OUTPUT_CAP - output.len();
+        if text.len() > remaining {
+            output.push_str(&cap_text(text, remaining));
+            break;
+        }
+        output.push_str(text);
     }
-    Some(cap_text(&parts.join("\n"), OUTPUT_CAP))
+    (!output.is_empty()).then_some(output)
 }
 
 /// First `{type: "diff"}` entry of a tool call's `content` array.
@@ -79,7 +118,7 @@ fn tool_diff(update: &Value) -> Option<ToolDiff> {
         return None;
     }
     Some(ToolDiff {
-        path,
+        path: cap_text(&path, SHAPE_TEXT_CAP),
         old_text: diff
             .get("oldText")
             .and_then(Value::as_str)
@@ -343,6 +382,200 @@ fn typed_call(update: &Value) -> ToolCall {
     }
 }
 
+/// Keep bounded recent tool snapshots for the session, including completed
+/// calls: canonical agent tools can receive further updates on later turns.
+/// Raw output and journal data are never retained; the least recently updated
+/// snapshot is evicted when the session reaches the tool limit.
+const MAX_TRACKED_TOOLS: usize = 128;
+const SHAPE_FIELD_CAP: usize = 64 * 1024;
+const SHAPE_FIELDS: [&str; 5] = ["kind", "title", "rawInput", "locations", "_meta"];
+
+#[derive(Default)]
+struct ToolSnapshot {
+    shape: serde_json::Map<String, Value>,
+    document: bool,
+    output: Option<String>,
+    diff: Option<ToolDiff>,
+}
+
+/// Stateful projection for one ACP session. ACP update fields are optional;
+/// omitted fields retain their previous value, while content arrays replace it.
+#[derive(Default)]
+pub(crate) struct UpdateNormalizer {
+    tools: VecDeque<(String, ToolSnapshot)>,
+    message_id: Option<String>,
+    has_message_text: bool,
+}
+
+impl UpdateNormalizer {
+    pub(crate) fn map_update(&mut self, update: &Value) -> Vec<AgentEvent> {
+        let kind = update.get("sessionUpdate").and_then(Value::as_str);
+        if matches!(kind, Some("tool_call" | "tool_call_update")) {
+            let id = str_field(update, "toolCallId");
+            let previous = self
+                .tools
+                .iter()
+                .position(|(key, _)| key == &id)
+                .and_then(|index| self.tools.remove(index));
+            let mut snapshot = previous.map(|(_, tool)| tool).unwrap_or_default();
+            let events = map_tool_update(update, &mut snapshot);
+            if !id.is_empty() && id.len() <= SHAPE_TEXT_CAP {
+                if self.tools.len() == MAX_TRACKED_TOOLS {
+                    self.tools.pop_front();
+                }
+                self.tools.push_back((id, snapshot));
+            }
+            return events;
+        }
+
+        let mut events = map_update(update);
+        if kind == Some("agent_message_chunk") && !events.is_empty() {
+            if let Some(id) = update
+                .get("messageId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= SHAPE_TEXT_CAP)
+            {
+                if self.has_message_text && self.message_id.as_deref() != Some(id) {
+                    events.insert(0, AgentEvent::MessageBoundary);
+                }
+                self.message_id = Some(id.to_owned());
+            }
+            self.has_message_text = true;
+        }
+        events
+    }
+}
+
+/// Oversized arguments need not evict useful typed fields (for example a shell
+/// command alongside a large unrelated value). Retain only fields we interpret.
+fn bounded_input(input: &Value) -> Value {
+    if input.to_string().len() <= SHAPE_FIELD_CAP {
+        return input.clone();
+    }
+    let mut projected = serde_json::Map::new();
+    for key in [
+        "command",
+        "path",
+        "file_path",
+        "filePath",
+        "searchTerm",
+        "pattern",
+        "globPattern",
+        "query",
+        "url",
+        "title",
+        "description",
+        "_toolName",
+        "subagent_type",
+        "prompt",
+    ] {
+        if let Some(text) = input.get(key).and_then(Value::as_str) {
+            projected.insert(key.into(), Value::String(cap_text(text, SHAPE_TEXT_CAP)));
+        }
+    }
+    Value::Object(projected)
+}
+
+fn map_tool_update(update: &Value, snapshot: &mut ToolSnapshot) -> Vec<AgentEvent> {
+    let id = str_field(update, "toolCallId");
+    let has_shape = update.get("sessionUpdate").and_then(Value::as_str) == Some("tool_call")
+        || ["kind", "title", "rawInput", "locations"]
+            .iter()
+            .any(|key| update.get(*key).is_some_and(|v| !v.is_null()))
+        || tool_diff(update).is_some();
+
+    // Use the current frame unmodified for fresh arguments; only fill omissions
+    // from the bounded cache. In particular, a completion title is not a command.
+    let mut merged = update.clone();
+    for key in SHAPE_FIELDS {
+        if let Some(value) = update.get(key).filter(|value| !value.is_null()) {
+            let bounded = match key {
+                "rawInput" => Some(bounded_input(value)),
+                "kind" | "title" => value
+                    .as_str()
+                    .map(|text| Value::String(cap_text(text, SHAPE_TEXT_CAP))),
+                _ => (value.to_string().len() <= SHAPE_FIELD_CAP).then(|| value.clone()),
+            };
+            if let Some(value) = bounded {
+                snapshot.shape.insert(key.into(), value);
+            } else {
+                snapshot.shape.remove(key);
+            }
+        } else if let Some(value) = snapshot.shape.get(key) {
+            merged[key] = value.clone();
+        }
+    }
+    let content_changed = update.get("content").is_some_and(Value::is_array);
+    let was_document = snapshot.document;
+    if !matches!(
+        merged
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("other"),
+        "other" | "think"
+    ) {
+        snapshot.document = false;
+    } else if content_changed {
+        snapshot.document = update["content"]
+            .as_array()
+            .expect("checked above")
+            .iter()
+            .any(|part| {
+                part.get("type").and_then(Value::as_str) == Some("content")
+                    && part
+                        .get("content")
+                        .and_then(markdown_resource_text)
+                        .is_some()
+            });
+    }
+    let had_output = snapshot.output.is_some();
+    if content_changed {
+        snapshot.output = tool_output(&merged, snapshot.document);
+        snapshot.diff = tool_diff(update);
+    } else if let Some(diff) = &snapshot.diff {
+        // A sparse shape update must not lose the file identity of an earlier
+        // diff. This projected content is never treated as a new output frame.
+        merged["content"] = serde_json::json!([{
+            "type": "diff", "path": diff.path, "oldText": diff.old_text, "newText": diff.new_text,
+        }]);
+    }
+    let mut events = Vec::new();
+    if has_shape || snapshot.document != was_document {
+        let call = if snapshot.document {
+            let title = str_field(&merged, "title");
+            ToolCall::Document {
+                title: if title.is_empty() {
+                    "Document".into()
+                } else {
+                    title
+                },
+            }
+        } else {
+            typed_call(&merged)
+        };
+        events.push(AgentEvent::ToolCall {
+            id: id.clone(),
+            call,
+        });
+    }
+    match update.get("status").and_then(Value::as_str) {
+        Some(status @ ("completed" | "failed")) => events.push(AgentEvent::ToolResult {
+            id,
+            is_error: status == "failed",
+            output: snapshot.output.clone(),
+            diff: snapshot.diff.clone(),
+        }),
+        _ if content_changed && (had_output || snapshot.output.is_some()) => {
+            events.push(AgentEvent::ToolProgress {
+                id,
+                output: snapshot.output.clone(),
+            })
+        }
+        _ => {}
+    }
+    events
+}
+
 /// Map one `session/update` payload's `update` object to events.
 /// Message/thought chunks are handled here too (unlike codex, ACP has no
 /// separate delta channel).
@@ -361,41 +594,7 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
         // Replayed history on session/load is filtered by the session loop
         // before this map; a live user chunk is our own prompt echoed back.
         "user_message_chunk" => Vec::new(),
-        "tool_call" => {
-            let id = str_field(update, "toolCallId");
-            let mut events = vec![AgentEvent::ToolCall {
-                id: id.clone(),
-                call: typed_call(update),
-            }];
-            // Some agents send a single terminal-status `tool_call` with the
-            // result inline instead of a follow-up update.
-            if let Some(resolved) = resolved_result(update, id) {
-                events.push(resolved);
-            }
-            events
-        }
-        "tool_call_update" => {
-            let id = str_field(update, "toolCallId");
-            let mut events = Vec::new();
-            // Refresh the call only when the update carries new SHAPE — kind,
-            // title, rawInput, or a diff. Result-only content (output text)
-            // must not re-type the call: a kindless completion update would
-            // clobber the opening call's `Exec` into `Unknown`.
-            if update.get("kind").is_some()
-                || update.get("title").is_some()
-                || update.get("rawInput").is_some()
-                || tool_diff(update).is_some()
-            {
-                events.push(AgentEvent::ToolCall {
-                    id: id.clone(),
-                    call: typed_call(update),
-                });
-            }
-            if let Some(resolved) = resolved_result(update, id) {
-                events.push(resolved);
-            }
-            events
-        }
+        "tool_call" | "tool_call_update" => map_tool_update(update, &mut ToolSnapshot::default()),
         "plan" => {
             let items = update
                 .get("entries")
@@ -442,23 +641,6 @@ pub(crate) fn map_update(update: &Value) -> Vec<AgentEvent> {
         "current_mode_update" | "config_option_update" | "session_info_update" => Vec::new(),
         _ => Vec::new(),
     }
-}
-
-/// A terminal `status` on a tool_call/tool_call_update resolves the call:
-/// `completed`/`failed` → ToolResult with capped output + inline diff.
-fn resolved_result(update: &Value, id: String) -> Option<AgentEvent> {
-    let status = update.get("status").and_then(Value::as_str)?;
-    let is_error = match status {
-        "completed" => false,
-        "failed" => true,
-        _ => return None,
-    };
-    Some(AgentEvent::ToolResult {
-        id,
-        is_error,
-        output: tool_output(update),
-        diff: tool_diff(update),
-    })
 }
 
 /// Decode an `availableCommands` array (`{name, description, input: {hint}}`).
@@ -529,6 +711,565 @@ mod tests {
             "content": { "type": "image", "data": "...", "mimeType": "image/png" },
         });
         assert_eq!(map_update(&image), Vec::new());
+    }
+
+    #[test]
+    fn large_public_proposal_and_final_diagnostic_survive_normalization() {
+        let proposal = format!(
+            "# Proposal\n{}\nFINAL DELIVERY STEP",
+            "Design details ✓\n".repeat(3000)
+        );
+        let stdout = "public stdout line\n".repeat(3000);
+        let diagnostic = "STDERR: final compiler error E0425 — unknown symbol";
+        let expected = format!("Plan outline\n{proposal}\n{stdout}\n{diagnostic}");
+        let mut normalizer = UpdateNormalizer::default();
+        // Resource attachments on execute tools remain ordinary public output.
+        normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "large-public", "kind": "execute",
+            "rawInput": {"command": "cargo check"}, "title": "Run command"
+        }));
+        let events = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "large-public", "status": "failed",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": "Plan outline"}},
+                {"type": "content", "content": {"type": "resource", "resource": {
+                    "uri": "urn:mimir:proposal:large-public", "mimeType": "text/markdown", "text": proposal
+                }}},
+                {"type": "content", "content": {"type": "text", "text": stdout}},
+                {"type": "content", "content": {"type": "text", "text": diagnostic}}
+            ],
+            "rawOutput": {"result": "PRIVATE RAW DATA MUST NOT BE USED"}
+        }));
+        let [
+            AgentEvent::ToolResult {
+                output: Some(output),
+                is_error: true,
+                ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected failed public result");
+        };
+        assert!(
+            output.ends_with(diagnostic),
+            "the final public diagnostic was lost"
+        );
+        assert!(
+            output.contains("FINAL DELIVERY STEP"),
+            "proposal body was lost"
+        );
+        assert_eq!(output, &expected);
+    }
+
+    #[test]
+    fn markdown_resources_become_documents_and_survive_sparse_completions() {
+        let body = format!(
+            "# Proposal\n{}\nLast step",
+            "Detailed design.\n".repeat(3000)
+        );
+        for kind in ["other", "think"] {
+            let mut normalizer = UpdateNormalizer::default();
+            normalizer.map_update(&json!({
+                "sessionUpdate": "tool_call", "toolCallId": "proposal", "kind": kind, "title": "Design"
+            }));
+            assert_eq!(normalizer.map_update(&json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "proposal",
+                "content": [
+                    {"type": "content", "content": {"type": "text", "text": "Redundant outline"}},
+                    {"type": "content", "content": {"type": "resource", "resource": {
+                        "uri": "urn:proposal", "mimeType": "text/markdown", "text": body
+                    }}}
+                ]
+            })), vec![
+                AgentEvent::ToolCall { id: "proposal".into(), call: ToolCall::Document { title: "Design".into() } },
+                AgentEvent::ToolProgress { id: "proposal".into(), output: Some(body.clone()) },
+            ]);
+            assert_eq!(
+                normalizer.map_update(&json!({
+                    "sessionUpdate": "tool_call_update", "toolCallId": "proposal",
+                    "title": "Final design", "status": "completed"
+                })),
+                vec![
+                    AgentEvent::ToolCall {
+                        id: "proposal".into(),
+                        call: ToolCall::Document {
+                            title: "Final design".into()
+                        }
+                    },
+                    AgentEvent::ToolResult {
+                        id: "proposal".into(),
+                        is_error: false,
+                        output: Some(body.clone()),
+                        diff: None
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn execute_and_read_resource_content_is_not_reinterpreted_as_a_document() {
+        for (kind, expected_call) in [
+            (
+                "execute",
+                ToolCall::Exec {
+                    command: "cat plan.md".into(),
+                },
+            ),
+            (
+                "read",
+                ToolCall::ReadFile {
+                    path: "plan.md".into(),
+                },
+            ),
+        ] {
+            let mut normalizer = UpdateNormalizer::default();
+            normalizer.map_update(&json!({
+                "sessionUpdate": "tool_call", "toolCallId": "t", "kind": kind,
+                "rawInput": {"command": "cat plan.md", "path": "plan.md"}, "title": "Plan"
+            }));
+            assert_eq!(normalizer.map_update(&json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "t", "title": "Finished", "status": "completed",
+                "content": [
+                    {"type": "content", "content": {"type": "text", "text": "Public stdout"}},
+                    {"type": "content", "content": {"type": "resource", "resource": {
+                        "uri": "urn:read", "mimeType": "text/markdown", "text": "# File contents"
+                    }}}
+                ]
+            })), vec![
+                AgentEvent::ToolCall { id: "t".into(), call: expected_call },
+                AgentEvent::ToolResult { id: "t".into(), is_error: false, output: Some("Public stdout\n# File contents".into()), diff: None },
+            ]);
+        }
+        let plain = map_update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "plain", "kind": "other", "title": "Plan",
+            "content": [{"type": "content", "content": {"type": "text", "text": "# Not an embedded document"}}]
+        }));
+        assert!(matches!(
+            plain.first(),
+            Some(AgentEvent::ToolCall {
+                call: ToolCall::Unknown { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn public_output_budget_is_distinct_from_shapes_and_utf8_safe_between_blocks() {
+        let mut normalizer = UpdateNormalizer::default();
+        normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "t", "kind": "execute",
+            "rawInput": {"command": "x".repeat(SHAPE_TEXT_CAP + 10), "unused": "x".repeat(SHAPE_FIELD_CAP)}
+        }));
+        let events = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "t", "title": "Finished", "status": "completed",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": "x".repeat(OUTPUT_CAP - 2)}},
+                {"type": "content", "content": {"type": "text", "text": "éé"}},
+                {"type": "content", "content": {"type": "text", "text": "ignored after bound"}}
+            ]
+        }));
+        let [
+            AgentEvent::ToolCall {
+                call: ToolCall::Exec { command },
+                ..
+            },
+            AgentEvent::ToolResult {
+                output: Some(output),
+                ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected bounded command and public result");
+        };
+        assert_eq!(command.len(), SHAPE_TEXT_CAP + "\n… [truncated]".len());
+        assert!(output.len() <= OUTPUT_CAP + "\n… [truncated]".len());
+        assert!(output.ends_with("\n… [truncated]"));
+        assert!(output.len() > 16 * 1024);
+        assert!(!output.contains('�'));
+        assert!(!output.contains("ignored after bound"));
+    }
+
+    #[test]
+    fn embedded_proposal_markdown_is_public_tool_output() {
+        let events = map_update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "submit-1",
+            "status": "completed",
+            "content": [
+                {"type": "content", "content": {"type": "text", "text": "Plan: safer releases"}},
+                {"type": "content", "content": {"type": "resource", "resource": {
+                    "uri": "urn:mimir:proposal:submit-1", "mimeType": "text/markdown",
+                    "text": "# Safer releases\n\n## Design\nKeep the rollback path."
+                }}}
+            ],
+            "rawOutput": {"details": {"private_trace": "not public output"}}
+        }));
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::ToolCall {
+                    id: "submit-1".into(),
+                    call: ToolCall::Document {
+                        title: "Document".into()
+                    }
+                },
+                AgentEvent::ToolResult {
+                    id: "submit-1".into(),
+                    is_error: false,
+                    output: Some("# Safer releases\n\n## Design\nKeep the rollback path.".into()),
+                    diff: None,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn completion_title_does_not_replace_original_shell_command() {
+        let mut normalizer = UpdateNormalizer::default();
+        normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "shell-1",
+            "kind": "execute", "title": "Run tests", "status": "in_progress",
+            "rawInput": {"command": "printf 'hello\\n'", "timeout_seconds": 120}
+        }));
+        let events = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "shell-1",
+            "kind": "execute", "title": "Process completed, exit code 0", "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "hello\n"}}],
+            "rawOutput": {"result": "raw internal result", "details": {"private_trace": "private"}}
+        }));
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::ToolCall {
+                    id: "shell-1".into(),
+                    call: ToolCall::Exec {
+                        command: "printf 'hello\\n'".into()
+                    }
+                },
+                AgentEvent::ToolResult {
+                    id: "shell-1".into(),
+                    is_error: false,
+                    output: Some("hello\n".into()),
+                    diff: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn public_progress_replaces_snapshots_and_only_terminal_status_resolves() {
+        let mut normalizer = UpdateNormalizer::default();
+        normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "agent-1",
+            "title": "Review the change", "kind": "other", "status": "in_progress"
+        }));
+        for text in ["Inspecting · 1 turn", "Testing · 2 turns"] {
+            assert_eq!(
+                normalizer.map_update(&json!({
+                    "sessionUpdate": "tool_call_update", "toolCallId": "agent-1",
+                    "content": [{"type": "content", "content": {"type": "text", "text": text}}],
+                    "rawOutput": {"private_trace": "must not appear"}
+                })),
+                vec![AgentEvent::ToolProgress {
+                    id: "agent-1".into(),
+                    output: Some(text.into())
+                }]
+            );
+        }
+        assert!(normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "agent-1", "status": "in_progress",
+            "rawOutput": {"result": "not public output"}
+        })).is_empty());
+        assert_eq!(
+            normalizer.map_update(&json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "agent-1", "status": "completed"
+            })),
+            vec![AgentEvent::ToolResult {
+                id: "agent-1".into(),
+                is_error: false,
+                output: Some("Testing · 2 turns".into()),
+                diff: None
+            }]
+        );
+    }
+
+    #[test]
+    fn empty_content_snapshot_clears_public_progress() {
+        let mut normalizer = UpdateNormalizer::default();
+        normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "t1", "kind": "execute",
+            "rawInput": {"command": "cargo test"},
+            "content": [{"type": "content", "content": {"type": "text", "text": "Building"}}]
+        }));
+        assert_eq!(
+            normalizer.map_update(&json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "t1", "content": []
+            })),
+            vec![AgentEvent::ToolProgress {
+                id: "t1".into(),
+                output: None
+            }]
+        );
+        assert_eq!(
+            normalizer.map_update(&json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "failed"
+            })),
+            vec![AgentEvent::ToolResult {
+                id: "t1".into(),
+                is_error: true,
+                output: None,
+                diff: None
+            }]
+        );
+    }
+
+    #[test]
+    fn nonterminal_proposal_and_progress_are_bounded_public_text_only() {
+        let mut normalizer = UpdateNormalizer::default();
+        let events = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "submit-1", "status": "in_progress",
+            "content": [
+                {"type": "content", "content": {"type": "resource", "resource": {
+                    "uri": "urn:mimir:proposal:submit-1", "mimeType": "text/markdown",
+                    "text": "é".repeat(OUTPUT_CAP)
+                }}},
+                {"type": "content", "content": {"type": "resource", "resource": {"blob": "secret blob"}}},
+                {"type": "content", "content": {"type": "resource_link", "uri": "file:///private"}}
+            ],
+            "rawOutput": {"result": "not the preview", "private": "secret"}
+        }));
+        let [
+            AgentEvent::ToolCall {
+                call: ToolCall::Document { .. },
+                ..
+            },
+            AgentEvent::ToolProgress {
+                output: Some(output),
+                ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected public progress without completion: {events:?}");
+        };
+        assert!(output.starts_with("ééé"));
+        assert!(output.ends_with("\n… [truncated]"));
+        assert_eq!(output.len(), OUTPUT_CAP + "\n… [truncated]".len());
+        assert!(!output.contains("secret"));
+        assert!(!output.contains("private"));
+    }
+
+    #[test]
+    fn partial_arguments_locations_and_concurrent_calls_keep_their_identity() {
+        let mut normalizer = UpdateNormalizer::default();
+        normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "shell", "kind": "execute", "title": "Terminal"
+        }));
+        normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "read", "kind": "read",
+            "title": "Read File", "locations": [{"path": "/repo/a.rs"}]
+        }));
+        assert_eq!(normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "shell", "rawInput": {"command": "pwd"}
+        })), vec![AgentEvent::ToolCall { id: "shell".into(), call: ToolCall::Exec { command: "pwd".into() } }]);
+        assert_eq!(
+            normalizer.map_update(&json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "read", "title": "Read 10 lines"
+            })),
+            vec![AgentEvent::ToolCall {
+                id: "read".into(),
+                call: ToolCall::ReadFile {
+                    path: "/repo/a.rs".into()
+                }
+            }]
+        );
+        let events = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "shell", "title": "Finished", "rawInput": null
+        }));
+        assert_eq!(
+            events,
+            vec![AgentEvent::ToolCall {
+                id: "shell".into(),
+                call: ToolCall::Exec {
+                    command: "pwd".into()
+                }
+            }]
+        );
+    }
+
+    #[test]
+    fn distinct_message_ids_separate_committed_messages_without_ending_the_turn() {
+        let mut normalizer = UpdateNormalizer::default();
+        let message = |id: &str, text: &str| {
+            json!({
+                "sessionUpdate": "agent_message_chunk", "messageId": id,
+                "content": {"type": "text", "text": text}
+            })
+        };
+        assert!(normalizer.map_update(&message("empty", "")).is_empty());
+        assert_eq!(
+            normalizer.map_update(&message("entry-1", "First ")),
+            vec![AgentEvent::TextDelta {
+                text: "First ".into()
+            }]
+        );
+        assert_eq!(
+            normalizer.map_update(&message("entry-1", "message.")),
+            vec![AgentEvent::TextDelta {
+                text: "message.".into()
+            }]
+        );
+        assert_eq!(
+            normalizer.map_update(&message("entry-2", "Second message.")),
+            vec![
+                AgentEvent::MessageBoundary,
+                AgentEvent::TextDelta {
+                    text: "Second message.".into()
+                }
+            ]
+        );
+        assert_eq!(
+            normalizer.map_update(&message("", " Legacy delta")),
+            vec![AgentEvent::TextDelta {
+                text: " Legacy delta".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn embedded_plain_text_is_read_but_blobs_and_links_are_not() {
+        let events = map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "read-1", "status": "completed",
+            "content": [
+                {"type": "content", "content": {"type": "resource", "resource": {
+                    "uri": "file:///repo/notes.txt", "mimeType": "text/plain", "text": "Public notes"
+                }}},
+                {"type": "content", "content": {"type": "resource", "resource": {
+                    "uri": "file:///repo/image.png", "mimeType": "image/png", "blob": "binary data"
+                }}},
+                {"type": "content", "content": {"type": "resource_link", "uri": "file:///private"}}
+            ],
+            "rawOutput": {"details": "not public output"}
+        }));
+        assert_eq!(
+            events,
+            vec![AgentEvent::ToolResult {
+                id: "read-1".into(),
+                is_error: false,
+                output: Some("Public notes".into()),
+                diff: None
+            }]
+        );
+    }
+
+    #[test]
+    fn diff_snapshot_survives_omission_but_not_explicit_replacement() {
+        let mut normalizer = UpdateNormalizer::default();
+        for (id, clear) in [("keep", false), ("clear", true)] {
+            normalizer.map_update(&json!({
+                "sessionUpdate": "tool_call", "toolCallId": id, "kind": "edit",
+                "rawInput": {"path": "/repo/a.rs"},
+                "content": [{"type": "diff", "path": "/repo/a.rs", "oldText": "old", "newText": "new"}]
+            }));
+            if clear {
+                normalizer.map_update(&json!({
+                    "sessionUpdate": "tool_call_update", "toolCallId": id, "content": []
+                }));
+            }
+            assert_eq!(
+                normalizer.map_update(&json!({
+                    "sessionUpdate": "tool_call_update", "toolCallId": id, "status": "completed"
+                })),
+                vec![AgentEvent::ToolResult {
+                    id: id.into(),
+                    is_error: false,
+                    output: None,
+                    diff: (!clear).then(|| ToolDiff {
+                        path: "/repo/a.rs".into(),
+                        old_text: Some("old".into()),
+                        new_text: "new".into()
+                    })
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn large_input_keeps_bounded_typed_shape_across_completed_turns() {
+        let mut normalizer = UpdateNormalizer::default();
+        normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "shell-1", "kind": "execute",
+            "rawInput": {"command": "pwd", "unrelated": "x".repeat(SHAPE_FIELD_CAP)}
+        }));
+        let events = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "shell-1", "title": "Finished", "status": "completed"
+        }));
+        assert_eq!(
+            events.first(),
+            Some(&AgentEvent::ToolCall {
+                id: "shell-1".into(),
+                call: ToolCall::Exec {
+                    command: "pwd".into()
+                }
+            })
+        );
+        // Canonical tool IDs can receive more updates on a later turn. The
+        // normalizer lives with the session, not with any one prompt response.
+        normalizer.map_update(&json!({
+            "sessionUpdate": "agent_message_chunk", "messageId": "next-turn",
+            "content": {"type": "text", "text": "Continuing the work."}
+        }));
+        assert_eq!(normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "shell-1", "title": "Running again", "status": "in_progress"
+        })), vec![AgentEvent::ToolCall { id: "shell-1".into(), call: ToolCall::Exec { command: "pwd".into() } }]);
+    }
+
+    #[test]
+    fn canonical_subagent_progress_can_resume_on_later_turns() {
+        let mut normalizer = UpdateNormalizer::default();
+        normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "agent:review", "kind": "other",
+            "title": "Review changes", "rawInput": {"description": "Audit changes", "prompt": "Review", "subagent_type": "review"}
+        }));
+        normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "agent:review", "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "Reviewed first pass"}}]
+        }));
+        normalizer.map_update(&json!({
+            "sessionUpdate": "agent_message_chunk", "messageId": "next-turn",
+            "content": {"type": "text", "text": "Review the follow-up too."}
+        }));
+        let events = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "agent:review", "title": "Reviewing again", "status": "in_progress",
+            "content": [{"type": "content", "content": {"type": "text", "text": "Reviewing follow-up"}}]
+        }));
+        assert!(matches!(events.as_slice(), [
+            AgentEvent::ToolCall { call: ToolCall::Unknown { name, .. }, .. },
+            AgentEvent::ToolProgress { id, output: Some(output) },
+        ] if name == "Agent: Audit changes" && id == "agent:review" && output == "Reviewing follow-up"));
+    }
+
+    #[test]
+    fn recent_tool_cache_is_bounded_without_losing_recent_shapes() {
+        let mut normalizer = UpdateNormalizer::default();
+        for index in 0..=MAX_TRACKED_TOOLS {
+            normalizer.map_update(&json!({
+                "sessionUpdate": "tool_call", "toolCallId": index.to_string(), "kind": "execute",
+                "rawInput": {"command": "pwd"}, "status": "completed"
+            }));
+        }
+        let recent = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": MAX_TRACKED_TOOLS.to_string(), "title": "Finished"
+        }));
+        assert!(
+            matches!(recent.as_slice(), [AgentEvent::ToolCall { call: ToolCall::Exec { command }, .. }] if command == "pwd")
+        );
+        let oldest = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "0", "title": "Finished"
+        }));
+        assert!(
+            matches!(oldest.as_slice(), [AgentEvent::ToolCall { call: ToolCall::Unknown { name, input: None }, .. }] if name == "Finished")
+        );
     }
 
     #[test]
@@ -722,7 +1463,7 @@ mod tests {
         else {
             panic!("expected resolved result, got {events:?}");
         };
-        assert!(output.len() < OUTPUT_CAP + 32);
+        assert_eq!(output.len(), OUTPUT_CAP + "\n… [truncated]".len());
         assert!(output.ends_with("… [truncated]"));
     }
 

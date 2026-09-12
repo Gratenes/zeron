@@ -17,9 +17,8 @@ use crate::constants::MSG_INLINE_MAX;
 /// summary, so 160 is generous.
 pub const TOOL_OUTPUT_SUMMARY_MAX: usize = 160;
 
-/// The doc-resident form of a tool output (docs/chat2-sync.md A1; the R2
-/// sidecar is PARKED as of 2026-08-10, so this IS the whole record in the
-/// doc — the full text survives only in the host's local run journal):
+/// The bounded doc-resident form of public tool output. Full text is retrieved
+/// lazily from the host's normalized journal or the remote sidecar:
 ///
 /// - Markdown code fences are stripped first — ACP harnesses fence every
 ///   output, so the fence is transport wrapping, never content (pre-fix,
@@ -63,6 +62,15 @@ pub fn summarize_tool_output(text: &str) -> Option<String> {
     let mut out = line[..end].to_owned();
     out.push('…');
     Some(out)
+}
+
+fn output_digest(text: &str) -> u64 {
+    text.as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x1_0000_01b3)
+        })
+        & i64::MAX as u64
 }
 
 /// Per-file diff stats persisted in place of inline diff text (t3's shape).
@@ -162,6 +170,10 @@ pub enum MessagePart {
         /// Full-output byte length, so the UI can say "Show full output (12 KB)".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_bytes: Option<u64>,
+        /// Stable digest of the full output before summary stripping. Identity only;
+        /// never rendered, and reveals no raw child output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_digest: Option<u64>,
         /// Sidecar key (`{chatId}/{partId}.diff`) of the full diff JSON.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff_ref: Option<String>,
@@ -266,6 +278,21 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 });
             }
         }
+        AgentEvent::MessageBoundary => {
+            // ACP message commits are paragraph boundaries, not turn ends.
+            // A tool/reasoning part already separates adjacent text; avoid
+            // empty synthetic parts or repeated blank paragraphs.
+            if let Some(MessagePart::Text { text, .. }) = out.last_mut()
+                && !text.is_empty()
+                && !text.ends_with("\n\n")
+            {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push('\n');
+            }
+        }
+
         AgentEvent::ReasoningDelta { text } => {
             // Empty deltas are liveness heartbeats (redacted thinking) — the
             // engine drops them before the fold, but stay tolerant here too.
@@ -300,6 +327,7 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     diff: None,
                     output_ref: None,
                     output_bytes: None,
+                    output_digest: None,
                     diff_ref: None,
                     diff_stats: None,
                     subagent_ref: None,
@@ -308,6 +336,28 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 });
             }
         }
+        AgentEvent::ToolProgress { id, output } => {
+            for part in out.iter_mut() {
+                if let MessagePart::Tool {
+                    id: part_id,
+                    output: summary,
+                    output_bytes,
+                    output_digest: digest,
+                    resolved: false,
+                    ..
+                } = part
+                    && part_id == id
+                {
+                    *summary = output.as_deref().and_then(summarize_tool_output);
+                    *output_bytes = output
+                        .as_ref()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.len() as u64);
+                    *digest = output.as_deref().map(output_digest);
+                }
+            }
+        }
+
         AgentEvent::ToolResult {
             id,
             is_error,
@@ -322,6 +372,8 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                     output: out_slot,
                     diff: diff_slot,
                     output_bytes,
+                    output_digest: digest,
+                    output_ref,
                     diff_stats,
                     ..
                 } = p
@@ -329,16 +381,18 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
                 {
                     *e = *is_error;
                     *resolved = true;
-                    // Tool OUTPUTS never enter the doc (2026-08-10 product
-                    // call: chips are one-liners — name + call info — like
-                    // pre-output builds; the R2 sidecar is parked with them,
-                    // docs/chat2-sync.md A2). Full text lives only in the
-                    // host's run journal. Inline diffs die the same way:
-                    // stats only, never text. `is_error` still folds so
-                    // failed chips read as failed.
-                    let _ = output; // journal-only
-                    *out_slot = None;
-                    *output_bytes = None;
+                    // Only a bounded public-output summary enters the doc.
+                    // Full output stays in the journal/sidecar, never raw tool
+                    // inputs or adapter-internal metadata.
+                    *out_slot = output.as_deref().and_then(summarize_tool_output);
+                    *output_bytes = output
+                        .as_ref()
+                        .filter(|s| !s.trim().is_empty())
+                        .map(|s| s.len() as u64);
+                    *digest = output.as_deref().map(output_digest);
+                    if output_bytes.is_none() {
+                        *output_ref = None;
+                    }
                     *diff_slot = None;
                     *diff_stats = diff.as_ref().map(|d| vec![diff_stat(d)]);
                 }
@@ -444,6 +498,11 @@ pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
         // the transcript. UserMessage becomes its own doc ENTRY (the engine's
         // subagent sink writes it), never a part of the assistant message.
         AgentEvent::AssistantMessageCompleted { .. }
+        | AgentEvent::GoalState { .. }
+        | AgentEvent::ControlResolved { .. }
+        | AgentEvent::SubagentView { .. }
+        | AgentEvent::SessionTitle { .. }
+        | AgentEvent::SessionMode { .. }
         | AgentEvent::Usage { .. }
         | AgentEvent::ContextUsage { .. }
         | AgentEvent::AvailableCommands { .. }
@@ -649,6 +708,116 @@ pub fn join_continuations(entries: Vec<Vec<MessagePart>>) -> Vec<MessagePart> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_messages_are_paragraphs_not_turn_boundaries() {
+        let mut parts = Vec::new();
+        fold_event_into_parts(&mut parts, &AgentEvent::MessageBoundary);
+        assert!(parts.is_empty());
+        fold_event_into_parts(&mut parts, &text_delta("First"));
+        fold_event_into_parts(&mut parts, &AgentEvent::MessageBoundary);
+        fold_event_into_parts(&mut parts, &AgentEvent::MessageBoundary);
+        fold_event_into_parts(&mut parts, &text_delta("Second"));
+        assert!(
+            matches!(&parts[..], [MessagePart::Text { text, .. }] if text == "First\n\nSecond")
+        );
+        let before = parts.clone();
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::SessionTitle {
+                title: "Title".into(),
+            },
+        );
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::SessionMode {
+                id: "mode".into(),
+                value: "plan".into(),
+            },
+        );
+        assert_eq!(parts, before, "metadata never mutates message content");
+    }
+
+    #[test]
+    fn tool_progress_replaces_bounded_public_output_without_resolving() {
+        let mut parts = Vec::new();
+        let progress = |text: Option<&str>| AgentEvent::ToolProgress {
+            id: "t".into(),
+            output: text.map(str::to_owned),
+        };
+        fold_event_into_parts(&mut parts, &progress(Some("orphan")));
+        assert!(parts.is_empty());
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolCall {
+                id: "t".into(),
+                call: ToolCall::Exec {
+                    command: "cargo test".into(),
+                },
+            },
+        );
+        fold_event_into_parts(&mut parts, &progress(Some("first")));
+        fold_event_into_parts(&mut parts, &progress(Some("second")));
+        assert!(
+            matches!(&parts[0], MessagePart::Tool { output: Some(text), resolved: false, is_error: false, .. } if text == "second")
+        );
+        fold_event_into_parts(&mut parts, &progress(None));
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Tool {
+                output: None,
+                resolved: false,
+                ..
+            }
+        ));
+        let full = format!("```console\nhead\n{}\n```", "界".repeat(200));
+        fold_event_into_parts(&mut parts, &progress(Some(&full)));
+        assert!(
+            matches!(&parts[0], MessagePart::Tool { output: Some(text), output_bytes: Some(bytes), resolved: false, .. } if text == "head…" && *bytes == full.len() as u64)
+        );
+        apply_sidecar_refs("chat", &mut parts);
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Tool {
+                output_ref: None,
+                ..
+            }
+        ));
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolResult {
+                id: "t".into(),
+                is_error: true,
+                output: Some(full.clone()),
+                diff: None,
+            },
+        );
+        apply_sidecar_refs("chat", &mut parts);
+        assert!(
+            matches!(&parts[0], MessagePart::Tool { output: Some(text), output_ref: Some(key), resolved: true, is_error: true, .. } if text == "head…" && key == "chat/t")
+        );
+        let settled = parts.clone();
+        fold_event_into_parts(&mut parts, &progress(Some("late stale update")));
+        assert_eq!(parts, settled);
+        fold_event_into_parts(
+            &mut parts,
+            &AgentEvent::ToolResult {
+                id: "t".into(),
+                is_error: true,
+                output: None,
+                diff: None,
+            },
+        );
+        assert!(matches!(
+            &parts[0],
+            MessagePart::Tool {
+                output: None,
+                output_bytes: None,
+                output_ref: None,
+                ..
+            }
+        ));
+    }
 
     fn text_delta(s: &str) -> AgentEvent {
         AgentEvent::TextDelta { text: s.into() }
@@ -900,6 +1069,7 @@ mod tests {
                 diff: None,
                 output_ref: None,
                 output_bytes: None,
+                output_digest: None,
                 diff_ref: None,
                 diff_stats: None,
                 subagent_ref: None,
@@ -1024,10 +1194,8 @@ mod tests {
                 diff_stats,
                 ..
             } => {
-                // One-liner chips: outputs never enter the doc at all
-                // (journal-only); diff text neither — stats survive.
-                assert_eq!(output.as_deref(), None);
-                assert_eq!(*output_bytes, None);
+                assert_eq!(output.as_deref(), Some("running 42 tests…"));
+                assert_eq!(*output_bytes, Some(full.len() as u64));
                 assert!(diff.is_none(), "inline diff text must not enter the doc");
                 let stats = diff_stats.as_ref().unwrap();
                 assert_eq!(stats.len(), 1);
@@ -1080,10 +1248,7 @@ mod tests {
                 diff_ref,
                 ..
             } => {
-                // One-liner fold: outputs never reach the doc, so there is
-                // no output content to key even after resolution; diff
-                // STATS exist, so the diff ref still stamps.
-                assert_eq!(output_ref.as_deref(), None);
+                assert_eq!(output_ref.as_deref(), Some("chat-9/t1"));
                 assert_eq!(diff_ref.as_deref(), Some("chat-9/t1.diff"));
             }
             other => panic!("unexpected {other:?}"),

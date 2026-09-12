@@ -78,6 +78,8 @@ async fn two_rust_clients_converge_through_a_real_registry_do() {
         let mut doc = doc_a.lock().unwrap();
         doc.upsert_chat(&chat("chat-live", "dev-live-a")).unwrap();
         doc.upsert_session(&Session {
+            goal: None,
+            goal_control: false,
             last_completed_turn: None,
             chat_id: "chat-live".into(),
             device_id: "dev-live-a".into(),
@@ -195,6 +197,8 @@ async fn cursor_delta_and_churn_stay_bounded_on_a_real_do() {
         {
             let mut d = doc.lock().unwrap();
             d.upsert_session(&Session {
+                goal: None,
+                goal_control: false,
                 last_completed_turn: None,
                 chat_id: "chat-churn".into(),
                 device_id: "dev-churn".into(),

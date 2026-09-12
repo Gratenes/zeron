@@ -16,6 +16,8 @@ pub enum HarnessId {
     Hermes,
     /// The pi coding agent (pi.dev), driven over ACP via the `pi-acp` adapter.
     Pi,
+    /// Mimir's coding agent, driven over ACP (`mimir acp`).
+    Mimir,
     /// SST's opencode agent, driven natively over its own HTTP/SSE server
     /// protocol (`opencode serve` — the same wire the opencode desktop app
     /// speaks).
@@ -27,6 +29,8 @@ pub enum HarnessId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningLevel {
+    /// Explicitly disable reasoning where the selected model supports it.
+    Off,
     Minimal,
     Low,
     Medium,
@@ -190,6 +194,12 @@ pub enum ToolCall {
     WebSearch {
         query: String,
     },
+    /// A public Markdown document identified by the transport's content type.
+    /// The body remains in ToolResult/output storage, never in tool input.
+    Document {
+        title: String,
+    },
+
     Todo {
         #[serde(default)]
         items: Vec<TodoItem>,
@@ -325,12 +335,96 @@ pub enum DoneStatus {
     Errored,
 }
 
+/// Public native goal state; separate from the model request's lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalState {
+    pub id: String,
+    pub objective: String,
+    pub phase: GoalPhase,
+    pub reason: Option<String>,
+    pub completion: Option<GoalCompletion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GoalPhase {
+    Active,
+    Checking,
+    Paused,
+    Blocked,
+    Complete,
+    Cleared,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalCompletion {
+    pub outcome: String,
+    pub verification: String,
+}
+
+/// Commands which do not acquire a model prompt lease. Start/resume are absent.
+pub fn goal_control_command(prompt: &str) -> Option<&str> {
+    let command = prompt.trim().strip_prefix("/goal")?;
+    if !command.is_empty() && !command.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let command = command.trim();
+    match command {
+        "" => Some("show"),
+        "show" | "pause" | "clear" => Some(command),
+        _ if command
+            .strip_prefix("edit ")
+            .is_some_and(|s| !s.trim().is_empty()) =>
+        {
+            Some(command)
+        }
+        _ => None,
+    }
+}
+
+/// Server-provided semantic linkage; never inferred from a tool's title/input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentChild {
+    pub child_id: String,
+    pub tool_call_id: Option<String>,
+    pub title: String,
+    pub agent: String,
+    pub status: String,
+    pub transcript: bool,
+}
+
+/// A complete read-only public child revision, replacing the previous one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildTranscript {
+    pub revision: String,
+    pub events: Vec<AgentEvent>,
+    pub omitted_updates: u64,
+}
+
 /// The normalized streaming event every harness emits.
 ///
 /// Mirrors zeron's `AgentEvent` tagged enum.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AgentEvent {
+    GoalState {
+        goal: Option<GoalState>,
+    },
+    /// Out-of-band human command acknowledgement; not a turn boundary.
+    #[serde(rename_all = "camelCase")]
+    ControlResolved {
+        prompt: String,
+        message_id: Option<String>,
+        error: Option<String>,
+    },
+    /// Native public child state and, when available, a complete transcript.
+    SubagentView {
+        child: AgentChild,
+        snapshot: Option<ChildTranscript>,
+    },
     #[serde(rename_all = "camelCase")]
     SessionStarted {
         harness: HarnessId,
@@ -342,6 +436,18 @@ pub enum AgentEvent {
         session_id: String,
         assistant_message_id: String,
     },
+    /// Native session title. The engine adopts it only while the chat is untitled.
+    SessionTitle {
+        title: String,
+    },
+    /// The agent's actual session mode, keyed by its advertised config option id.
+    SessionMode {
+        id: String,
+        value: String,
+    },
+    /// A committed message boundary inside a turn; never a turn-completion signal.
+    MessageBoundary,
+
     TextDelta {
         text: String,
     },
@@ -357,6 +463,13 @@ pub enum AgentEvent {
         id: String,
         call: ToolCall,
     },
+    /// Public replacement output for an in-progress tool. Does not resolve it.
+    ToolProgress {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
+
     #[serde(rename_all = "camelCase")]
     ToolResult {
         id: String,
@@ -444,6 +557,23 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_call_round_trips_with_only_its_public_title() {
+        let call = ToolCall::Document {
+            title: "Implementation plan".into(),
+        };
+        let wire = serde_json::to_value(&call).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"kind":"document","title":"Implementation plan"})
+        );
+        assert_eq!(serde_json::from_value::<ToolCall>(wire).unwrap(), call);
+        assert_eq!(
+            crate::view::tool_chip_content(&call),
+            ("Document", "Implementation plan".into())
+        );
+    }
 
     #[test]
     fn agent_event_round_trips() {
@@ -552,6 +682,36 @@ mod tests {
         assert_eq!(json["worktree"]["repoPath"], "/repos/comet");
         let round: RunRequest = serde_json::from_value(json).unwrap();
         assert_eq!(round.worktree, req.worktree);
+    }
+
+    #[test]
+    fn reasoning_off_round_trips_distinct_from_unspecified() {
+        let wire = serde_json::to_string(&Some(ReasoningLevel::Off)).unwrap();
+        assert_eq!(wire, "\"off\"");
+        assert_eq!(
+            serde_json::from_str::<Option<ReasoningLevel>>(&wire).unwrap(),
+            Some(ReasoningLevel::Off)
+        );
+        assert_eq!(
+            serde_json::to_string(&None::<ReasoningLevel>).unwrap(),
+            "null"
+        );
+        let request: RunRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "p", "harness": "mimir", "reasoning": "off", "cwd": ".", "sandbox": "workspace-write"
+        }))
+        .unwrap();
+        assert_eq!(request.reasoning, Some(ReasoningLevel::Off));
+        assert_eq!(serde_json::to_value(&request).unwrap()["reasoning"], "off");
+    }
+
+    #[test]
+    fn mimir_harness_id_round_trips() {
+        let wire = serde_json::to_string(&HarnessId::Mimir).unwrap();
+        assert_eq!(wire, "\"mimir\"");
+        assert_eq!(
+            serde_json::from_str::<HarnessId>(&wire).unwrap(),
+            HarnessId::Mimir
+        );
     }
 
     #[test]

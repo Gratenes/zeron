@@ -369,6 +369,44 @@ fn missing_connected_list_falls_back_to_the_full_catalog() {
 }
 
 #[test]
+fn off_requires_an_explicitly_advertised_variant() {
+    assert!(!REASONING_LEVELS.contains(&ReasoningLevel::Off));
+    let providers: ProviderCatalog = serde_json::from_value(json!({
+        "all": [{"id": "local", "models": {
+            "optional": {"variants": {"off": {}, "high": {}}},
+            "thinking": {"variants": {"high": {}}}
+        }}]
+    }))
+    .unwrap();
+    assert_eq!(
+        pick_variant(&providers, "local", "optional", Some(ReasoningLevel::Off)).as_deref(),
+        Some("off")
+    );
+    assert_eq!(
+        pick_variant(&providers, "local", "thinking", Some(ReasoningLevel::Off)),
+        None
+    );
+    assert_eq!(pick_variant(&providers, "local", "optional", None), None);
+    let models = models_from_providers(&providers);
+    assert!(
+        models
+            .iter()
+            .find(|model| model.id == "local/optional")
+            .unwrap()
+            .reasoning_levels
+            .contains(&ReasoningLevel::Off)
+    );
+    assert!(
+        !models
+            .iter()
+            .find(|model| model.id == "local/thinking")
+            .unwrap()
+            .reasoning_levels
+            .contains(&ReasoningLevel::Off)
+    );
+}
+
+#[test]
 fn variants_only_ride_models_that_advertise_them() {
     let providers: ProviderCatalog = serde_json::from_value(json!({
         "all": [{

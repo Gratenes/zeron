@@ -4,7 +4,7 @@
 //! tested, not asserted.
 
 use super::*;
-use zeron_proto::{HarnessId, SandboxLevel, SessionStatus};
+use zeron_proto::{GoalPhase, GoalState, HarnessId, SandboxLevel, SessionStatus};
 
 fn ts(ms: i64) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(ms).unwrap_or(DateTime::UNIX_EPOCH)
@@ -292,6 +292,8 @@ fn space(id: &str, device_id: &str, path: &str) -> Space {
 
 fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
     Session {
+        goal: None,
+        goal_control: false,
         last_completed_turn: None,
         chat_id: chat_id.into(),
         device_id: device_id.into(),
@@ -350,16 +352,21 @@ fn rows_round_trip_and_upsert_refreshes() {
     device.capabilities = vec![zeron_proto::capabilities::MESSAGE_QUEUE_V1.into()];
     doc.upsert_device(&device).unwrap();
     doc.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
-    doc.upsert_session(&session("chat-1", "dev-a", SessionStatus::Working))
-        .unwrap();
+    let mut live = session("chat-1", "dev-a", SessionStatus::Working);
+    live.goal_control = true;
+    live.goal = Some(GoalState {
+        id: "goal-1".into(),
+        objective: "Ship replication".into(),
+        phase: GoalPhase::Paused,
+        reason: Some("Waiting for review".into()),
+        completion: None,
+    });
+    doc.upsert_session(&live).unwrap();
 
     let state = doc.read_all().unwrap();
     assert_eq!(state.devices, vec![device]);
     assert_eq!(state.chats, vec![chat("chat-1", "dev-a")]);
-    assert_eq!(
-        state.sessions,
-        vec![session("chat-1", "dev-a", SessionStatus::Working)]
-    );
+    assert_eq!(state.sessions, vec![live]);
 
     let mut updated = chat("chat-1", "dev-a");
     updated.title = None;
@@ -370,6 +377,35 @@ fn rows_round_trip_and_upsert_refreshes() {
     assert_eq!(chats.len(), 1);
     assert_eq!(chats[0].title, None);
     assert_eq!(chats[0].last_message_preview.as_deref(), Some("hello"));
+}
+
+
+#[test]
+fn legacy_session_rows_default_goal_fields_safely() {
+    let mut doc = RegistryDoc::new("dev-b");
+    doc.apply_state(
+        1,
+        true,
+        0,
+        vec![RegistryRow {
+            kind: KIND_SESSIONS.into(),
+            id: "chat-legacy".into(),
+            seq: 1,
+            deleted: false,
+            del_hlc: None,
+            fields: fields([
+                ("chatId", json!("chat-legacy")),
+                ("deviceId", json!("dev-a")),
+                ("status", json!("working")),
+                ("startedAt", Value::Null),
+                ("updatedAt", json!(3_500)),
+            ]),
+            clocks: Default::default(),
+        }],
+    );
+    let session = doc.read_sessions().unwrap().pop().unwrap();
+    assert!(!session.goal_control);
+    assert_eq!(session.goal, None);
 }
 
 #[test]
@@ -850,9 +886,16 @@ fn migration_seeds_pending_upserts_that_lose_to_live_writes() {
     legacy_chat.title = Some("migrated title".into());
     legacy_chat.last_message_at = Some(ts(400_000));
     legacy.upsert_chat(&legacy_chat).unwrap();
-    legacy
-        .upsert_session(&session("chat-1", "dev-a", SessionStatus::Idle))
-        .unwrap();
+    let mut legacy_session = session("chat-1", "dev-a", SessionStatus::Idle);
+    legacy_session.goal_control = true;
+    legacy_session.goal = Some(GoalState {
+        id: "goal-1".into(),
+        objective: "Migrate goal".into(),
+        phase: GoalPhase::Active,
+        reason: None,
+        completion: None,
+    });
+    legacy.upsert_session(&legacy_session).unwrap();
 
     let mut doc = RegistryDoc::new("dev-a");
     let seeded = doc

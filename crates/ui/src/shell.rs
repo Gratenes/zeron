@@ -7019,6 +7019,11 @@ impl Shell {
             return strip.into_any_element();
         };
         let indicator = state.indicator_for(&chat_id, now);
+        let strip = strip.children(
+            state.session_for(&chat_id)
+                .and_then(|session| session.goal.as_ref())
+                .and_then(|goal| crate::goal::render(goal, &theme)),
+        );
         // Timer base: the freshest of the session row's turn start and the
         // in-flight send. During the send→ack window the row (if any) still
         // carries the PREVIOUS turn's start, and using it opened the timer at

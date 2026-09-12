@@ -88,6 +88,8 @@ struct ChatParams {
 #[serde(rename_all = "camelCase")]
 struct ListModelsParams {
     harness: HarnessId,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -258,6 +260,7 @@ fn tool_file_path(call: &ToolCall) -> Option<&str> {
         | ToolCall::WebFetch { .. }
         | ToolCall::WebSearch { .. }
         | ToolCall::Todo { .. }
+        | ToolCall::Document { .. }
         | ToolCall::Mcp { .. }
         | ToolCall::Unknown { .. } => None,
     }
@@ -1210,7 +1213,7 @@ impl RpcService for EngineRpc {
                     .resolve(p.harness)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let models = harness
-                    .models()
+                    .models_for_selection(p.model.as_deref())
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&models)

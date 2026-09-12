@@ -977,6 +977,55 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.rename_chat(chat_id, title))?)
     }
 
+    /// Adopt an automatic/native title atomically. A user rename always wins.
+    pub(crate) fn title_chat_if_untitled(
+        &self,
+        chat_id: &str,
+        title: &str,
+    ) -> Result<bool, EngineError> {
+        let title = crate::titles::clean_title(title);
+        if title.is_empty() {
+            return Ok(false);
+        }
+        Ok(self.mutate(|doc| {
+            let Some(chat) = doc.chat(chat_id)? else {
+                return Ok(false);
+            };
+            if chat.title.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+                return Ok(false);
+            }
+            doc.rename_chat(chat_id, &title)
+        })?)
+    }
+
+    /// Merge the agent's actual option selection without replacing other user
+    /// configuration. A command can outrun createChat, so seed absent config
+    /// from the live runtime; never overwrite a switch to another harness.
+    pub(crate) fn set_chat_model_option(
+        &self,
+        chat_id: &str,
+        fallback: &ChatConfig,
+        id: &str,
+        value: &str,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            let Some(chat) = doc.chat(chat_id)? else {
+                return Ok(false);
+            };
+            let had_config = chat.config.is_some();
+            let mut config = chat.config.unwrap_or_else(|| fallback.clone());
+            if config.harness != fallback.harness {
+                return Ok(false);
+            }
+            let value = serde_json::Value::String(value.to_owned());
+            if had_config && config.model_options.get(id) == Some(&value) {
+                return Ok(false);
+            }
+            config.model_options.insert(id.to_owned(), value);
+            doc.set_chat_config(chat_id, &config)
+        })?)
+    }
+
     /// Backdate a chat's activity timestamps (epoch ms). Returns false when
     /// the chat doesn't exist.
     pub fn set_chat_activity(
@@ -1565,7 +1614,7 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
 
 #[cfg(test)]
 mod tests {
-    use super::{device_name_on_boot, linked_worktree_root};
+    use super::{device_name_on_boot, linked_worktree_root, merge_sessions};
 
     #[tokio::test]
     async fn presence_publish_keeps_unchanged_lists_quiet_and_late_subscribers_current() {
@@ -1677,4 +1726,34 @@ mod tests {
         std::fs::write(odd.join(".git"), "gitdir: /somewhere/else\n").unwrap();
         assert_eq!(linked_worktree_root(&odd), None);
     }
+
+    #[test]
+    fn remote_registry_session_keeps_goal_capability_for_ui_routing() {
+        let mut registry = zeron_doc::RegistryDoc::new("host");
+        let goal = zeron_proto::GoalState {
+            id: "goal-1".into(),
+            objective: "Ship replication".into(),
+            phase: zeron_proto::GoalPhase::Paused,
+            reason: Some("Waiting".into()),
+            completion: None,
+        };
+        registry
+            .upsert_session(&zeron_proto::Session {
+                goal: Some(goal.clone()),
+                goal_control: true,
+                last_completed_turn: None,
+                chat_id: "chat-1".into(),
+                device_id: "host".into(),
+                status: zeron_proto::SessionStatus::Working,
+                started_at: None,
+                updated_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        let merged = merge_sessions("viewer", &registry.read_sessions().unwrap(), &[]);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].goal_control);
+        assert_eq!(merged[0].goal.as_ref(), Some(&goal));
+    }
+
 }

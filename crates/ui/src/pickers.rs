@@ -187,6 +187,7 @@ pub fn clamp_reasoning(
 
 pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
     match level {
+        ReasoningLevel::Off => "Off",
         ReasoningLevel::Minimal => "Minimal",
         ReasoningLevel::Low => "Low",
         ReasoningLevel::Medium => "Medium",
@@ -457,6 +458,12 @@ pub struct Pickers {
     model_rail: ModelRail,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
+    /// Mimir's dependent traits are fetched only for the selected model. Keep
+    /// the catalog visible during refresh and coalesce picks while it loads.
+    mimir_model_selection: Option<String>,
+    /// Only a completed selected-model query can verify an empty effort ladder.
+    mimir_verified_model: Option<String>,
+    mimir_models_loading: bool,
     refs: Loadable<Vec<RepoRef>>,
     /// Space id the `refs` slot belongs to (invalidated on space change).
     refs_space: Option<String>,
@@ -571,6 +578,9 @@ impl Pickers {
                 // a space switch may land on another device, so refetch.
                 this.harnesses = Loadable::Idle;
                 this.models.clear();
+                this.mimir_model_selection = None;
+                this.mimir_verified_model = None;
+                this.mimir_models_loading = false;
                 this.catalog_rev += 1;
             }
             cx.notify();
@@ -623,6 +633,9 @@ impl Pickers {
             model_rail: ModelRail::default(),
             harnesses: Loadable::Idle,
             models: HashMap::new(),
+            mimir_model_selection: None,
+            mimir_verified_model: None,
+            mimir_models_loading: false,
             refs: Loadable::Idle,
             refs_space: None,
             active: 0,
@@ -737,9 +750,15 @@ impl Pickers {
                 None => self.defaults.reasoning,
             }
         });
-        if self.selected_model(cx).is_none() {
-            // Catalog not loaded yet: show the explicit value as-is (nothing
-            // to clamp against); it resolves to a concrete level on load.
+        let Some(model) = self.selected_model(cx) else {
+            return explicit;
+        };
+        if self.effective_harness(cx) == Some(HarnessId::Mimir)
+            && model.reasoning_levels.is_empty()
+            && self.mimir_verified_model.as_deref() != Some(model.id.as_str())
+        {
+            // Pending metadata hides menu choices, not the user's submitted
+            // intent. An explicit effort still rides a send during discovery.
             return explicit;
         }
         clamp_reasoning(explicit, &self.trait_ladder(cx))
@@ -1059,7 +1078,49 @@ impl Pickers {
         }
     }
 
+    fn model_catalog_selection(&self, harness: HarnessId, cx: &App) -> Option<String> {
+        if harness != HarnessId::Mimir || self.effective_harness(cx) != Some(harness) {
+            return None;
+        }
+        self.selected_model(cx)
+            .map(|model| model.id.as_str())
+            .or_else(|| self.effective_model_id(cx))
+            .map(str::to_owned)
+    }
+
+    fn accepts_model_response(
+        &mut self,
+        harness: HarnessId,
+        generation: u64,
+        selection: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.target_generation != generation {
+            return false;
+        }
+        if harness == HarnessId::Mimir {
+            self.mimir_models_loading = false;
+            if self.model_catalog_selection(harness, cx).as_deref() != selection {
+                // A pick made during Loading must get its own details. Never
+                // replace current rows with a response for the previous pick.
+                if matches!(self.models.get(&harness), Some(Loadable::Loading)) {
+                    self.models.insert(harness, Loadable::Idle);
+                }
+                self.ensure_models(harness, true, cx);
+                cx.notify();
+                return false;
+            }
+        }
+        true
+    }
+
     fn ensure_models(&mut self, harness: HarnessId, force: bool, cx: &mut Context<Self>) {
+        let selection = self.model_catalog_selection(harness, cx);
+        if harness == HarnessId::Mimir && self.mimir_models_loading {
+            return; // completion rechecks the current selection and refetches
+        }
+        let force =
+            force || (harness == HarnessId::Mimir && self.mimir_model_selection != selection);
         // Normal prefetches load absent/Idle slots once. Picker-open refreshes
         // also retry Ready/Error slots, while an in-flight load is always
         // reused. Ready rows stay visible until the replacement lands.
@@ -1076,12 +1137,19 @@ impl Pickers {
         };
         let target = self.space_target(cx);
         let generation = self.target_generation;
+        if harness == HarnessId::Mimir {
+            self.mimir_model_selection = selection.clone();
+            self.mimir_models_loading = true;
+        }
         if !matches!(self.models.get(&harness), Some(Loadable::Ready(_))) {
             self.models.insert(harness, Loadable::Loading);
             self.catalog_rev += 1;
         }
         cx.spawn(async move |this, cx| {
             let mut params = serde_json::json!({ "harness": harness });
+            if let Some(model) = &selection {
+                params["model"] = serde_json::Value::String(model.clone());
+            }
             if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
                 object.insert(
                     "targetDeviceId".into(),
@@ -1120,7 +1188,7 @@ impl Pickers {
                 cx.background_executor().timer(delay).await;
             }
             this.update(cx, |pickers, cx| {
-                if pickers.target_generation != generation {
+                if !pickers.accepts_model_response(harness, generation, selection.as_deref(), cx) {
                     return;
                 }
                 let loaded = match result {
@@ -1141,8 +1209,22 @@ impl Pickers {
                         pickers.save_defaults();
                     }
                 }
+                let catalog_ready = matches!(&loaded, Loadable::Ready(_));
                 pickers.models.insert(harness, loaded);
                 pickers.catalog_rev += 1;
+                // First catalog load may resolve the default row for the first
+                // time; enrich that row without enumerating every model.
+                if harness == HarnessId::Mimir {
+                    if catalog_ready {
+                        pickers.mimir_verified_model = selection.clone();
+                        pickers.ensure_models(harness, false, cx);
+                    } else {
+                        // An error can remove the default row from view. Do not
+                        // turn that into an automatic discovery/retry loop.
+                        pickers.mimir_model_selection =
+                            pickers.model_catalog_selection(harness, cx);
+                    }
+                }
                 // A list that landed while its popover is open re-anchors the
                 // keyboard highlight onto the selected row (it sat at 0 while
                 // loading).
@@ -1372,6 +1454,9 @@ impl Pickers {
                 self.save_defaults();
             }
         }
+        if self.effective_harness(cx) == Some(HarnessId::Mimir) {
+            self.ensure_models(HarnessId::Mimir, true, cx);
+        }
         cx.notify();
     }
 
@@ -1394,6 +1479,10 @@ impl Pickers {
         default: bool,
         cx: &mut Context<Self>,
     ) {
+        // Mode is session state: selecting Build must override a warm Plan
+        // session even when Build was the discovery session's default.
+        let default = default
+            && !(self.effective_harness(cx) == Some(HarnessId::Mimir) && option_id == "mimir.mode");
         if self.state.read(cx).selected_chat.is_some() {
             self.update_chat_config(cx, move |config| {
                 if default {
@@ -1448,6 +1537,7 @@ impl Pickers {
                 .map(|m| m.reasoning_levels.clone())
                 .unwrap_or_default();
             if ladder.is_empty()
+                && config.harness != HarnessId::Mimir
                 && let Some(descriptor) = self
                     .harnesses
                     .ready()
@@ -1486,7 +1576,9 @@ impl Pickers {
         let Some(model) = self.selected_model(cx) else {
             return Vec::new();
         };
-        if !model.reasoning_levels.is_empty() {
+        if !model.reasoning_levels.is_empty()
+            || self.effective_harness(cx) == Some(HarnessId::Mimir)
+        {
             return model.reasoning_levels.clone();
         }
         self.effective_harness(cx)
@@ -2702,6 +2794,7 @@ impl Pickers {
                         PickerKind::HarnessModel => {
                             this.harnesses = Loadable::Idle;
                             this.models.clear();
+                            this.mimir_verified_model = None;
                             this.catalog_rev += 1;
                             this.ensure_harnesses(false, cx);
                         }
@@ -3884,6 +3977,7 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         // Nous Research's mark (the Hermes product icon), monochrome.
         HarnessId::Hermes => (crate::icons::HERMES_MARK, None),
         HarnessId::Pi => (crate::icons::PI_MARK, None),
+        HarnessId::Mimir => (crate::icons::MIMIR_MARK, None),
         // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
         HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
     }
@@ -4195,6 +4289,40 @@ impl Render for Pickers {
 mod tests {
     use super::*;
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
+
+    #[test]
+    fn mimir_identity_uses_its_own_mark_and_standard_catalog_gates() {
+        assert_eq!(
+            harness_brand_icon(HarnessId::Mimir),
+            (crate::icons::MIMIR_MARK, None)
+        );
+        assert_eq!(
+            crate::settings::harnesses::cli_name(HarnessId::Mimir),
+            "mimir"
+        );
+        let mut descriptor = HarnessDescriptor {
+            id: HarnessId::Mimir,
+            name: "Mimir".into(),
+            supports_steering: true,
+            steering_mode: zeron_proto::SteeringMode::TurnBoundary,
+            reasoning_levels: vec![],
+            installed: true,
+            enabled: Some(true),
+        };
+        assert_eq!(
+            visible_harnesses_impl(&[descriptor.clone()], false)[0].id,
+            HarnessId::Mimir
+        );
+        assert_eq!(
+            offered_harnesses_impl(&[descriptor.clone()], false)[0].id,
+            HarnessId::Mimir
+        );
+        descriptor.enabled = Some(false);
+        assert!(offered_harnesses_impl(&[descriptor.clone()], false).is_empty());
+        descriptor.enabled = Some(true);
+        descriptor.installed = false;
+        assert!(offered_harnesses_impl(&[descriptor], false).is_empty());
+    }
 
     #[gpui::test]
     fn picker_completion_and_dismissal_have_distinct_focus_behavior(cx: &mut gpui::TestAppContext) {
@@ -4749,6 +4877,121 @@ mod tests {
         assert!(default_model(&[]).is_none());
     }
 
+    #[gpui::test]
+    fn mimir_model_refresh_rejects_old_selection_and_old_device_responses(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.config.harness = Some(HarnessId::Mimir);
+            pickers.config.model = Some("provider/a".into());
+            assert_eq!(
+                pickers
+                    .model_catalog_selection(HarnessId::Mimir, cx)
+                    .as_deref(),
+                Some("provider/a")
+            );
+            assert_eq!(pickers.model_catalog_selection(HarnessId::Codex, cx), None);
+            pickers.models.insert(HarnessId::Mimir, Loadable::Loading);
+            pickers.mimir_model_selection = Some("provider/a".into());
+            pickers.mimir_models_loading = true;
+            pickers.pick_model("provider/b".into(), cx);
+            assert!(
+                pickers.mimir_models_loading,
+                "a pick coalesces behind the in-flight request"
+            );
+            assert_eq!(pickers.mimir_model_selection.as_deref(), Some("provider/a"));
+            assert!(!pickers.accepts_model_response(HarnessId::Mimir, 0, Some("provider/a"), cx));
+            assert_eq!(
+                pickers
+                    .model_catalog_selection(HarnessId::Mimir, cx)
+                    .as_deref(),
+                Some("provider/b")
+            );
+            assert!(
+                matches!(pickers.models.get(&HarnessId::Mimir), Some(Loadable::Idle)),
+                "stale Loading response leaves a reloadable slot"
+            );
+
+            // A reply from the old device must not clear the new device's load.
+            pickers.target_generation = 1;
+            pickers.mimir_models_loading = true;
+            pickers.models.insert(HarnessId::Mimir, Loadable::Loading);
+            assert!(!pickers.accepts_model_response(HarnessId::Mimir, 0, Some("provider/b"), cx));
+            assert!(pickers.mimir_models_loading);
+            assert!(pickers.accepts_model_response(HarnessId::Mimir, 1, Some("provider/b"), cx));
+            assert!(!pickers.mimir_models_loading);
+
+            let model: Model = serde_json::from_value(serde_json::json!({
+                "id": "provider/b", "label": "B", "reasoningLevels": ["off", "high"]
+            }))
+            .unwrap();
+            pickers
+                .models
+                .insert(HarnessId::Mimir, Loadable::Ready(vec![model]));
+            assert!(!pickers.accepts_model_response(HarnessId::Mimir, 1, Some("provider/a"), cx));
+            assert_eq!(
+                pickers.trait_ladder(cx),
+                vec![ReasoningLevel::Off, ReasoningLevel::High],
+                "stale refresh leaves the current catalog intact"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn mimir_unverified_model_does_not_inherit_the_global_effort_ladder(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.config.harness = Some(HarnessId::Mimir);
+            pickers.models.insert(
+                HarnessId::Mimir,
+                Loadable::Ready(vec![Model {
+                    id: "chatgpt/gpt-5.6-luna".into(),
+                    label: "Luna".into(),
+                    description: None,
+                    reasoning_levels: vec![],
+                    options: vec![],
+                }]),
+            );
+            pickers.harnesses = Loadable::Ready(vec![HarnessDescriptor {
+                id: HarnessId::Mimir,
+                name: "Mimir".into(),
+                supports_steering: true,
+                steering_mode: zeron_proto::SteeringMode::TurnBoundary,
+                reasoning_levels: vec![ReasoningLevel::Off, ReasoningLevel::High],
+                installed: true,
+                enabled: Some(true),
+            }]);
+            assert!(
+                pickers.trait_ladder(cx).is_empty(),
+                "unverified per-model efforts are not offered"
+            );
+        });
+    }
+
+    #[test]
+    fn mimir_off_reasoning_is_an_explicit_visible_choice() {
+        use ReasoningLevel::*;
+        let model: Model = serde_json::from_value(serde_json::json!({
+            "id": "chatgpt/gpt-5.6-luna", "label": "Luna",
+            "reasoningLevels": ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+        }))
+        .unwrap();
+        let ladder = model.reasoning_levels;
+        assert_eq!(reasoning_label(Off), "Off");
+        assert_eq!(clamp_reasoning(Some(Off), &ladder), Some(Off));
+        assert_eq!(clamp_reasoning(None, &ladder), Some(High));
+        assert_eq!(clamp_reasoning(Some(Off), &[Low, Medium, High]), Some(High));
+        assert_eq!(
+            traits_summary(None, Some(Off), &serde_json::Map::new()),
+            Some("Off".to_owned())
+        );
+    }
+
     #[test]
     fn default_reasoning_prefers_high_then_medium() {
         use ReasoningLevel::*;
@@ -4777,6 +5020,96 @@ mod tests {
         // No pick at all resolves to the concrete default too.
         assert_eq!(clamp_reasoning(None, &ladder), Some(High));
         assert_eq!(clamp_reasoning(Some(High), &[]), None);
+    }
+
+    #[gpui::test]
+    fn mimir_submit_during_delayed_details_keeps_saved_model_and_medium(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        let pickers = cx.new(|cx| Pickers::new(state, cx));
+        pickers.update(cx, |pickers, cx| {
+            let id = "chatgpt/gpt-5.6-luna";
+            pickers.defaults.harness = Some(HarnessId::Mimir);
+            pickers
+                .defaults
+                .remember_model(HarnessId::Mimir, id.into(), "Luna".into());
+            pickers.defaults.reasoning = Some(ReasoningLevel::Medium);
+            pickers.models.insert(
+                HarnessId::Mimir,
+                Loadable::Ready(vec![Model {
+                    id: id.into(),
+                    label: "Luna".into(),
+                    description: None,
+                    reasoning_levels: vec![],
+                    options: vec![],
+                }]),
+            );
+            pickers.mimir_models_loading = true;
+            pickers.mimir_model_selection = Some(id.into());
+            assert!(
+                pickers.trait_ladder(cx).is_empty(),
+                "pending details must not offer unverified choices"
+            );
+            // This is the exact resolved payload consumed by composer submit,
+            // not the label or menu state.
+            let submitted = pickers.resolved(cx).chat_config().unwrap();
+            assert_eq!(submitted.model.as_deref(), Some(id));
+            assert_eq!(submitted.reasoning, Some(ReasoningLevel::Medium));
+            assert_eq!(
+                serde_json::to_value(submitted).unwrap()["reasoning"],
+                "medium"
+            );
+            // A verified empty ladder is different: the selected model really
+            // has no reasoning control, so the resolved submission omits it.
+            pickers.mimir_models_loading = false;
+            pickers.mimir_verified_model = Some(id.into());
+            assert_eq!(pickers.resolved(cx).reasoning, None);
+        });
+    }
+
+    #[gpui::test]
+    fn mimir_build_pick_is_explicit_in_resumed_chat_run_config(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.chats.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": "mode-chat", "deviceId": "local", "archived": false,
+                    "createdAt": "2026-09-12T00:00:00Z",
+                    "config": {"harness": "mimir", "model": "chatgpt/gpt-5.6-luna",
+                               "reasoning": "medium", "sandbox": "workspace-write",
+                               "modelOptions": {"mimir.mode": "mode-plan"}}
+                }))
+                .unwrap(),
+            );
+            state.selected_chat = Some("mode-chat".into());
+            state
+        });
+        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
+        pickers.update(cx, |pickers, cx| {
+            pickers.pick_option("mimir.mode".into(), "mode-build".into(), true, cx);
+            let submitted = pickers.resolved(cx).chat_config().unwrap();
+            assert_eq!(
+                submitted.model_options.get("mimir.mode"),
+                Some(&serde_json::json!("mode-build"))
+            );
+            assert_eq!(
+                state
+                    .read(cx)
+                    .selected_chat_row()
+                    .unwrap()
+                    .config
+                    .as_ref()
+                    .unwrap()
+                    .model_options,
+                submitted.model_options,
+                "the optimistic persisted row must retain the explicit Build choice"
+            );
+            assert_eq!(
+                serde_json::to_value(submitted).unwrap()["modelOptions"]["mimir.mode"],
+                "mode-build"
+            );
+        });
     }
 
     #[test]

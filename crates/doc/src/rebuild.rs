@@ -178,6 +178,7 @@ mod tests {
                     }),
                     output_ref: None,
                     output_bytes: None,
+                    output_digest: None,
                     diff_ref: None,
                     diff_stats: None,
                     subagent_ref: None,

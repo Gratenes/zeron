@@ -17,7 +17,7 @@
 //! Every dying path must instead carry its own visible error (child crash with stderr,
 //! spawn failure, stream error, engine-restart recovery).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
@@ -105,6 +105,8 @@ impl RuntimeConfig {
 struct RunHandle {
     run_id: String,
     steerable: bool,
+    /// Set only after this run emits `GoalState`, proving goalControl negotiation.
+    goal_control: bool,
     runtime_config: RuntimeConfig,
     steer_tx: mpsc::Sender<SteerMessage>,
     /// Harness-level cancellation (protocol interrupt + child teardown).
@@ -282,6 +284,72 @@ impl SessionsEngine {
         lock(&self.inner.last_requests).get(chat_id).cloned()
     }
 
+    /// Lazy local full-output retrieval for the existing tool-details UI.
+    /// Read only normalized public content, never tool inputs/raw metadata.
+    pub(crate) fn tool_blob(
+        &self,
+        chat_id: &str,
+        part_id: &str,
+    ) -> Result<Option<String>, EngineError> {
+        if let Some(host) = self.inner.doc_host() {
+            // Native child revisions are replacement caches of public RPC
+            // data, not append journals or agent-private filesystem histories.
+            if part_id.starts_with(&format!("{chat_id}--sub--"))
+                && host.public_transcript(part_id)?.is_some()
+            {
+                let handle = host.open(part_id)?;
+                return serde_json::to_string(&handle.doc().read_entries()?)
+                    .map(Some)
+                    .map_err(|e| EngineError::Other(e.to_string()));
+            }
+            if let Some(snapshot) = host.public_transcript(chat_id)? {
+                for event in snapshot.events.into_iter().rev() {
+                    match event {
+                        AgentEvent::ToolResult {
+                            id, output, diff, ..
+                        } => {
+                            if id == part_id {
+                                return Ok(output);
+                            }
+                            if part_id.strip_suffix(".diff") == Some(id.as_str())
+                                && let Some(diff) = diff
+                            {
+                                return serde_json::to_string(&diff)
+                                    .map(Some)
+                                    .map_err(|e| EngineError::Other(e.to_string()));
+                            }
+                        }
+                        AgentEvent::ToolProgress { id, output } if id == part_id => {
+                            return Ok(output);
+                        }
+                        _ => {}
+                    }
+                }
+                return Ok(None);
+            }
+        }
+        for (_, event) in self.inner.journal.replay(chat_id, 0)?.into_iter().rev() {
+            match event {
+                AgentEvent::ToolResult {
+                    id, output, diff, ..
+                } => {
+                    if id == part_id {
+                        return Ok(output);
+                    }
+                    if part_id.strip_suffix(".diff") == Some(id.as_str())
+                        && let Some(diff) = diff
+                    {
+                        return serde_json::to_string(&diff)
+                            .map(Some)
+                            .map_err(|err| EngineError::Other(err.to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
     /// Subscribe to a chat's live event stream: returns the journal replay after
     /// `after_seq` plus a live receiver. Subscribe-then-replay ordering means overlap
     /// (dedupe by seq) rather than gaps.
@@ -392,7 +460,9 @@ impl SessionsEngine {
                     // impossible for an observer to hold [new message, old status]
                     // — that gap read as unseen-with-no-live-run = a phantom
                     // "completed" flash on every remote send (2026-07-31).
-                    self.set_status(chat_id, SessionStatus::Working, false);
+                    if !self.is_control_prompt(chat_id, &request.prompt) {
+                        self.set_status(chat_id, SessionStatus::Working, false);
+                    }
                     self.inner.note_message(chat_id, &request.prompt);
                     return Ok(run_id);
                 }
@@ -456,12 +526,35 @@ impl SessionsEngine {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
             Box::new(move |questions: Vec<UserInputQuestion>| {
-                let (tx, rx) = oneshot::channel();
+                let (tx, answers) = oneshot::channel();
+                let (mut reply, rx) = oneshot::channel();
                 let request_id = new_id();
                 lock(&pending).insert(request_id.clone(), tx);
                 let _ = engine_tx.send(AgentEvent::InputRequested {
-                    request_id,
+                    request_id: request_id.clone(),
                     questions,
+                });
+                // The ACP cancellation form is dropping `rx`. Wait for that
+                // directly: one two-ended relay per pending input, no polling.
+                // Weak avoids a cycle (map sender -> task receiver -> map).
+                let pending = Arc::downgrade(&pending);
+                let engine_tx = engine_tx.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        biased;
+                        _ = reply.closed() => {
+                            if let Some(pending) = pending.upgrade()
+                                && lock(&pending).remove(&request_id).is_some()
+                            {
+                                let _ = engine_tx.send(AgentEvent::InputResolved { request_id });
+                            }
+                        }
+                        answer = answers => {
+                            if let Ok(answer) = answer {
+                                let _ = reply.send(answer);
+                            }
+                        }
+                    }
                 });
                 rx
             })
@@ -473,20 +566,28 @@ impl SessionsEngine {
             interrupt: interrupt_token.clone(),
         };
 
-        lock(&self.inner.runs).insert(
-            chat_id.to_string(),
-            RunHandle {
-                run_id: run_id.clone(),
-                steerable: harness.supports_steering(),
-                runtime_config: RuntimeConfig::from_request(harness_id, &request),
-                steer_tx,
-                interrupt_token,
-                cancel: cancel_tx,
-                engine_tx,
-                pending_inputs,
-                routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-            },
-        );
+        {
+            let mut runs = lock(&self.inner.runs);
+            runs.insert(
+                chat_id.to_string(),
+                RunHandle {
+                    run_id: run_id.clone(),
+                    steerable: harness.supports_steering(),
+                    goal_control: false,
+                    runtime_config: RuntimeConfig::from_request(harness_id, &request),
+                    steer_tx,
+                    interrupt_token,
+                    cancel: cancel_tx,
+                    engine_tx,
+                    pending_inputs,
+                    routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                },
+            );
+            // Run capability is not a turn/timer concern. Reset an existing
+            // session row while the runs lock prevents a retiring predecessor
+            // or incoming GoalState from racing this new authoritative handle.
+            self.inner.set_goal_control(chat_id, false);
+        }
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
@@ -497,7 +598,9 @@ impl SessionsEngine {
         // reason"; the titler only needs the prompt and skips titled chats;
         // the Done-time call below stays as the retry for a failed
         // generation).
-        if let Some(titles) = self.inner.titles.get() {
+        if !harness.native_titles()
+            && let Some(titles) = self.inner.titles.get()
+        {
             titles.maybe_generate(chat_id, harness_id, &request.prompt, &request.cwd);
         }
 
@@ -518,6 +621,15 @@ impl SessionsEngine {
             },
         ));
         Ok(run_id)
+    }
+
+    /// Negotiated native human controls travel through the bounded mailbox,
+    /// not the pending model-message queue, and do not start another parent turn.
+    pub fn is_control_prompt(&self, chat_id: &str, prompt: &str) -> bool {
+        zeron_proto::goal_control_command(prompt).is_some()
+            && lock(&self.inner.runs)
+                .get(chat_id)
+                .is_some_and(|run| run.goal_control)
     }
 
     /// Push a steer prompt into the live run's mailbox. `NotSteerable` when no live
@@ -562,11 +674,15 @@ impl SessionsEngine {
         handle.write_user_message(&user_id, prompt, now_ms())?;
         // A routed steer is a turn too. Fired here (not only on the confirmed
         // path) — a reclaim falls back to dispatch, which just re-snapshots.
-        if let Some(request) = self.last_request(chat_id) {
+        if !self.is_control_prompt(chat_id, prompt)
+            && let Some(request) = self.last_request(chat_id)
+        {
             self.note_turn_start(chat_id, &request.cwd);
         }
         if self.is_live(chat_id, &run_id) {
-            self.set_status(chat_id, SessionStatus::Working, false);
+            if !self.is_control_prompt(chat_id, prompt) {
+                self.set_status(chat_id, SessionStatus::Working, false);
+            }
             self.inner.note_message(chat_id, prompt);
             return Ok(SteerOutcome::Accepted);
         }
@@ -663,6 +779,11 @@ impl SessionsEngine {
         for chat_id in stale {
             if lock(&self.inner.runs).contains_key(&chat_id) {
                 continue; // a live run owns this journal
+            }
+            // Canonical child tools can publish after the parent's Done.
+            // Those durable public updates are not an unfinished parent turn.
+            if is_canonical_background_tail(&self.inner.journal.replay(&chat_id, 0)?) {
+                continue;
             }
             let handle = self.doc_handle(&chat_id)?;
             // Harness continuity first: the crashed run's session id may only
@@ -878,6 +999,8 @@ impl Inner {
             let entry = statuses
                 .entry(chat_id.to_string())
                 .or_insert_with(|| Session {
+                    goal: None,
+                    goal_control: false,
                     last_completed_turn: None,
                     chat_id: chat_id.to_string(),
                     device_id: self.device_id.clone(),
@@ -1030,10 +1153,34 @@ impl Inner {
         found
     }
 
+    fn set_goal_control(&self, chat_id: &str, enabled: bool) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.goal_control == enabled {
+                return;
+            }
+            entry.goal_control = enabled;
+            let session = entry.clone();
+            let mut list: Vec<_> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if let Some(ws) = self.workspace() {
+            ws.record_session(&session);
+        }
+    }
+
     fn remove_run(&self, chat_id: &str, run_id: &str) {
         let mut runs = lock(&self.runs);
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
             runs.remove(chat_id);
+            // Keep the runs lock through publication: a successor cannot be
+            // inserted and negotiated before its predecessor clears the row.
+            self.set_goal_control(chat_id, false);
         }
     }
 }
@@ -1219,6 +1366,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 diff,
                 output_ref,
                 output_bytes,
+                output_digest,
                 diff_ref,
                 diff_stats,
                 subagent_ref,
@@ -1237,6 +1385,7 @@ fn render_parts(parts: &[MessagePart]) -> Vec<MessagePart> {
                 diff: diff.clone(),
                 output_ref: output_ref.clone(),
                 output_bytes: *output_bytes,
+                output_digest: *output_digest,
                 diff_ref: diff_ref.clone(),
                 diff_stats: diff_stats.clone(),
                 subagent_ref: subagent_ref.clone(),
@@ -1281,6 +1430,196 @@ fn sync_segment<'a>(
     Ok(())
 }
 
+fn link_child_part(part: &mut MessagePart, child: &zeron_proto::AgentChild, doc: Option<&str>) {
+    if let MessagePart::Tool {
+        id,
+        call,
+        subagent_ref,
+        subagent_status,
+        ..
+    } = part
+        && child.tool_call_id.as_ref() == Some(id)
+    {
+        *call = zeron_proto::ToolCall::Unknown {
+            name: format!("Agent: {}", child.title),
+            input: None,
+        };
+        if let Some(doc) = doc {
+            *subagent_ref = Some(doc.into());
+        }
+        *subagent_status = Some(match child.status.as_str() {
+            "running" | "queued" => zeron_doc::SubagentStatus::Running,
+            "completed" => zeron_doc::SubagentStatus::Done,
+            _ => zeron_doc::SubagentStatus::Failed,
+        });
+    }
+}
+
+fn public_child_entry(
+    snapshot: &zeron_proto::ChildTranscript,
+    child: &zeron_proto::AgentChild,
+    doc_id: &str,
+    device_id: &str,
+) -> SessionMessageEntry {
+    let mut parts = Vec::new();
+    for event in &snapshot.events {
+        fold_event_into_parts(&mut parts, event);
+    }
+    if snapshot.omitted_updates > 0 {
+        parts.push(MessagePart::Error {
+            id: "public-omission".into(),
+            message: format!(
+                "{} public transcript updates omitted by the agent.",
+                snapshot.omitted_updates
+            ),
+        });
+    }
+    zeron_doc::apply_sidecar_refs(doc_id, &mut parts);
+    SessionMessageEntry {
+        id: "public-child".into(),
+        role: MessageRole::Assistant,
+        parts: render_parts(&parts),
+        created_at: now_ms(),
+        device_id: device_id.into(),
+        status: Some(if matches!(child.status.as_str(), "running" | "queued") {
+            MessageStatus::Streaming
+        } else {
+            MessageStatus::Complete
+        }),
+        continuation_of: None,
+    }
+}
+
+// A warm session can outlive many parent turns. Retain only bounded, sanitized
+// canonical tool state and stable doc addresses, never old transcript bodies.
+const AGENT_TOOL_OWNER_LIMIT: usize = 256;
+
+#[derive(Default)]
+struct AgentToolOwners(VecDeque<(loro::ContainerID, MessagePart)>);
+
+impl AgentToolOwners {
+    fn record(&mut self, container: loro::ContainerID, part: MessagePart) {
+        if let Some(old) = self.0.iter().position(|(_, old)| old.id() == part.id()) {
+            self.0.remove(old);
+        }
+        if self.0.len() == AGENT_TOOL_OWNER_LIMIT {
+            let victim = self
+                .0
+                .iter()
+                .position(|(_, p)| matches!(p, MessagePart::Tool { resolved: true, .. }))
+                .unwrap_or(0);
+            self.0.remove(victim);
+        }
+        self.0.push_back((container, part));
+    }
+
+    fn remember(
+        &mut self,
+        writer: &SegmentWriter<'_>,
+        parts: &[MessagePart],
+    ) -> Result<(), DocError> {
+        for (index, part) in parts.iter().enumerate() {
+            if !matches!(part, MessagePart::Tool { call, .. } if call.is_subagent_spawn()) {
+                continue;
+            }
+            let container = writer.tool_part_container_id(index)?;
+            self.record(container, part.clone());
+        }
+        Ok(())
+    }
+
+    fn update(
+        &mut self,
+        doc: &SessionDoc,
+        chat_id: &str,
+        event: &AgentEvent,
+    ) -> Result<bool, DocError> {
+        let Some(id) = tool_event_id(event) else {
+            return Ok(false);
+        };
+        let Some(index) = self.0.iter().position(|(_, part)| part.id() == id) else {
+            return Ok(false);
+        };
+        // A sparse frame must keep its established agent classification. A
+        // late ordinary echo cannot turn a canonical child into another tool.
+        if matches!(event, AgentEvent::ToolCall { call, .. } if !call.is_subagent_spawn()) {
+            return Ok(false);
+        }
+        let (container, previous) = &self.0[index];
+        let mut parts = vec![previous.clone()];
+        if matches!(event, AgentEvent::ToolProgress { .. })
+            && let MessagePart::Tool {
+                resolved,
+                is_error,
+                output_ref,
+                ..
+            } = &mut parts[0]
+        {
+            // Explicit public in-progress state may resume a canonical child,
+            // but never resumes the parent turn or an arbitrary old tool.
+            *resolved = false;
+            *is_error = false;
+            *output_ref = None;
+        }
+        fold_event_into_parts(&mut parts, event);
+        zeron_doc::apply_sidecar_refs(chat_id, &mut parts);
+        let updated = render_parts(&parts).remove(0);
+        if !doc.update_agent_tool_part(container, &updated)? {
+            return Ok(false);
+        }
+        let container = container.clone();
+        self.0.remove(index);
+        self.0.push_back((container, updated));
+        Ok(true)
+    }
+}
+
+fn tool_event_id(event: &AgentEvent) -> Option<&str> {
+    match event {
+        AgentEvent::ToolCall { id, .. }
+        | AgentEvent::ToolProgress { id, .. }
+        | AgentEvent::ToolResult { id, .. } => Some(id),
+        _ => None,
+    }
+}
+
+/// Recovery's journal-tail check must distinguish post-Done canonical activity
+/// from a real subsequent parent turn. Only identities established BEFORE Done
+/// qualify; new calls, text, steering, and all non-tool events still mean stale.
+fn is_canonical_background_tail(events: &[(u64, AgentEvent)]) -> bool {
+    let Some(done) = events
+        .iter()
+        .rposition(|(_, event)| matches!(event, AgentEvent::Done { .. }))
+    else {
+        return false;
+    };
+    if done + 1 == events.len() {
+        return false;
+    }
+    let mut required = HashSet::new();
+    for (_, event) in &events[done + 1..] {
+        let Some(id) = tool_event_id(event) else {
+            return false;
+        };
+        if matches!(event, AgentEvent::ToolCall { call, .. } if !call.is_subagent_spawn()) {
+            return false;
+        }
+        required.insert(id);
+        if required.len() > AGENT_TOOL_OWNER_LIMIT {
+            return false;
+        }
+    }
+    for (_, event) in events[..done].iter().rev() {
+        if let AgentEvent::ToolCall { id, call } = event
+            && required.remove(id.as_str())
+            && !call.is_subagent_spawn()
+        {
+            return false;
+        }
+    }
+    required.is_empty()
+}
+
 fn finish_segment<'a>(
     doc: &'a SessionDoc,
     writer: Option<SegmentWriter<'a>>,
@@ -1289,15 +1628,17 @@ fn finish_segment<'a>(
     started_at: i64,
     folded: &[MessagePart],
     status: MessageStatus,
+    agent_tools: &mut AgentToolOwners,
 ) -> Result<(), DocError> {
     let rendered = render_parts(folded);
-    match writer {
-        Some(w) => w.finish(&rendered, status),
-        None if !folded.is_empty() => {
-            SegmentWriter::begin(doc, entry_id, device_id, started_at)?.finish(&rendered, status)
-        }
-        None => Ok(()),
-    }
+    let mut writer = match writer {
+        Some(w) => w,
+        None if !folded.is_empty() => SegmentWriter::begin(doc, entry_id, device_id, started_at)?,
+        None => return Ok(()),
+    };
+    writer.sync(&rendered)?;
+    agent_tools.remember(&writer, &rendered)?;
+    writer.finish(&rendered, status)
 }
 
 /// `~` / `~/…` → this host's home directory. Anything else passes through.
@@ -1385,6 +1726,9 @@ async fn drive_run(
     // folding the echo would mint an orphan chip mid-text in the NEXT
     // segment — the mid-word transcript splits.
     let mut seen_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut agent_tools = AgentToolOwners::default();
+    let mut native_links: HashMap<String, (zeron_proto::AgentChild, Option<String>)> =
+        HashMap::new();
     let mut entry_id = new_id();
     let mut segment_started = now_ms();
     let mut writer: Option<SegmentWriter<'_>> = None;
@@ -1619,6 +1963,7 @@ async fn drive_run(
                         segment_started,
                         &folded,
                         MessageStatus::Complete,
+                        &mut agent_tools,
                     ) {
                         tracing::warn!(chat = %chat_id, error = %err, "quiesce segment finish failed");
                     }
@@ -1646,6 +1991,187 @@ async fn drive_run(
         // subagent spoke). Handled BEFORE the parked gate so a parked
         // session's background traffic still reaches the subagent doc
         // without un-parking the chat.
+        if let AgentEvent::GoalState { goal } = &event {
+            // The adapter emits even an initial `None` only when goalControl
+            // was negotiated. Hold the runs lock through session publication:
+            // retirement or replacement cannot interleave and leave stale
+            // capability on a successor (or resurrect it after retirement).
+            let mut runs = lock(&inner.runs);
+            let Some(run) = runs
+                .get_mut(&chat_id)
+                .filter(|run| run.run_id == run_id)
+            else {
+                continue;
+            };
+            run.goal_control = true;
+            let session = {
+                let mut statuses = lock(&inner.statuses);
+                let session = statuses.get_mut(&chat_id).map(|s| {
+                    s.goal_control = true;
+                    s.goal = goal.clone();
+                    s.clone()
+                });
+                let mut list: Vec<_> = statuses.values().cloned().collect();
+                list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+                inner.sessions_tx.send_replace(list);
+                session
+            };
+            if let Some(session) = session
+                && let Some(ws) = inner.workspace()
+            {
+                ws.record_session(&session);
+            }
+            drop(runs);
+            continue;
+        }
+        if let AgentEvent::ControlResolved {
+            prompt,
+            message_id,
+            error,
+        } = &event
+        {
+            let accepted = lock(&inner.runs).get(&chat_id).and_then(|run| {
+                let mut ledger = lock(&run.routed_steers);
+                let index = ledger.iter().position(|s| {
+                    message_id
+                        .as_ref()
+                        .map_or(&s.prompt == prompt, |id| &s.message_id == id)
+                })?;
+                ledger.remove(index)
+            });
+            if let (Some(accepted), Some(error)) = (accepted, error) {
+                let _ = doc_ref.set_message_status(&accepted.message_id, MessageStatus::Aborted);
+                if let Ok(commands) = doc_ref.read_commands() {
+                    for command in commands {
+                        if matches!(&command.payload, zeron_doc::SessionCommandPayload::Steer { message_id: Some(id), .. } if id == &accepted.message_id)
+                        {
+                            let _ = doc_ref.set_command_status(
+                                &command.id,
+                                zeron_doc::SessionCommandStatus::Rejected,
+                                Some(error),
+                            );
+                        }
+                    }
+                }
+            }
+            // Out-of-band acknowledgement must not become a recovery trigger.
+            if idle_since.is_none() {
+                inner.publish(&chat_id, &event);
+            }
+            continue;
+        }
+        if let AgentEvent::SubagentView { child, snapshot } = &event {
+            let sub_id = subagent_doc_id(&chat_id, &child.child_id);
+            let mut child_doc = child
+                .tool_call_id
+                .as_ref()
+                .and_then(|id| native_links.get(id))
+                .and_then(|(_, doc)| doc.clone());
+            if let Some(snapshot) = snapshot
+                && let Some(host) = inner.doc_host()
+            {
+                match host.open(&sub_id) {
+                    Ok(handle) => {
+                        let entry = public_child_entry(snapshot, child, &sub_id, &device_id);
+                        match handle.doc().replace_public_transcript(
+                            &snapshot.revision,
+                            &child.status,
+                            &entry,
+                        ) {
+                            Ok(changed) => {
+                                child_doc = Some(sub_id.clone());
+                                if changed {
+                                    let previous = host.public_transcript(&sub_id).ok().flatten();
+                                    let previous_tools: HashMap<_, _> = previous
+                                        .as_ref()
+                                        .into_iter()
+                                        .flat_map(|s| &s.events)
+                                        .filter_map(|event| match event {
+                                            AgentEvent::ToolResult { id, .. } => Some((id, event)),
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    if let Err(error) =
+                                        host.store_public_transcript(&sub_id, snapshot)
+                                    {
+                                        tracing::warn!(%error, "public child cache failed");
+                                    }
+                                    for event in &snapshot.events {
+                                        if let AgentEvent::ToolResult { id, .. } = event
+                                            && previous_tools
+                                                .get(id)
+                                                .is_some_and(|old| *old == event)
+                                        {
+                                            continue;
+                                        }
+                                        if let Some(payload) = zeron_doc::sidecar_payload(event) {
+                                            host.upload_tool_sidecar(&sub_id, payload);
+                                        }
+                                    }
+                                    if !matches!(child.status.as_str(), "running" | "queued") {
+                                        host.upload_tool_sidecar(
+                                            &chat_id,
+                                            zeron_doc::SidecarPayload {
+                                                part_id: sub_id.clone(),
+                                                output: handle.doc().read_entries().ok().and_then(
+                                                    |entries| serde_json::to_string(&entries).ok(),
+                                                ),
+                                                diff: None,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                            Err(error) => tracing::warn!(%error, "public child replacement failed"),
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "public child doc open failed"),
+                }
+            }
+            if snapshot.is_none()
+                && !matches!(child.status.as_str(), "running" | "queued")
+                && let Some(doc_id) = child_doc.as_deref()
+                && let Some(host) = inner.doc_host()
+            {
+                match host.open(doc_id) {
+                    Ok(handle) => {
+                        if let Err(error) = handle
+                            .doc()
+                            .set_message_status("public-child", MessageStatus::Complete)
+                        {
+                            tracing::warn!(%error, "public child settlement failed");
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "public child doc open failed"),
+                }
+            }
+
+            if let Some(id) = &child.tool_call_id {
+                for part in &mut folded {
+                    link_child_part(part, child, child_doc.as_deref());
+                }
+                if folded.iter().any(|p| p.id() == id) {
+                    dirty = true;
+                    flush_at = tokio::time::Instant::now();
+                }
+                if !folded.iter().any(|p| p.id() == id)
+                    && let Ok(Some((container, part))) =
+                        doc_ref.link_agent_tool(child, child_doc.as_deref())
+                {
+                    agent_tools.record(container, part);
+                }
+                if native_links.len() >= AGENT_TOOL_OWNER_LIMIT && !native_links.contains_key(id) {
+                    if let Some(old) = native_links.keys().next().cloned() {
+                        native_links.remove(&old);
+                    }
+                }
+                native_links.insert(id.clone(), (child.clone(), child_doc));
+            }
+            // Snapshot persistence replaces a revision; journaling the whole
+            // history on every refresh would grow quadratically.
+            continue;
+        }
+
         if let AgentEvent::Subagent {
             parent_tool_use_id,
             event: sub_event,
@@ -1823,6 +2349,60 @@ async fn drive_run(
                 continue;
             }
         }
+        // Session metadata may arrive while parked. Persist it without
+        // reopening the turn or creating assistant transcript content.
+        match &event {
+            AgentEvent::SessionTitle { title } => {
+                if let Some(ws) = inner.workspace()
+                    && let Err(err) = ws.title_chat_if_untitled(&chat_id, title)
+                {
+                    tracing::warn!(%chat_id, error = %err, "native title write failed");
+                }
+                // Preserve the terminal journal tail for crash recovery.
+                if idle_since.is_none() {
+                    inner.publish(&chat_id, &event);
+                }
+                continue;
+            }
+            AgentEvent::SessionMode { id, value } => {
+                let config = {
+                    let mut runs = lock(&inner.runs);
+                    runs.get_mut(&chat_id)
+                        .filter(|h| h.run_id == run_id)
+                        .map(|h| {
+                            let config = &mut h.runtime_config;
+                            config
+                                .model_options
+                                .insert(id.clone(), value.clone().into());
+                            zeron_proto::ChatConfig {
+                                harness: config.harness_id,
+                                model: config.model.clone(),
+                                reasoning: config.reasoning,
+                                model_options: config.model_options.clone(),
+                                sandbox: config.sandbox,
+                            }
+                        })
+                };
+                if let Some(config) = config {
+                    if let Some(request) = lock(&inner.last_requests).get_mut(&chat_id) {
+                        request
+                            .model_options
+                            .insert(id.clone(), value.clone().into());
+                    }
+                    if let Some(ws) = inner.workspace()
+                        && let Err(err) = ws.set_chat_model_option(&chat_id, &config, id, value)
+                    {
+                        tracing::warn!(%chat_id, error = %err, "session mode write failed");
+                    }
+                }
+                if idle_since.is_none() {
+                    inner.publish(&chat_id, &event);
+                }
+                continue;
+            }
+            _ => {}
+        }
+
         // Capacity/occupancy can settle after Done; updating it must not reopen a turn.
         if let AgentEvent::ContextUsage { tokens, window } = &event {
             if let Err(err) = doc_ref.update_context_usage(*tokens, *window) {
@@ -1830,6 +2410,22 @@ async fn drive_run(
             }
             continue;
         }
+        // An established background child owns its original tool part, not
+        // whatever parent segment happens to be live now. Route it before the
+        // parked/self-continuation and stale-echo gates without altering turn
+        // status, completion markers, timers, text, or creating another entry.
+        match agent_tools.update(doc_ref, &chat_id, &event) {
+            Ok(true) => {
+                inner.publish(&chat_id, &event);
+                continue;
+            }
+            Err(err) => {
+                tracing::warn!(%chat_id, error = %err, "canonical child tool update failed");
+                continue;
+            }
+            Ok(false) => {}
+        }
+
         // PARKED: a steer boundary, a terminal Done, or SELF-CONTINUED OUTPUT
         // re-opens the session; everything else stays gated. The ACP child
         // keeps forwarding `session/update` frames after a turn completes,
@@ -2021,6 +2617,7 @@ async fn drive_run(
                 segment_started,
                 &folded,
                 MessageStatus::Complete,
+                &mut agent_tools,
             ) {
                 tracing::warn!(chat = %chat_id, error = %err, "segment finish failed");
             }
@@ -2065,7 +2662,18 @@ async fn drive_run(
                 inner.set_status(&chat_id, SessionStatus::AwaitingInput, false);
             }
             AgentEvent::InputResolved { .. } => {
-                inner.set_status(&chat_id, SessionStatus::Working, false);
+                let awaiting = lock(&inner.runs)
+                    .get(&chat_id)
+                    .is_some_and(|h| !lock(&h.pending_inputs).is_empty());
+                inner.set_status(
+                    &chat_id,
+                    if awaiting {
+                        SessionStatus::AwaitingInput
+                    } else {
+                        SessionStatus::Working
+                    },
+                    false,
+                );
             }
             _ => {}
         }
@@ -2077,12 +2685,22 @@ async fn drive_run(
         let skip_fold = matches!(&event, AgentEvent::SessionStarted { .. }) && !folded.is_empty();
         if !skip_fold {
             fold_event_into_parts(&mut folded, &event);
-            // R2 sidecar PARKED (2026-08-10, product call): the fold's
-            // summary/stats ARE the doc's whole record — no refs stamped, no
-            // uploads. Full outputs survive only in the host's local run
-            // journal. To reintroduce: `zeron_doc::sidecar_payload(&event)`
-            // → `apply_sidecar_refs` → `doc_host.upload_tool_sidecar`, all
-            // still in place and tested.
+            if let AgentEvent::ToolCall { id, .. } = &event
+                && let Some((child, doc)) = native_links.get(id)
+            {
+                for part in &mut folded {
+                    link_child_part(part, child, doc.as_deref());
+                }
+            }
+            // Full public outputs use the existing lazy details path; only
+            // bounded summaries/diff stats ride the synced transcript. Upload
+            // on resolution, never per progress delta (avoids stale PUT races).
+            zeron_doc::apply_sidecar_refs(&chat_id, &mut folded);
+            if let Some(payload) = zeron_doc::sidecar_payload(&event)
+                && let Some(host) = inner.doc_host()
+            {
+                host.upload_tool_sidecar(&chat_id, payload);
+            }
         }
 
         if let AgentEvent::Done { status, .. } = &event {
@@ -2127,6 +2745,7 @@ async fn drive_run(
                     segment_started,
                     &folded,
                     message_status,
+                    &mut agent_tools,
                 ) {
                     tracing::warn!(chat = %chat_id, error = %err, "final segment finish failed");
                 }
@@ -2156,7 +2775,11 @@ async fn drive_run(
             // PERSISTENT SESSION: a cleanly completed turn on a steerable
             // harness PARKS instead of ending — child + mailbox stay warm for
             // the next routed dispatch; per-turn state resets for it.
-            if *status == DoneStatus::Completed && steerable && !interrupted {
+            if (*status == DoneStatus::Completed
+                || (harness_id == HarnessId::Mimir && *status == DoneStatus::Interrupted))
+                && steerable
+                && !interrupted
+            {
                 folded.clear();
                 dirty = false;
                 entry_id = new_id();
@@ -2264,8 +2887,84 @@ async fn drive_run(
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeConfig, subagent_doc_id};
+    use super::{RuntimeConfig, public_child_entry, subagent_doc_id};
     use zeron_proto::{HarnessId, RunRequest, SandboxLevel};
+
+    #[test]
+    fn public_child_fold_persists_full_output_identity_across_replacement() {
+        use zeron_doc::{MessagePart, SessionDoc};
+        use zeron_proto::{AgentChild, AgentEvent, ChildTranscript, ToolCall};
+
+        let child = AgentChild {
+            child_id: "child".into(),
+            tool_call_id: Some("t".into()),
+            title: "worker".into(),
+            agent: "general-purpose".into(),
+            status: "completed".into(),
+            transcript: true,
+        };
+        let snapshot = |revision: &str, tail: &str| ChildTranscript {
+            revision: revision.into(),
+            events: vec![
+                AgentEvent::ToolCall {
+                    id: "tool".into(),
+                    call: ToolCall::Exec {
+                        command: "run".into(),
+                    },
+                },
+                AgentEvent::ToolResult {
+                    id: "tool".into(),
+                    is_error: false,
+                    output: Some(format!("unchanged heading\n{}{}", "x".repeat(300), tail)),
+                    diff: None,
+                },
+            ],
+            omitted_updates: 0,
+        };
+        let old_snapshot = snapshot("r1", "OLD");
+        let new_snapshot = snapshot("r2", "NEW");
+        let old = public_child_entry(&old_snapshot, &child, "child-doc", "device");
+        let new = public_child_entry(&new_snapshot, &child, "child-doc", "device");
+        let identity = |entry: &zeron_doc::SessionMessageEntry| match &entry.parts[0] {
+            MessagePart::Tool {
+                output,
+                output_ref,
+                output_bytes,
+                output_digest,
+                ..
+            } => (
+                output.clone(),
+                output_ref.clone(),
+                *output_bytes,
+                *output_digest,
+            ),
+            _ => panic!("folded tool"),
+        };
+        let old_identity = identity(&old);
+        let new_identity = identity(&new);
+        assert_eq!(
+            old_identity.0, new_identity.0,
+            "summaries intentionally match"
+        );
+        assert_eq!(old_identity.1, new_identity.1, "stable sidecar ref");
+        assert_eq!(old_identity.2, new_identity.2, "equal-size full output");
+        assert_ne!(
+            old_identity.3, new_identity.3,
+            "tail replacement needs identity"
+        );
+
+        let doc = SessionDoc::init("child-doc").unwrap();
+        assert!(
+            doc.replace_public_transcript("r1", "completed", &old)
+                .unwrap()
+        );
+        assert!(
+            doc.replace_public_transcript("r2", "completed", &new)
+                .unwrap()
+        );
+        let persisted = doc.read_entries().unwrap();
+        assert_eq!(identity(&persisted[0]).3, new_identity.3);
+    }
 
     fn request() -> RunRequest {
         RunRequest {
@@ -2334,5 +3033,117 @@ mod tests {
             subagent_doc_id("chat", "a:b"),
             subagent_doc_id("chat", "a:c")
         );
+    }
+
+    #[test]
+    fn canonical_background_journal_tail_never_hides_a_new_parent_turn() {
+        use zeron_proto::{AgentEvent, DoneStatus, ToolCall};
+        let call = |id: &str, agent: bool| AgentEvent::ToolCall {
+            id: id.into(),
+            call: ToolCall::Unknown {
+                name: if agent { "Agent: child" } else { "ordinary" }.into(),
+                input: None,
+            },
+        };
+        let base = vec![
+            (1, call("agent", true)),
+            (2, call("ordinary", false)),
+            (
+                3,
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+            ),
+        ];
+        for (event, background) in [
+            (call("agent", true), true),
+            (
+                AgentEvent::ToolProgress {
+                    id: "agent".into(),
+                    output: Some("progress".into()),
+                },
+                true,
+            ),
+            (
+                AgentEvent::ToolResult {
+                    id: "agent".into(),
+                    is_error: false,
+                    output: None,
+                    diff: None,
+                },
+                true,
+            ),
+            (call("new-child", true), false),
+            (call("ordinary", true), false),
+            (
+                AgentEvent::ToolProgress {
+                    id: "ordinary".into(),
+                    output: None,
+                },
+                false,
+            ),
+            (
+                AgentEvent::TextDelta {
+                    text: "new parent text".into(),
+                },
+                false,
+            ),
+            (
+                AgentEvent::Steered {
+                    assistant_message_id: None,
+                    next_assistant_message_id: None,
+                },
+                false,
+            ),
+        ] {
+            let mut events = base.clone();
+            events.push((4, event));
+            assert_eq!(
+                super::is_canonical_background_tail(&events),
+                background,
+                "{events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_owner_cache_is_bounded_and_prefers_active_children() {
+        use zeron_doc::{MessagePart, SegmentWriter, SessionDoc};
+        use zeron_proto::{AgentEvent, ToolCall};
+        let doc = SessionDoc::init("bounded").unwrap();
+        let mut parts = Vec::new();
+        for i in 0..super::AGENT_TOOL_OWNER_LIMIT + 8 {
+            let id = format!("child-{i}");
+            zeron_doc::fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolCall {
+                    id: id.clone(),
+                    call: ToolCall::Unknown {
+                        name: "Agent: child".into(),
+                        input: None,
+                    },
+                },
+            );
+            if i != 0 {
+                zeron_doc::fold_event_into_parts(
+                    &mut parts,
+                    &AgentEvent::ToolResult {
+                        id,
+                        is_error: false,
+                        output: None,
+                        diff: None,
+                    },
+                );
+            }
+        }
+        let mut writer = SegmentWriter::begin(&doc, "entry", "dev", 0).unwrap();
+        writer.sync(&parts).unwrap();
+        let mut owners = super::AgentToolOwners::default();
+        owners.remember(&writer, &parts).unwrap();
+        assert_eq!(owners.0.len(), super::AGENT_TOOL_OWNER_LIMIT);
+        assert!(owners.0.iter().any(|(_, part)| matches!(part, MessagePart::Tool { id, resolved: false, .. } if id == "child-0")));
     }
 }

@@ -26,6 +26,7 @@ mod context_usage;
 pub mod edge_fade;
 pub mod files;
 pub mod frost;
+mod goal;
 pub mod history;
 pub mod icons;
 pub mod links;

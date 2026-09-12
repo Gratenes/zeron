@@ -25,6 +25,8 @@
 //! Wheel/touch releases that anchor immediately, including when background
 //! streaming has advanced beyond the last measured frame.
 
+mod artifacts;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
@@ -779,6 +781,17 @@ pub fn tool_detail(
     })
 }
 
+/// Small public results already ride whole in the doc (apart from transport
+/// fences/outer whitespace). Do not offer a fetch which only repeats them.
+/// Unknown lengths and locally truncated detail still need the sidecar.
+fn output_needs_fetch(output: Option<&str>, bytes: Option<u64>) -> bool {
+    let (Some(output), Some(bytes)) = (output, bytes) else {
+        return true;
+    };
+    output.lines().count() > OUTPUT_DETAIL_MAX_LINES
+        || (bytes > zeron_doc::TOOL_OUTPUT_SUMMARY_MAX as u64 && bytes > output.len() as u64)
+}
+
 /// Columns at which an invocation line soft-wraps into continuation lines.
 /// The wrap is char-counted, not measured — block heights must be analytic —
 /// so the budget is sized to fit the narrowest useful transcript pane.
@@ -821,6 +834,7 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
             None => url.clone(),
         },
         ToolCall::WebSearch { query } => query.clone(),
+        ToolCall::Document { .. } => return None,
         ToolCall::Todo { items } => items
             .iter()
             .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
@@ -962,6 +976,18 @@ pub enum RowKind {
         tree: Arc<BlockTree>,
         block_ix: usize,
     },
+    /// A MIME-identified public document, outside the generic tool accordion.
+    Document {
+        title: SharedString,
+        preview: Arc<BlockTree>,
+        output_ref: Option<SharedString>,
+        resolved: bool,
+        is_error: bool,
+    },
+    /// Delivery steps belong to the reply, never to the composer/steering queue.
+    Checklist {
+        items: Arc<Vec<zeron_proto::TodoItem>>,
+    },
     ToolGroup {
         tools: Arc<Vec<ToolItem>>,
         auto_open: bool,
@@ -1027,6 +1053,36 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
+fn collect_public_blob_owners(
+    entry: &SessionMessageEntry,
+    owners: &mut HashMap<SharedString, (u64, bool)>,
+) {
+    for part in &entry.parts {
+        if let MessagePart::Tool {
+            call,
+            resolved,
+            is_error,
+            output,
+            output_ref: Some(blob_ref),
+            output_bytes,
+            output_digest,
+            ..
+        } = part
+        {
+            // Prefer the fold-time full-output digest. Legacy docs fall back
+            // to their bounded summary, which preserves pre-digest behavior.
+            let mut token = output_digest
+                .unwrap_or_else(|| fnv1a(output.as_deref().unwrap_or_default().as_bytes()));
+            token ^= output_bytes.unwrap_or(0).rotate_left(17);
+            token ^= u64::from(*resolved) << 62 | u64::from(*is_error) << 63;
+            owners.insert(
+                blob_ref.as_str().into(),
+                (token, matches!(call, ToolCall::Document { .. })),
+            );
+        }
+    }
+}
+
 fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
     let mut acc = Vec::with_capacity(tools.len() * 8 + 1);
     for t in tools {
@@ -1034,8 +1090,8 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         acc.extend_from_slice(label.as_bytes());
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
         acc.push(t.is_error as u8 | (t.resolved as u8) << 1);
-        // Detail payload arriving (or growing) must re-splice the row even
-        // when the resolved bit didn't change.
+        // Public detail replacements must re-splice even at the same length
+        // and resolution state. Hash the bounded, already-built render data.
         match t.detail.as_deref() {
             None => acc.push(0),
             Some(ToolDetail::Output {
@@ -1045,8 +1101,9 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                 acc.push(1);
                 acc.extend_from_slice(&(lines.len() as u32).to_le_bytes());
                 acc.extend_from_slice(&(*truncated_by as u32).to_le_bytes());
-                let bytes: usize = lines.iter().map(|l| l.len()).sum();
-                acc.extend_from_slice(&(bytes as u32).to_le_bytes());
+                for line in lines {
+                    acc.extend_from_slice(&fnv1a(line.as_bytes()).to_le_bytes());
+                }
             }
             Some(ToolDetail::Thought {
                 lines,
@@ -1078,6 +1135,15 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                 acc.extend_from_slice(&file.additions.to_le_bytes());
                 acc.extend_from_slice(&file.deletions.to_le_bytes());
                 acc.extend_from_slice(&(file.hunks.len() as u32).to_le_bytes());
+                for hunk in &file.hunks {
+                    acc.extend_from_slice(&fnv1a(hunk.header.as_bytes()).to_le_bytes());
+                    for line in &hunk.lines {
+                        acc.push(line.kind as u8);
+                        acc.extend_from_slice(&line.old_no.unwrap_or(0).to_le_bytes());
+                        acc.extend_from_slice(&line.new_no.unwrap_or(0).to_le_bytes());
+                        acc.extend_from_slice(&fnv1a(line.text.as_bytes()).to_le_bytes());
+                    }
+                }
             }
             Some(ToolDetail::Stats { stats }) => {
                 acc.push(3);
@@ -1260,6 +1326,7 @@ pub fn rows_for_entry(
     for (part_ix, part) in entry.parts.iter().enumerate() {
         match part {
             MessagePart::Tool {
+                id: part_id,
                 call,
                 is_error,
                 resolved,
@@ -1274,6 +1341,39 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
+                let key = format!("{}#{}", entry.id, part_id);
+                let artifact = match call {
+                    ToolCall::Document { title } => Some(RowKind::Document {
+                        title: single_line(title).into(),
+                        preview: parse(&key, output.as_deref().unwrap_or_default()),
+                        output_ref: output_ref.clone().map(Into::into),
+                        resolved: *resolved,
+                        is_error: *is_error,
+                    }),
+                    ToolCall::Todo { items } => Some(RowKind::Checklist {
+                        items: Arc::new(items.clone()),
+                    }),
+                    _ => None,
+                };
+                if let Some(kind) = artifact {
+                    flush_group(
+                        &mut rows,
+                        &mut pending_group,
+                        &mut group_ix,
+                        group_last_part_ix,
+                    );
+                    rows.push(Row {
+                        id: key.into(),
+                        version: fnv1a(&serde_json::to_vec(part).unwrap_or_default()),
+                        turn_start: false,
+                        kind,
+                        entry_id: entry_id.clone(),
+                        timestamp: None,
+                        copy_text: None,
+                    });
+                    continue;
+                }
+
                 let item = ToolItem {
                     call: call.clone(),
                     is_error: *is_error,
@@ -1281,7 +1381,15 @@ pub fn rows_for_entry(
                     detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
                         .map(Arc::new),
                     invocation: call_block(call).map(Arc::new),
-                    output_ref: output_ref.clone().map(SharedString::from),
+                    output_ref: output_ref
+                        .clone()
+                        .filter(|_| {
+                            diff_ref.is_some()
+                                || diff.is_some()
+                                || diff_stats.as_ref().is_some_and(|s| !s.is_empty())
+                                || output_needs_fetch(output.as_deref(), *output_bytes)
+                        })
+                        .map(SharedString::from),
                     output_bytes: *output_bytes,
                     diff_ref: diff_ref.clone().map(SharedString::from),
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
@@ -2462,6 +2570,10 @@ pub struct Transcript {
     /// Deliberately NOT cleared on chat switch: refs are chat-qualified and a
     /// fetched blob stays valid.
     blob_details: HashMap<SharedString, BlobFetch>,
+    /// Public owner fingerprint and fetch generation for each stable blob ref.
+    /// Child revisions intentionally reuse refs, so the ref alone is not a cache key.
+    blob_owners: HashMap<SharedString, (u64, bool)>,
+    blob_generations: HashMap<SharedString, u64>,
     /// Monotonic fetch order per blob ref: when a tool has BOTH a diff and
     /// an output blob fetched, the chip shows the one requested most
     /// recently (click "Show full output" after a diff → see the output).
@@ -2477,6 +2589,8 @@ enum BlobFetch {
     /// Failed with the affordance re-armed as a retry.
     Failed,
     Ready(Arc<ToolDetail>),
+    /// Parsed only when the owning tool is explicitly a Markdown document.
+    Document(Arc<BlockTree>),
 }
 
 /// Shell-facing events (the transcript itself hosts no surfaces).
@@ -2641,6 +2755,8 @@ impl Transcript {
             attachment_loads: HashMap::new(),
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),
+            blob_owners: HashMap::new(),
+            blob_generations: HashMap::new(),
             blob_fetch_order: HashMap::new(),
             blob_fetch_counter: 0,
             _observe: observe,
@@ -3717,6 +3833,7 @@ impl Transcript {
         }
 
         let mut new_rows: Vec<Row> = Vec::new();
+        let mut public_blob_owners = HashMap::new();
         // Borrow the transcript only while deriving rows. Cloning the entity
         // handle lets rows_for mutate our caches without copying every text
         // and tool payload on each app-state notification.
@@ -3728,10 +3845,12 @@ impl Transcript {
                 None => state.transcript.as_slice(),
             };
             for entry in entries {
+                collect_public_blob_owners(entry, &mut public_blob_owners);
                 new_rows.extend(self.rows_for(entry, false));
             }
             if self.doc_override.is_none() {
                 for echo in state.pending_echoes() {
+                    collect_public_blob_owners(echo, &mut public_blob_owners);
                     new_rows.extend(self.rows_for(echo, true));
                 }
             }
@@ -3742,6 +3861,10 @@ impl Transcript {
                     .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
             )
         };
+
+        // A child revision may replace the public snapshot while retaining the
+        // chat/part blob ref. Reconcile before using any fetched document tree.
+        self.reconcile_blob_owners(&new_rows, public_blob_owners, cx);
 
         // Runtime scroll handles follow the stable code rows exactly. A live
         // block keeps its handle through completion; deleted/reindexed tail
@@ -3759,6 +3882,25 @@ impl Transcript {
                                 .collect()
                         })
                         .unwrap_or_default()
+                }
+                RowKind::Document {
+                    preview,
+                    output_ref,
+                    ..
+                } => {
+                    let tree = match output_ref.as_ref().and_then(|r| self.blob_details.get(r)) {
+                        Some(BlobFetch::Document(tree)) => tree,
+                        _ => preview,
+                    };
+                    tree.blocks
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(ix, top)| {
+                            render::code_block_indices(&top.block, ix)
+                                .into_iter()
+                                .map(|ix| format!("{}#code{ix}", row.id).into())
+                        })
+                        .collect()
                 }
                 _ => Vec::new(),
             })
@@ -3945,10 +4087,115 @@ impl Transcript {
         rows
     }
 
+    fn reconcile_blob_owners(
+        &mut self,
+        rows: &[Row],
+        public_owners: HashMap<SharedString, (u64, bool)>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut owners = HashMap::<SharedString, (u64, bool)>::new();
+        for row in rows {
+            match &row.kind {
+                RowKind::Document {
+                    output_ref: Some(blob_ref),
+                    ..
+                } => {
+                    owners.insert(blob_ref.clone(), (row.version, true));
+                }
+                RowKind::ToolGroup { tools, .. } => {
+                    for tool in tools.iter() {
+                        let version = tool_fingerprint(std::slice::from_ref(tool), false);
+                        for blob_ref in [&tool.output_ref, &tool.diff_ref].into_iter().flatten() {
+                            owners.insert(blob_ref.clone(), (version, false));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Exact public output wins over the bounded render projection above.
+        owners.extend(public_owners);
+        let mut refresh = Vec::new();
+        for (blob_ref, owner) in owners {
+            match self.blob_owners.insert(blob_ref.clone(), owner) {
+                None => {
+                    self.blob_generations.entry(blob_ref).or_insert(1);
+                }
+                Some(previous) if previous != owner => {
+                    *self.blob_generations.entry(blob_ref.clone()).or_insert(1) += 1;
+                    let requested = matches!(
+                        self.blob_details.remove(&blob_ref),
+                        Some(BlobFetch::Loading(_) | BlobFetch::Ready(_) | BlobFetch::Document(_))
+                    );
+                    self.invalidate_blob_rows(&blob_ref);
+                    if requested {
+                        refresh.push((blob_ref, owner.1));
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        for (blob_ref, document) in refresh {
+            self.spawn_blob_fetch(blob_ref, document, cx);
+        }
+    }
+
+    fn blob_generation(&self, blob_ref: &str) -> u64 {
+        self.blob_generations.get(blob_ref).copied().unwrap_or(0)
+    }
+
+    /// Blob arrival changes render-local content without a doc revision. Invalidate
+    /// the owning list measurements too; notify alone leaves cached rows clipped.
+    fn invalidate_blob_rows(&mut self, blob_ref: &str) {
+        for (ix, row) in self.rows.iter().enumerate() {
+            let affected = match &row.kind {
+                RowKind::Document { output_ref, .. } => output_ref.as_deref() == Some(blob_ref),
+                RowKind::ToolGroup { tools, .. } => tools.iter().any(|tool| {
+                    tool.output_ref.as_deref() == Some(blob_ref)
+                        || tool.diff_ref.as_deref() == Some(blob_ref)
+                }),
+                _ => false,
+            };
+            if affected {
+                self.list.remeasure_items(ix..ix + 1);
+                // Full Markdown reuses the preview's row/block keys, but not its text.
+                self.render_cache.borrow_mut().invalidate_row(&row.id);
+                if let Some(fold) = self.folds.get_mut(&row.id) {
+                    fold.toggled_at = None;
+                }
+                if let RowKind::ToolGroup { tools, .. } = &row.kind {
+                    for ix in 0..tools.len() {
+                        if let Some(fold) = self
+                            .tool_details
+                            .get_mut(&SharedString::from(format!("{}#d{ix}", row.id)))
+                        {
+                            fold.toggled_at = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish_blob_fetch(
+        &mut self,
+        blob_ref: SharedString,
+        generation: u64,
+        result: BlobFetch,
+        cx: &mut Context<Self>,
+    ) {
+        if self.blob_generation(&blob_ref) != generation {
+            return;
+        }
+        self.invalidate_blob_rows(&blob_ref);
+        self.blob_details.insert(blob_ref, result);
+        cx.notify();
+    }
+
     /// Fetch a sidecar blob (full tool output or diff) and build its upgraded
     /// [`ToolDetail`] once, off the render path. Re-entry while Loading/Ready
     /// is a no-op; Failed re-arms as a retry (the affordance label says so).
-    fn spawn_blob_fetch(&mut self, blob_ref: SharedString, cx: &mut Context<Self>) {
+    fn spawn_blob_fetch(&mut self, blob_ref: SharedString, document: bool, cx: &mut Context<Self>) {
         // Rank BEFORE the already-fetched guard: clicking a Ready ref is the
         // "show me this one again" toggle (recency bump + repaint, no
         // re-fetch) — with both a diff and an output fetched, the two
@@ -3957,7 +4204,8 @@ impl Transcript {
         self.blob_fetch_order
             .insert(blob_ref.clone(), self.blob_fetch_counter);
         match self.blob_details.get(&blob_ref) {
-            Some(BlobFetch::Ready(_)) => {
+            Some(BlobFetch::Ready(_)) | Some(BlobFetch::Document(_)) => {
+                self.invalidate_blob_rows(&blob_ref);
                 cx.notify();
                 return;
             }
@@ -3969,6 +4217,7 @@ impl Transcript {
         };
         let is_diff = blob_ref.ends_with(".diff");
         let ref_key = blob_ref.clone();
+        let generation = self.blob_generation(&blob_ref);
         let task = cx.spawn(async move |this, cx| {
             let reply = crate::attachments::call_with_timeout(
                 &engine,
@@ -3984,15 +4233,18 @@ impl Transcript {
                         .get("text")
                         .and_then(|t| t.as_str())
                         .unwrap_or_default();
-                    blob_detail(text, is_diff)
-                        .map(|d| BlobFetch::Ready(Arc::new(d)))
-                        .unwrap_or(BlobFetch::Failed)
+                    if document {
+                        BlobFetch::Document(Arc::new(parse_full(text)))
+                    } else {
+                        blob_detail(text, is_diff)
+                            .map(|d| BlobFetch::Ready(Arc::new(d)))
+                            .unwrap_or(BlobFetch::Failed)
+                    }
                 }
                 Err(_) => BlobFetch::Failed,
             };
             this.update(cx, |this, cx| {
-                this.blob_details.insert(ref_key, fetched);
-                cx.notify();
+                this.finish_blob_fetch(ref_key, generation, fetched, cx);
             })
             .ok();
         });
@@ -5011,6 +5263,8 @@ impl Transcript {
                 }
                 el
             }
+            RowKind::Document { .. } => self.render_document(&row, &theme, window, cx),
+            RowKind::Checklist { items } => self.render_checklist(&row.id, items, &theme, cx),
             RowKind::ToolGroup { tools, auto_open } => {
                 self.render_tool_group(&row.id, tools, *auto_open, &theme, cx)
             }
@@ -5376,7 +5630,7 @@ impl Transcript {
                 for (blob_ref, what, bytes) in candidates {
                     let Some(blob_ref) = blob_ref else { continue };
                     let label = match self.blob_details.get(blob_ref) {
-                        Some(BlobFetch::Ready(_)) => {
+                        Some(BlobFetch::Ready(_)) | Some(BlobFetch::Document(_)) => {
                             if shown == Some(blob_ref) {
                                 continue;
                             }
@@ -5684,7 +5938,7 @@ impl Transcript {
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.text_muted))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.spawn_blob_fetch(blob_ref.clone(), cx);
+                                    this.spawn_blob_fetch(blob_ref.clone(), false, cx);
                                     cx.notify();
                                 }));
                         }
@@ -6006,6 +6260,7 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Search { .. } => crate::icons::MAGNIFER,
         ToolCall::Glob { .. } => crate::icons::FOLDER_WITH_FILES,
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
+        ToolCall::Document { .. } => crate::icons::DOCUMENT,
         ToolCall::Todo { .. } => crate::icons::CHECKLIST,
         call if is_agent_call(call) => crate::icons::BOT,
         ToolCall::Unknown { name, .. } if name == "Wait for agents" => crate::icons::BOT,
@@ -6671,6 +6926,8 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         if let MessagePart::Tool {
             is_error,
             resolved,
+            output,
+            diff,
             subagent_ref,
             subagent_status,
             subagent_tail,
@@ -6678,6 +6935,20 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         } = part
         {
             acc.push(*is_error as u8 | (*resolved as u8) << 1);
+            // Same-sized public output/legacy inline-diff replacements still
+            // change rendered details. Borrow the bytes; do not rebuild details
+            // or copy full legacy payloads into this fingerprint buffer.
+            if let Some(output) = output {
+                acc.extend_from_slice(&fnv1a(output.as_bytes()).to_le_bytes());
+            }
+            if let Some(diff) = diff {
+                acc.extend_from_slice(&fnv1a(diff.path.as_bytes()).to_le_bytes());
+                acc.push(diff.old_text.is_some() as u8);
+                acc.extend_from_slice(
+                    &fnv1a(diff.old_text.as_deref().unwrap_or("").as_bytes()).to_le_bytes(),
+                );
+                acc.extend_from_slice(&fnv1a(diff.new_text.as_bytes()).to_le_bytes());
+            }
             // Subagent lifecycle mutates a COMPLETED entry in place (eager-
             // done: the spawn resolves while the subagent runs on) and
             // `byte_len` above doesn't cover these fields — hash them or the
@@ -7477,6 +7748,134 @@ mod tests {
         }
     }
 
+    #[test]
+    fn public_documents_are_not_hidden_in_generic_tool_groups() {
+        let mut document = tool_part("proposal", "");
+        if let MessagePart::Tool { call, output, .. } = &mut document {
+            *call = ToolCall::Document {
+                title: "Implementation plan".into(),
+            };
+            *output = Some(
+                "# Implementation plan\n\n## Delivery\n\n- **Build** the feature\n- Verify it"
+                    .into(),
+            );
+        }
+        let entry = assistant(
+            "proposal-entry",
+            MessageStatus::Complete,
+            vec![
+                tool_part("read", "cat Cargo.toml"),
+                document,
+                tool_part("run", "cargo test"),
+            ],
+        );
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(
+            rows.len(),
+            3,
+            "a public document separates ordinary tool groups"
+        );
+        let RowKind::Document { title, preview, .. } = &rows[1].kind else {
+            panic!("standalone document")
+        };
+        assert_eq!(title.as_ref(), "Implementation plan");
+        assert!(matches!(
+            &preview.blocks[0].block,
+            Block::Heading { level: 1, .. }
+        ));
+        assert!(matches!(
+            &preview.blocks[1].block,
+            Block::Heading { level: 2, .. }
+        ));
+        assert!(matches!(&preview.blocks[2].block, Block::List { .. }));
+    }
+
+    #[test]
+    fn complete_small_public_output_has_no_useless_fetch_affordance() {
+        let full = "stdout: fixture passed\nstderr: ordinary diagnostic\n";
+        let mut part = tool_part("shell", "printf fixture");
+        if let MessagePart::Tool {
+            output,
+            output_ref,
+            output_bytes,
+            ..
+        } = &mut part
+        {
+            *output = zeron_doc::summarize_tool_output(full);
+            *output_ref = Some("fixture/shell".into());
+            *output_bytes = Some(full.len() as u64);
+        }
+        let rows = rows_for_entry(
+            &assistant("reply", MessageStatus::Complete, vec![part]),
+            false,
+            &mut parse,
+        );
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("shell stays a tool")
+        };
+        assert!(
+            tools[0].output_ref.is_none(),
+            "complete small output must not offer a no-op fetch"
+        );
+        assert!(
+            matches!(tools[0].detail.as_deref(), Some(ToolDetail::Output { lines, truncated_by: 0 }) if lines.len() == 2)
+        );
+    }
+
+    #[test]
+    fn document_rendering_is_semantic_not_a_title_or_output_heuristic() {
+        let mut part = tool_part("shell", "printf '# Implementation plan'");
+        if let MessagePart::Tool { output, .. } = &mut part {
+            *output = Some("# Implementation plan\n\n- task".into());
+        }
+        let rows = rows_for_entry(
+            &assistant("ordinary", MessageStatus::Complete, vec![part]),
+            false,
+            &mut parse,
+        );
+        assert!(matches!(&rows[0].kind, RowKind::ToolGroup { .. }));
+        assert!(
+            call_block(&ToolCall::Document {
+                title: "Plan".into()
+            })
+            .is_none(),
+            "documents never duplicate the body in tool input"
+        );
+    }
+
+    #[test]
+    fn delivery_steps_are_separate_rows_and_completion_changes_the_version() {
+        let mut part = tool_part("steps", "");
+        if let MessagePart::Tool { call, .. } = &mut part {
+            *call = ToolCall::Todo {
+                items: vec![zeron_proto::TodoItem {
+                    text: "Ship the feature".into(),
+                    done: false,
+                }],
+            };
+        }
+        let mut entry = assistant(
+            "delivery",
+            MessageStatus::Complete,
+            vec![part, tool_part("test", "cargo test")],
+        );
+        let before = rows_for_entry(&entry, false, &mut parse);
+        assert!(
+            matches!(&before[0].kind, RowKind::Checklist { items } if items.len() == 1 && !items[0].done)
+        );
+        assert!(matches!(&before[1].kind, RowKind::ToolGroup { .. }));
+        if let MessagePart::Tool {
+            call: ToolCall::Todo { items },
+            ..
+        } = &mut entry.parts[0]
+        {
+            items[0].done = true;
+        }
+        let after = rows_for_entry(&entry, false, &mut parse);
+        assert_eq!(before[0].id, after[0].id);
+        assert_ne!(before[0].version, after[0].version);
+    }
+
     fn text_part(id: &str, text: &str) -> MessagePart {
         MessagePart::Text {
             id: id.into(),
@@ -7702,12 +8101,146 @@ mod tests {
             diff: None,
             output_ref: None,
             output_bytes: None,
+            output_digest: None,
             diff_ref: None,
             diff_stats: None,
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
         }
+    }
+
+    #[test]
+    fn same_length_public_output_updates_entry_and_tool_row_versions() {
+        use zeron_doc::fold_event_into_parts;
+        use zeron_proto::AgentEvent;
+
+        for (old, new) in [("one", "two"), ("ab\nc", "a\nbc"), ("😺", "😸")] {
+            let mut parts = Vec::new();
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolCall {
+                    id: "tool".into(),
+                    call: ToolCall::Exec {
+                        command: "cargo test".into(),
+                    },
+                },
+            );
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolProgress {
+                    id: "tool".into(),
+                    output: Some(old.into()),
+                },
+            );
+            let before = assistant("message", MessageStatus::Streaming, parts.clone());
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolProgress {
+                    id: "tool".into(),
+                    output: Some(new.into()),
+                },
+            );
+            let after = assistant("message", MessageStatus::Streaming, parts.clone());
+            assert_eq!(before.parts[0].byte_len(), after.parts[0].byte_len());
+            let before_rows = rows_for_entry(&before, false, &mut parse);
+            let after_rows = rows_for_entry(&after, false, &mut parse);
+            let RowKind::ToolGroup { tools, .. } = &after_rows[0].kind else {
+                panic!("tool row")
+            };
+            assert!(
+                !tools[0].resolved && !tools[0].is_error,
+                "progress is not completion"
+            );
+            let Some(ToolDetail::Output { lines, .. }) = tools[0].detail.as_deref() else {
+                panic!("public output detail")
+            };
+            assert_eq!(
+                lines
+                    .iter()
+                    .map(|line| line.as_ref())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                new
+            );
+            assert_eq!(before_rows[0].id, after_rows[0].id);
+            assert_eq!(
+                (
+                    entry_fingerprint(&before, false) != entry_fingerprint(&after, false),
+                    before_rows[0].version != after_rows[0].version
+                ),
+                (true, true),
+                "both caches must notice replacement {old:?} -> {new:?}"
+            );
+            assert_eq!(diff_rows(&before_rows, &after_rows), Some((0..1, 1)));
+            assert_eq!(
+                diff_rows(&after_rows, &rows_for_entry(&after, false, &mut parse)),
+                None
+            );
+
+            fold_event_into_parts(
+                &mut parts,
+                &AgentEvent::ToolResult {
+                    id: "tool".into(),
+                    is_error: false,
+                    output: Some(new.into()),
+                    diff: None,
+                },
+            );
+            let completed = assistant("message", MessageStatus::Complete, parts);
+            let completed_rows = rows_for_entry(&completed, false, &mut parse);
+            assert_ne!(
+                after_rows[0].version, completed_rows[0].version,
+                "resolution still changes independently of output"
+            );
+            assert_eq!(after.status, Some(MessageStatus::Streaming));
+        }
+    }
+
+    #[test]
+    fn same_length_inline_diff_updates_entry_and_tool_row_versions() {
+        let entry = |new_text: &str| {
+            let mut part = tool_part("tool", "edit");
+            if let MessagePart::Tool { diff, .. } = &mut part {
+                *diff = Some(zeron_proto::ToolDiff {
+                    path: "/work/file.txt".into(),
+                    old_text: Some("old\n".into()),
+                    new_text: new_text.into(),
+                });
+            }
+            assistant("message", MessageStatus::Complete, vec![part])
+        };
+        let before = entry("one\n");
+        let after = entry("two\n");
+        assert_eq!(before.parts[0].byte_len(), after.parts[0].byte_len());
+        let before_rows = rows_for_entry(&before, false, &mut parse);
+        let after_rows = rows_for_entry(&after, false, &mut parse);
+        let RowKind::ToolGroup { tools, .. } = &after_rows[0].kind else {
+            panic!("tool row")
+        };
+        let Some(ToolDetail::Diff { file, .. }) = tools[0].detail.as_deref() else {
+            panic!("inline diff")
+        };
+        assert_eq!((file.additions, file.deletions), (1, 1));
+        assert!(
+            file.hunks[0]
+                .lines
+                .iter()
+                .any(|line| line.kind == crate::changes::LineKind::Add && line.text == "two")
+        );
+        assert_eq!(
+            (
+                entry_fingerprint(&before, false) != entry_fingerprint(&after, false),
+                before_rows[0].version != after_rows[0].version
+            ),
+            (true, true),
+            "equal-length inline edits must invalidate both caches"
+        );
+        assert_eq!(diff_rows(&before_rows, &after_rows), Some((0..1, 1)));
+        assert_eq!(
+            diff_rows(&after_rows, &rows_for_entry(&after, false, &mut parse)),
+            None
+        );
     }
 
     const MD: &str = "# Title\n\npara one\n\n```rust\nlet x = 1;\n```";
@@ -7824,6 +8357,7 @@ mod tests {
             diff: None,
             output_ref: None,
             output_bytes: None,
+            output_digest: None,
             diff_ref: None,
             diff_stats: None,
             subagent_ref: Some(format!("chat--sub--{id}")),
@@ -8096,6 +8630,462 @@ mod tests {
             .unwrap();
         }
 
+        #[test]
+        fn same_ref_owner_replacement_invalidates_cache_and_rejects_stale_fetches() {
+            with_transcript(|this, cx| {
+                let shell = |tail: &str| {
+                    let output = (1..=25)
+                        .map(|ix| format!("unchanged preview line {ix}"))
+                        .chain(std::iter::once(tail.to_owned()))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let mut parts = Vec::new();
+                    zeron_doc::fold_event_into_parts(
+                        &mut parts,
+                        &zeron_proto::AgentEvent::ToolCall {
+                            id: "shell".into(),
+                            call: ToolCall::Exec {
+                                command: "printf fixture".into(),
+                            },
+                        },
+                    );
+                    zeron_doc::fold_event_into_parts(
+                        &mut parts,
+                        &zeron_proto::AgentEvent::ToolResult {
+                            id: "shell".into(),
+                            is_error: false,
+                            output: Some(output),
+                            diff: None,
+                        },
+                    );
+                    zeron_doc::apply_sidecar_refs("chat", &mut parts);
+                    assistant("reply", MessageStatus::Complete, parts)
+                };
+                feed(this, vec![shell("same-size-tail-OLD")], cx);
+                let old_generation = this.blob_generation("chat/shell");
+                this.finish_blob_fetch(
+                    "chat/shell".into(),
+                    old_generation,
+                    BlobFetch::Ready(Arc::new(blob_detail("full OLD", false).unwrap())),
+                    cx,
+                );
+                assert!(matches!(
+                    this.blob_details.get("chat/shell"),
+                    Some(BlobFetch::Ready(_))
+                ));
+
+                // Only line 26 changes, with equal length and the same blob ref.
+                // The bounded 24-line ToolDetail projection is byte-identical.
+                feed(this, vec![shell("same-size-tail-NEW")], cx);
+                let new_generation = this.blob_generation("chat/shell");
+                assert_ne!(new_generation, old_generation);
+                assert!(!this.blob_details.contains_key("chat/shell"));
+                this.finish_blob_fetch(
+                    "chat/shell".into(),
+                    old_generation,
+                    BlobFetch::Ready(Arc::new(blob_detail("stale OLD", false).unwrap())),
+                    cx,
+                );
+                assert!(!this.blob_details.contains_key("chat/shell"));
+                this.finish_blob_fetch(
+                    "chat/shell".into(),
+                    new_generation,
+                    BlobFetch::Ready(Arc::new(blob_detail("fresh NEW", false).unwrap())),
+                    cx,
+                );
+                let ready = match this.blob_details.get("chat/shell") {
+                    Some(BlobFetch::Ready(detail)) => detail.clone(),
+                    _ => panic!("new generation must install its fetched output"),
+                };
+                let ToolDetail::Output { lines, .. } = ready.as_ref() else {
+                    panic!("shell output detail")
+                };
+                assert_eq!(lines[0].as_ref(), "fresh NEW");
+                // An unchanged owner keeps the one-time fetched value intact.
+                feed(this, vec![shell("same-size-tail-NEW")], cx);
+                assert_eq!(this.blob_generation("chat/shell"), new_generation);
+                assert!(matches!(
+                    this.blob_details.get("chat/shell"),
+                    Some(BlobFetch::Ready(detail)) if Arc::ptr_eq(detail, &ready)
+                ));
+
+                let document = |preview: &str| {
+                    let mut part = tool_part("plan", "");
+                    if let MessagePart::Tool {
+                        call,
+                        output,
+                        output_ref,
+                        ..
+                    } = &mut part
+                    {
+                        *call = ToolCall::Document {
+                            title: "Plan".into(),
+                        };
+                        *output = Some(preview.into());
+                        *output_ref = Some("chat/plan".into());
+                    }
+                    assistant("proposal", MessageStatus::Complete, vec![part])
+                };
+                feed(this, vec![document("# OLD plan")], cx);
+                let old_generation = this.blob_generation("chat/plan");
+                let old_tree = Arc::new(parse_full("# full OLD"));
+                this.finish_blob_fetch(
+                    "chat/plan".into(),
+                    old_generation,
+                    BlobFetch::Document(old_tree),
+                    cx,
+                );
+                feed(this, vec![document("# NEW plan")], cx);
+                let new_generation = this.blob_generation("chat/plan");
+                assert_ne!(new_generation, old_generation);
+                let fresh_tree = Arc::new(parse_full("# full NEW"));
+                this.finish_blob_fetch(
+                    "chat/plan".into(),
+                    old_generation,
+                    BlobFetch::Document(Arc::new(parse_full("# stale OLD"))),
+                    cx,
+                );
+                assert!(!this.blob_details.contains_key("chat/plan"));
+                this.finish_blob_fetch(
+                    "chat/plan".into(),
+                    new_generation,
+                    BlobFetch::Document(fresh_tree.clone()),
+                    cx,
+                );
+                assert!(matches!(
+                    this.blob_details.get("chat/plan"),
+                    Some(BlobFetch::Document(tree)) if Arc::ptr_eq(tree, &fresh_tree)
+                ));
+            });
+        }
+
+        #[test]
+        fn fetched_tool_output_remeasures_a_cached_transcript_row() {
+            with_window(|transcript, window, cx| {
+                let full = "stdout start\nstderr detail\nextra line 3\nextra line 4\nextra line 5\nextra line 6\nextra line 7\nextra line 8\nextra line 9\nextra line 10\nextra line 11\nextra line 12: the final verification marker must remain visible after fetching the complete tool output";
+                assert!(full.len() > zeron_doc::TOOL_OUTPUT_SUMMARY_MAX);
+                transcript.update(cx, |this, cx| {
+                    let mut part = tool_part("shell", "printf fixture");
+                    if let MessagePart::Tool {
+                        output,
+                        output_ref,
+                        output_bytes,
+                        ..
+                    } = &mut part
+                    {
+                        *output = zeron_doc::summarize_tool_output(full);
+                        *output_ref = Some("fixture/shell".into());
+                        *output_bytes = Some(full.len() as u64);
+                    }
+                    feed(
+                        this,
+                        vec![assistant("reply", MessageStatus::Complete, vec![part])],
+                        cx,
+                    );
+                    this.folds.entry("reply#g0".into()).or_default().open = Some(true);
+                    this.tool_details
+                        .entry("reply#g0#d0".into())
+                        .or_default()
+                        .open = Some(true);
+                    this.list.reset(1);
+                    this.pinned = false;
+                    this.list.scroll_to(ListOffset::default());
+                    this.rail_enabled = false;
+                    cx.notify();
+                });
+                draw(window, cx);
+                draw(window, cx);
+                let before = transcript.read(cx).list.offset_for_item(1);
+                transcript.update(cx, |this, cx| {
+                    this.blob_fetch_order.insert("fixture/shell".into(), 1);
+                    this.finish_blob_fetch(
+                        "fixture/shell".into(),
+                        this.blob_generation("fixture/shell"),
+                        BlobFetch::Ready(Arc::new(blob_detail(full, false).unwrap())),
+                        cx,
+                    );
+                });
+                draw(window, cx);
+                let after = transcript.read(cx).list.offset_for_item(1);
+                // Eleven extra 18px lines, with the 24px fetch link retired.
+                assert_eq!(
+                    after - before,
+                    px(174.0),
+                    "full output replaces the summary and removes its fetch affordance"
+                );
+            });
+        }
+
+        #[test]
+        fn clicked_tool_detail_stays_open_after_its_tween_and_allows_full_output() {
+            with_window(|transcript, window, cx| {
+                transcript.update(cx, |this, cx| {
+                    let mut part = tool_part("shell", "printf 'MIMIR_STDOUT_READY\\n'; printf 'MIMIR_STDERR_READY\\n' >&2; seq 1 80");
+                    if let MessagePart::Tool { output, output_ref, output_bytes, .. } = &mut part {
+                        *output = Some("Process completed, exit code 0…".into());
+                        *output_ref = Some("fixture/shell".into());
+                        *output_bytes = Some(300);
+                    }
+                    feed(this, vec![assistant("reply", MessageStatus::Complete,
+                        vec![part, tool_part("failure", "exit 7"), text_part("tail", &"Exit statuses: 0 and 7.\n\n".repeat(40))])], cx);
+                    this.rail_enabled = false;
+                    this.pinned = false;
+                    this.list.scroll_to(ListOffset::default());
+                    cx.notify();
+                });
+                let click = |position, cx: &mut gpui::App| {
+                    cx.update_window(window.into(), |_, window, cx| {
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseMove(MouseMoveEvent {
+                                position,
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                                button: MouseButton::Left,
+                                position,
+                                click_count: 1,
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseUp(MouseUpEvent {
+                                button: MouseButton::Left,
+                                position,
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                    })
+                    .unwrap();
+                };
+                let settle = |cx: &mut gpui::App| {
+                    for _ in 0..15 {
+                        std::thread::sleep(Duration::from_millis(40));
+                        draw(window, cx);
+                    }
+                };
+                draw(window, cx);
+                let group_origin = |cx: &gpui::App| {
+                    // Keep the tool visible above a long transcript, like the
+                    // reported live scene; use its actual laid-out row bounds.
+                    let bounds = transcript.read(cx).list.bounds_for_item(0).unwrap();
+                    gpui::point(
+                        bounds.center().x - px(MAX_CONTENT_WIDTH / 2.0),
+                        bounds.top() + px(Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0),
+                    )
+                };
+                click(group_origin(cx) + gpui::point(px(40.0), px(13.0)), cx);
+                settle(cx);
+                assert_eq!(transcript.read(cx).folds["reply#g0"].open, Some(true));
+                let closed = transcript.read(cx).list.offset_for_item(1);
+                let header_y = 26.0 + CHIPS_TOP_PAD + CHIP_HEIGHT / 2.0;
+                // Click the command text, not just unused header whitespace.
+                click(group_origin(cx) + gpui::point(px(100.0), px(header_y)), cx);
+                settle(cx);
+                assert_eq!(
+                    transcript.read(cx).tool_details["reply#g0#d0"].open,
+                    Some(true)
+                );
+                let expanded = transcript.read(cx).list.offset_for_item(1);
+                assert!(
+                    expanded > closed + px(40.0),
+                    "the clicked detail must remain laid out after the animation: {closed:?} -> {expanded:?}"
+                );
+                settle(cx);
+                assert_eq!(transcript.read(cx).list.offset_for_item(1), expanded);
+                let detail_h = match &transcript.read(cx).rows[0].kind {
+                    RowKind::ToolGroup { tools, .. } => {
+                        tools[0].invocation.as_deref().map_or(0.0, detail_height)
+                            + tools[0].detail.as_deref().map_or(0.0, detail_height)
+                    }
+                    _ => panic!("tool group"),
+                };
+                let fetch_y = 26.0
+                    + CHIPS_TOP_PAD
+                    + (CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0
+                    + CHIP_CARD_HEIGHT
+                    + detail_h
+                    + BLOB_AFFORDANCE_HEIGHT / 2.0;
+                click(group_origin(cx) + gpui::point(px(100.0), px(fetch_y)), cx);
+                assert_eq!(
+                    transcript.read(cx).blob_fetch_order.get("fixture/shell"),
+                    Some(&1),
+                    "the visible full-output affordance must receive an actual click"
+                );
+            });
+        }
+
+        #[test]
+        fn fetched_document_replaces_the_painted_preview_heading() {
+            with_window(|transcript, window, cx| {
+                transcript.update(cx, |this, cx| {
+                    let mut part = tool_part("plan", "");
+                    if let MessagePart::Tool {
+                        call,
+                        output,
+                        output_ref,
+                        ..
+                    } = &mut part
+                    {
+                        *call = ToolCall::Document {
+                            title: "Submit plan: python-todo-cli".into(),
+                        };
+                        *output = Some("# python-todo-cli…".into());
+                        *output_ref = Some("fixture/plan".into());
+                    }
+                    feed(
+                        this,
+                        vec![assistant("proposal", MessageStatus::Complete, vec![part])],
+                        cx,
+                    );
+                    this.rail_enabled = false;
+                    cx.notify();
+                });
+                let select_heading = |cx: &mut gpui::App| {
+                    let position = render::selection_test_bounds("proposal#plan:0").origin
+                        + gpui::point(px(2.0), px(8.0));
+                    cx.update_window(window.into(), |_, window, cx| {
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                                button: MouseButton::Left,
+                                position,
+                                click_count: 3,
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseUp(MouseUpEvent {
+                                button: MouseButton::Left,
+                                position,
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                    })
+                    .unwrap();
+                    let selected = crate::markdown::selection::selected_text();
+                    crate::markdown::selection::clear_if_owner("proposal#plan:0");
+                    selected
+                };
+                draw(window, cx);
+                assert_eq!(select_heading(cx).as_deref(), Some("python-todo-cli…"));
+                transcript.update(cx, |this, cx| {
+                    this.finish_blob_fetch(
+                        "fixture/plan".into(),
+                        this.blob_generation("fixture/plan"),
+                        BlobFetch::Document(Arc::new(parse_full(
+                            "# python-todo-cli\n\n## Requirements\n\nThe full proposal body.",
+                        ))),
+                        cx,
+                    );
+                });
+                draw(window, cx);
+                assert_eq!(
+                    select_heading(cx).as_deref(),
+                    Some("python-todo-cli"),
+                    "painted/copied heading must come from the full body, not the cached preview"
+                );
+            });
+        }
+
+        #[test]
+        fn document_sidecars_and_collapsing_use_actual_markdown_layout() {
+            with_window(|transcript, window, cx| {
+                transcript.update(cx, |this, cx| {
+                    let mut part = tool_part("plan", "");
+                    if let MessagePart::Tool {
+                        call,
+                        output,
+                        output_ref,
+                        ..
+                    } = &mut part
+                    {
+                        *call = ToolCall::Document {
+                            title: "Implementation plan".into(),
+                        };
+                        *output = Some("# Plan\n\nPreview".into());
+                        *output_ref = Some("fixture/plan".into());
+                    }
+                    feed(
+                        this,
+                        vec![assistant("proposal", MessageStatus::Complete, vec![part])],
+                        cx,
+                    );
+                    this.rail_enabled = false;
+                    cx.notify();
+                });
+                draw(window, cx);
+                let preview_height = transcript.read(cx).list.offset_for_item(1);
+                transcript.update(cx, |this, cx| {
+                    let body = "# Implementation plan\n\n## Requirements\n\nA real paragraph with **bold** and `code`.\n\n## Design\n\n- Model the data\n- Store it atomically\n\n## Verification\n\nRun the regression suite.\n\n```rust\nfn main() {}\n```";
+                    this.finish_blob_fetch(
+                        "fixture/plan".into(),
+                        this.blob_generation("fixture/plan"),
+                        BlobFetch::Document(Arc::new(parse_full(body))),
+                        cx,
+                    );
+                });
+                draw(window, cx);
+                let full_height = transcript.read(cx).list.offset_for_item(1);
+                assert!(
+                    full_height > preview_height + px(100.0),
+                    "Markdown sidecar must expand the measured card"
+                );
+                transcript.update(cx, |this, cx| {
+                    this.toggle_artifact("proposal#plan".into(), true, cx)
+                });
+                draw(window, cx);
+                assert!(
+                    transcript.read(cx).list.offset_for_item(1) < preview_height,
+                    "document fold must actually collapse its layout"
+                );
+            });
+        }
+
+        #[test]
+        fn delivery_checklist_defaults_open_until_all_steps_complete() {
+            with_window(|transcript, window, cx| {
+                let make_entry = |done| {
+                    let mut part = tool_part("steps", "");
+                    if let MessagePart::Tool { call, .. } = &mut part {
+                        *call = ToolCall::Todo {
+                            items: ["Model and storage", "CLI commands", "Regression tests"]
+                                .into_iter()
+                                .map(|text| zeron_proto::TodoItem {
+                                    text: text.into(),
+                                    done,
+                                })
+                                .collect(),
+                        };
+                    }
+                    assistant("delivery", MessageStatus::Complete, vec![part])
+                };
+                transcript.update(cx, |this, cx| feed(this, vec![make_entry(false)], cx));
+                draw(window, cx);
+                let active_height = transcript.read(cx).list.offset_for_item(1);
+                transcript.update(cx, |this, cx| feed(this, vec![make_entry(true)], cx));
+                draw(window, cx);
+                let completed_height = transcript.read(cx).list.offset_for_item(1);
+                assert!(
+                    active_height > completed_height + px(50.0),
+                    "active checklist is readable; completed checklist is compact"
+                );
+                transcript.update(cx, |this, cx| {
+                    this.toggle_artifact("delivery#steps".into(), false, cx)
+                });
+                draw(window, cx);
+                assert!(
+                    transcript.read(cx).list.offset_for_item(1) > completed_height + px(50.0),
+                    "completed delivery steps can be reopened"
+                );
+            });
+        }
+
         // These exercise frame-by-frame geometry, including the first paint
         // after a row append. Eventual settling alone misses visible jumps.
         #[test]
@@ -8310,6 +9300,8 @@ mod tests {
                     this.rail_enabled = false;
                     this.state.update(cx, |state, _| {
                         state.sessions.push(zeron_proto::Session {
+                            goal: None,
+                            goal_control: false,
                             last_completed_turn: None,
                             chat_id: "chat".into(),
                             device_id: "test".into(),

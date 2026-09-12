@@ -51,7 +51,8 @@ pub(crate) fn to_effort(
 ) -> Option<&'static str> {
     let base = match reasoning? {
         ReasoningLevel::Ultrathink => return None,
-        ReasoningLevel::Minimal | ReasoningLevel::Low => "low",
+        // Claude does not advertise Off; clamp foreign requests to its lowest effort.
+        ReasoningLevel::Off | ReasoningLevel::Minimal | ReasoningLevel::Low => "low",
         ReasoningLevel::Medium => "medium",
         ReasoningLevel::High => "high",
         ReasoningLevel::XHigh | ReasoningLevel::Ultracode => "xhigh",
@@ -211,6 +212,15 @@ mod tests {
     #[test]
     fn effort_maps_special_modes() {
         assert_eq!(to_effort(None, None), None);
+        assert_eq!(
+            to_effort(Some(ReasoningLevel::Off), Some("claude-fable-5")),
+            Some("low")
+        );
+        assert!(
+            static_models()
+                .iter()
+                .all(|model| !model.reasoning_levels.contains(&ReasoningLevel::Off))
+        );
         assert_eq!(to_effort(Some(ReasoningLevel::Ultrathink), None), None);
         assert_eq!(
             to_effort(Some(ReasoningLevel::Minimal), Some("claude-fable-5")),
