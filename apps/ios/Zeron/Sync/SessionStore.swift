@@ -538,16 +538,6 @@ final class SessionStore {
 
     // MARK: Command plane (ledger rule 1: append-only, own entries only)
 
-    static func runRequest(prompt: String, chat: Chat, attachments: [String] = [],
-                           worktree: WorktreeSpec? = nil) -> RunRequest {
-        RunRequest(prompt: prompt, harness: chat.config?.harness,
-                   model: chat.config?.model, reasoning: chat.config?.reasoning,
-                   modelOptions: chat.config?.modelOptions ?? [:], cwd: chat.cwd ?? "",
-                   sandbox: chat.config?.sandbox ?? "workspace-write",
-                   attachments: attachments, worktree: worktree)
-    }
-
-
     func sendRun(prompt: String, chat: Chat, attachments: [String] = [],
                  worktree: WorktreeSpec? = nil) {
         if offline {
@@ -556,7 +546,15 @@ final class SessionStore {
             return
         }
         let messageId = UUID().uuidString.lowercased()
-        let request = Self.runRequest(prompt: prompt, chat: chat, attachments: attachments, worktree: worktree)
+        let request = RunRequest(prompt: prompt,
+                                 harness: chat.config?.harness,
+                                 model: chat.config?.model,
+                                 reasoning: chat.config?.reasoning,
+                                 modelOptions: chat.config?.modelOptions ?? [:],
+                                 cwd: chat.cwd ?? "",
+                                 sandbox: chat.config?.sandbox ?? "workspace-write",
+                                 attachments: attachments,
+                                 worktree: worktree)
         queueCommand(kind: "run", payload: [
             "kind": "run",
             "request": encodableJSON(request),

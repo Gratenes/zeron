@@ -220,6 +220,10 @@ pub enum SessionStatus {
 pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<crate::GoalState>,
+    /// This run negotiated Mimir's public goal-control extension. A false value
+    /// means goal-shaped prompts follow the ordinary model-message path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub goal_control: bool,
     /// Last successfully completed assistant turn. Retained while the next turn
     /// runs so coalesced status watches do not lose normal queue completions.
     /// Interrupts, failures and liveness expiry never advance this marker.

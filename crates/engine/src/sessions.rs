@@ -105,6 +105,8 @@ impl RuntimeConfig {
 struct RunHandle {
     run_id: String,
     steerable: bool,
+    /// Set only after this run emits `GoalState`, proving goalControl negotiation.
+    goal_control: bool,
     runtime_config: RuntimeConfig,
     steer_tx: mpsc::Sender<SteerMessage>,
     /// Harness-level cancellation (protocol interrupt + child teardown).
@@ -564,20 +566,28 @@ impl SessionsEngine {
             interrupt: interrupt_token.clone(),
         };
 
-        lock(&self.inner.runs).insert(
-            chat_id.to_string(),
-            RunHandle {
-                run_id: run_id.clone(),
-                steerable: harness.supports_steering(),
-                runtime_config: RuntimeConfig::from_request(harness_id, &request),
-                steer_tx,
-                interrupt_token,
-                cancel: cancel_tx,
-                engine_tx,
-                pending_inputs,
-                routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-            },
-        );
+        {
+            let mut runs = lock(&self.inner.runs);
+            runs.insert(
+                chat_id.to_string(),
+                RunHandle {
+                    run_id: run_id.clone(),
+                    steerable: harness.supports_steering(),
+                    goal_control: false,
+                    runtime_config: RuntimeConfig::from_request(harness_id, &request),
+                    steer_tx,
+                    interrupt_token,
+                    cancel: cancel_tx,
+                    engine_tx,
+                    pending_inputs,
+                    routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                },
+            );
+            // Run capability is not a turn/timer concern. Reset an existing
+            // session row while the runs lock prevents a retiring predecessor
+            // or incoming GoalState from racing this new authoritative handle.
+            self.inner.set_goal_control(chat_id, false);
+        }
         self.set_status(chat_id, SessionStatus::Working, true);
         // AFTER Working (same causal-order guarantee as the steer path): the
         // lastMessageAt bump must never be observable ahead of the live run.
@@ -613,13 +623,13 @@ impl SessionsEngine {
         Ok(run_id)
     }
 
-    /// Native human controls travel through the bounded mailbox, not the
-    /// pending model-message queue, and do not start another parent turn.
+    /// Negotiated native human controls travel through the bounded mailbox,
+    /// not the pending model-message queue, and do not start another parent turn.
     pub fn is_control_prompt(&self, chat_id: &str, prompt: &str) -> bool {
         zeron_proto::goal_control_command(prompt).is_some()
             && lock(&self.inner.runs)
                 .get(chat_id)
-                .is_some_and(|run| run.runtime_config.harness_id == HarnessId::Mimir)
+                .is_some_and(|run| run.goal_control)
     }
 
     /// Push a steer prompt into the live run's mailbox. `NotSteerable` when no live
@@ -990,6 +1000,7 @@ impl Inner {
                 .entry(chat_id.to_string())
                 .or_insert_with(|| Session {
                     goal: None,
+                    goal_control: false,
                     last_completed_turn: None,
                     chat_id: chat_id.to_string(),
                     device_id: self.device_id.clone(),
@@ -1142,10 +1153,34 @@ impl Inner {
         found
     }
 
+    fn set_goal_control(&self, chat_id: &str, enabled: bool) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.goal_control == enabled {
+                return;
+            }
+            entry.goal_control = enabled;
+            let session = entry.clone();
+            let mut list: Vec<_> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if let Some(ws) = self.workspace() {
+            ws.record_session(&session);
+        }
+    }
+
     fn remove_run(&self, chat_id: &str, run_id: &str) {
         let mut runs = lock(&self.runs);
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
             runs.remove(chat_id);
+            // Keep the runs lock through publication: a successor cannot be
+            // inserted and negotiated before its predecessor clears the row.
+            self.set_goal_control(chat_id, false);
         }
     }
 }
@@ -1957,9 +1992,22 @@ async fn drive_run(
         // session's background traffic still reaches the subagent doc
         // without un-parking the chat.
         if let AgentEvent::GoalState { goal } = &event {
+            // The adapter emits even an initial `None` only when goalControl
+            // was negotiated. Hold the runs lock through session publication:
+            // retirement or replacement cannot interleave and leave stale
+            // capability on a successor (or resurrect it after retirement).
+            let mut runs = lock(&inner.runs);
+            let Some(run) = runs
+                .get_mut(&chat_id)
+                .filter(|run| run.run_id == run_id)
+            else {
+                continue;
+            };
+            run.goal_control = true;
             let session = {
                 let mut statuses = lock(&inner.statuses);
                 let session = statuses.get_mut(&chat_id).map(|s| {
+                    s.goal_control = true;
                     s.goal = goal.clone();
                     s.clone()
                 });
@@ -1973,6 +2021,7 @@ async fn drive_run(
             {
                 ws.record_session(&session);
             }
+            drop(runs);
             continue;
         }
         if let AgentEvent::ControlResolved {

@@ -360,17 +360,15 @@ final class AppModel {
     /// Live model catalog from the space's owning device (the desktop's
     /// "catalog source = the device that runs the session" rule); static
     /// fallback when the device is unreachable.
-    func listModels(space: Space, harness: String, selectedModel: String? = nil) async -> [ModelInfo]? {
+    func listModels(space: Space, harness: String) async -> [ModelInfo] {
         if demo != nil {
             try? await Task.sleep(nanoseconds: 100_000_000)
             return HarnessCatalog.models(for: harness)
         }
-        if let live = await workspace?.listModels(deviceId: space.deviceId, harness: harness,
-                                                   selectedModel: selectedModel),
-           !live.isEmpty || harness == "mimir" {
+        if let live = await workspace?.listModels(deviceId: space.deviceId, harness: harness),
+           !live.isEmpty {
             return live
         }
-        if harness == "mimir" { return nil } // Preserve a failed refresh as a failure.
         return HarnessCatalog.models(for: harness)
     }
 

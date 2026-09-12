@@ -32,7 +32,7 @@ struct NewSessionView: View {
     /// static pair until it loads.
     @State private var liveHarnesses: [HarnessInfo]?
     /// Live per-harness catalogs from the space's device (static fallback).
-    @State private var catalogs: [String: ModelCatalogState] = [:]
+    @State private var catalogs: [String: [ModelInfo]] = [:]
     @State private var optionSelections: [String: String] = [:]
     @State private var refs: [RepoRef] = []
     @State private var selectedRef: String?
@@ -52,27 +52,33 @@ struct NewSessionView: View {
     }
 
     private var models: [ModelInfo] {
-        catalogs[harness]?.models ?? HarnessCatalog.models(for: harness)
+        catalogs[harness] ?? HarnessCatalog.models(for: harness)
     }
 
     private var selectedModel: ModelInfo {
-        HarnessCatalog.selectedModel(in: models, id: storedModel, harness: harness)
+        models.first { $0.id == storedModel } ?? models[0]
     }
 
     private var reasoning: String? {
-        (catalogs[harness] ?? ModelCatalogState()).reasoning(
-            for: selectedModel, harness: harness,
-            current: storedReasoning.isEmpty ? nil : storedReasoning)
+        if selectedModel.reasoningLevels.isEmpty { return nil }
+        if selectedModel.reasoningLevels.contains(storedReasoning) { return storedReasoning }
+        return HarnessCatalog.defaultReasoning(for: selectedModel)
     }
 
     private func selectedChoice(for option: ModelOptionInfo) -> ModelOptionChoiceInfo {
         HarnessCatalog.selectedChoice(for: option, selectedId: optionSelections[option.id])
     }
 
-    /// Prune model-only defaults, retaining explicit session workflow choices.
+    /// Only non-default picks ride the run, matching the desktop picker.
     private var resolvedModelOptions: [String: JSONValue] {
-        HarnessCatalog.prunedOptions(optionSelections.mapValues { JSONValue.string($0) },
-                                     for: selectedModel, harness: harness)
+        var result: [String: JSONValue] = [:]
+        for option in selectedModel.options {
+            let choice = selectedChoice(for: option)
+            if choice.id != option.defaultChoice {
+                result[option.id] = .string(choice.id)
+            }
+        }
+        return result
     }
 
     var body: some View {
@@ -165,48 +171,33 @@ struct NewSessionView: View {
                 }
             }
         }
-        .task(id: [spaceId, space?.deviceId ?? ""]) {
+        .task(id: spaceId) {
             // Live harness list + a model catalog per harness, all from the
             // device that will run the session (the picker shows one sectioned
             // list across harnesses, so it needs every catalog up front).
             guard let space else { return }
-            catalogs.removeAll()
             let list = await model.listHarnesses(space: space)
-            guard !Task.isCancelled else { return }
             liveHarnesses = list
             if !list.contains(where: { $0.id == harness }), let first = list.first {
                 harness = first.id
             }
-            await withTaskGroup(of: (String, [ModelInfo]?).self) { group in
+            await withTaskGroup(of: (String, [ModelInfo]).self) { group in
                 for h in list {
                     group.addTask { (h.id, await model.listModels(space: space, harness: h.id)) }
                 }
                 for await (id, catalog) in group {
-                    guard !Task.isCancelled else { return }
-                    // A selected-model refresh may already have enriched Mimir.
-                    if id != "mimir" || catalogs[id] == nil {
-                        catalogs[id, default: ModelCatalogState()].update(catalog)
-                    }
+                    catalogs[id] = catalog
                 }
             }
         }
-        .task(id: [spaceId, space?.deviceId ?? "", harness,
-                   harness == "mimir" ? selectedModel.id : "",
-                   models.contains(where: { $0.id == selectedModel.id }) ? "listed" : "unlisted"]) {
-            guard harness == "mimir", let space,
-                  models.contains(where: { $0.id == selectedModel.id }) else { return }
-            let selection = selectedModel.id
-            let catalog = await model.listModels(space: space, harness: "mimir", selectedModel: selection)
-            guard !Task.isCancelled else { return }
-            catalogs["mimir", default: ModelCatalogState()].update(catalog, selectedModel: selection)
-        }
-
         .sheet(isPresented: $showPicker) {
-            ModelPickerSheet(harness: $harness, modelId: selectedModel.id, reasoning: reasoning,
-                             onSelect: { modelId, effort in
-                                 storedModel = modelId
-                                 storedReasoning = effort ?? ""
-                             }, harnesses: harnesses, catalogs: catalogs)
+            ModelPickerSheet(harness: $harness, modelId: Binding(
+                get: { selectedModel.id },
+                set: { storedModel = $0 }
+            ), reasoning: Binding(
+                get: { reasoning },
+                set: { storedReasoning = $0 ?? "" }
+            ), harnesses: harnesses, catalogs: catalogs)
         }
         .sheet(isPresented: $showTraitPicker) {
             TraitPickerSheet(reasoning: Binding(
@@ -411,7 +402,7 @@ struct NewSessionView: View {
         guard let space, canSend else { return }
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         busy = true
-        let config = ChatConfig(harness: harness, model: selectedModel.id.isEmpty ? nil : selectedModel.id,
+        let config = ChatConfig(harness: harness, model: selectedModel.id,
                                 reasoning: reasoning, modelOptions: resolvedModelOptions,
                                 sandbox: "workspace-write")
         Task { @MainActor in
@@ -546,18 +537,17 @@ struct ComposerChip: View {
 struct ModelPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var harness: String
-    var modelId: String
-    var reasoning: String?
-    var onSelect: (String, String?) -> Void
+    @Binding var modelId: String
+    @Binding var reasoning: String?
     /// True when reconfiguring a live chat: the harness can't change mid-chat.
     var lockedHarness = false
     /// Harness sections to offer (the device's live list; static fallback).
     var harnesses: [HarnessInfo] = []
     /// Live per-harness catalogs from the device (static fallback when absent).
-    var catalogs: [String: ModelCatalogState] = [:]
+    var catalogs: [String: [ModelInfo]] = [:]
 
     private func models(for harness: String) -> [ModelInfo] {
-        catalogs[harness]?.models ?? HarnessCatalog.models(for: harness)
+        catalogs[harness] ?? HarnessCatalog.models(for: harness)
     }
 
     private var sections: [HarnessInfo] {
@@ -578,11 +568,6 @@ struct ModelPickerSheet: View {
                 VStack(alignment: .leading, spacing: 22) {
                     VStack(alignment: .leading, spacing: 4) {
                         SheetLabel("Model")
-                        if let error = catalogs[harness]?.error {
-                            Text(error)
-                                .font(Theme.sans(12))
-                                .foregroundStyle(Theme.warning)
-                        }
                         ForEach(sections) { h in
                             if sections.count > 1 {
                                 sectionHeader(h)
@@ -662,16 +647,16 @@ struct ModelPickerSheet: View {
         .buttonStyle(.plain)
     }
 
-    func select(harness harnessId: String, model m: ModelInfo) {
+    private func select(harness harnessId: String, model m: ModelInfo) {
         UISelectionFeedbackGenerator().selectionChanged()
         if harness != harnessId {
             harness = harnessId
         }
-        let effort = (catalogs[harnessId] ?? ModelCatalogState()).reasoning(
-            for: m, harness: harnessId, current: reasoning)
-        // One callback: two bindings captured the old chat and the effort
-        // write could restore its old model immediately after picking a new one.
-        onSelect(m.id, effort)
+        modelId = m.id
+        if let current = reasoning, m.reasoningLevels.contains(current) {
+            return
+        }
+        reasoning = HarnessCatalog.defaultReasoning(for: m)
     }
 
 }
@@ -726,7 +711,6 @@ struct TraitPickerSheet: View {
     /// One-line hints for the ladder (the special modes deserve explanation).
     static func effortHint(_ level: String) -> String? {
         switch level {
-        case "off": return "Reasoning disabled"
         case "minimal": return "Quickest, lightest touch"
         case "low": return "Fastest responses"
         case "medium": return "Balanced speed and depth"

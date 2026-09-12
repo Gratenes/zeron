@@ -467,6 +467,7 @@ impl WorkspaceDoc {
         row.insert("chatId", session.chat_id.as_str())?;
         row.insert("deviceId", session.device_id.as_str())?;
         row.insert("status", status_str(session.status))?;
+        row.insert("goalControl", session.goal_control)?;
         set_opt_str(
             &row,
             "lastCompletedTurn",
@@ -756,6 +757,8 @@ pub(crate) struct RawSession {
     #[serde(default)]
     goal: Option<zeron_proto::GoalState>,
     #[serde(default)]
+    goal_control: bool,
+    #[serde(default)]
     last_completed_turn: Option<String>,
     chat_id: String,
     device_id: String,
@@ -770,6 +773,7 @@ impl From<RawSession> for Session {
     fn from(raw: RawSession) -> Self {
         Session {
             goal: raw.goal,
+            goal_control: raw.goal_control,
             last_completed_turn: raw.last_completed_turn,
             chat_id: raw.chat_id,
             device_id: raw.device_id,
@@ -845,6 +849,7 @@ mod tests {
     fn session(chat_id: &str, device_id: &str, status: SessionStatus) -> Session {
         Session {
             goal: None,
+            goal_control: false,
             last_completed_turn: None,
             chat_id: chat_id.into(),
             device_id: device_id.into(),
@@ -915,6 +920,7 @@ mod tests {
         let ws = WorkspaceDoc::new();
         let mut row = session("chat-1", "dev-a", SessionStatus::Idle);
         row.last_completed_turn = Some("turn-one".into());
+        row.goal_control = true;
         ws.upsert_session(&row).unwrap();
         assert_eq!(ws.read_sessions().unwrap(), vec![row.clone()]);
         row.status = SessionStatus::Working;

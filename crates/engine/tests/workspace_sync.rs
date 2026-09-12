@@ -718,6 +718,7 @@ async fn legacy_workspace_doc_migrates_instantly_on_first_boot() {
         legacy
             .upsert_session(&Session {
                 goal: None,
+                goal_control: false,
                 last_completed_turn: None,
                 chat_id: "chat-legacy".into(),
                 device_id: "dev-a".into(),

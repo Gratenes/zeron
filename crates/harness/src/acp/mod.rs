@@ -1548,6 +1548,18 @@ fn first_class_model_change(
     Ok(Some(requested.to_owned()))
 }
 
+/// Translate zeron's boolean trait values to the ACP value carried by a
+/// `type=boolean` config option. Unknown values stay invalid rather than
+/// silently becoming false.
+pub(super) fn boolean_config_value(value: &Value) -> Option<Value> {
+    match value {
+        Value::Bool(value) => Some(Value::Bool(*value)),
+        Value::String(value) if value.eq_ignore_ascii_case("on") => Some(Value::Bool(true)),
+        Value::String(value) if value.eq_ignore_ascii_case("off") => Some(Value::Bool(false)),
+        _ => None,
+    }
+}
+
 /// The `session/set_config_option` calls a session response's `configOptions`
 /// warrant for this run:
 /// - the requested model (category `model`; a `contextWindow: "1m"` model
@@ -1639,13 +1651,7 @@ fn config_option_sets(
                         .as_str()
                         .filter(|c| available.contains(c))
                         .map(|c| Value::String(c.to_owned())),
-                    "boolean" => {
-                        let on = choice == &Value::Bool(true)
-                            || choice
-                                .as_str()
-                                .is_some_and(|c| c.eq_ignore_ascii_case("on"));
-                        Some(Value::Bool(on))
-                    }
+                    "boolean" => boolean_config_value(choice),
                     _ => None,
                 }
             }),

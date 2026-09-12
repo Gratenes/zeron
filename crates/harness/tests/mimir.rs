@@ -133,7 +133,7 @@ async fn catalog_skips_unauthenticated_providers_and_uses_each_models_actual_lad
             .iter()
             .map(|o| o.id.as_str())
             .collect::<Vec<_>>(),
-        ["mimir.mode"]
+        ["mimir.mode", "mimir.fast", "mimir.rejected"]
     );
 }
 
@@ -155,5 +155,59 @@ async fn selected_provider_model_and_effort_are_effective_before_prompt() {
             }
         )),
         "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn advertised_boolean_setting_is_effective_before_prompt() {
+    let mut request = request("boolean");
+    request
+        .model_options
+        .insert("mimir.fast".into(), "on".into());
+
+    let events = run_request(request).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TextDelta { text } if text == "fast=on"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn rejected_boolean_setting_fails_before_prompt() {
+    let mut request = request("boolean");
+    request
+        .model_options
+        .insert("mimir.rejected".into(), "on".into());
+
+    let events = run_request(request).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Done {
+                status: DoneStatus::Errored,
+                error: Some(error),
+                ..
+            } if error.contains("requested mimir.rejected true")
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::TextDelta { .. })),
+        "must fail before the fixture is prompted: {events:?}"
     );
 }

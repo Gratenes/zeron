@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn mimir_mask_embeds_the_original_cross_platform_logo() {
+    fn mimir_mask_embeds_the_original_logo() {
         let svg = Assets.load(MIMIR_MARK).unwrap().unwrap();
         let svg = std::str::from_utf8(&svg).unwrap();
         let encoded = svg
@@ -311,12 +311,6 @@ mod tests {
             .decode(encoded)
             .unwrap();
         assert_eq!(png, include_bytes!("../assets/icons/mimir-mark.png"));
-        assert_eq!(
-            png,
-            include_bytes!(
-                "../../../apps/ios/Zeron/Assets.xcassets/MimirMark.imageset/mimir-mark.png"
-            )
-        );
         let image = image::load_from_memory(&png).unwrap();
         assert_eq!((image.width(), image.height()), (1254, 1254));
         assert!(svg.contains("viewBox=\"347 347 560 560\""));

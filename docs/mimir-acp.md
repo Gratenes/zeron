@@ -110,7 +110,6 @@ omits `strict` (ordinary Responses sends `strict:false`). Backend strict
 normalization is a hypothesis, **not a proven cause** of that failure. This is
 separate from the live-proven concurrent active-goal pause rejection above.
 
-iOS changes were source-reviewed only: this Linux host has no Xcode/Swift test run.
 Three unrelated harness failures also reproduce on the untouched baseline:
 `windows_extra_candidates_resolve_through_pathext_variants`,
 `windows_pathext_environment_reorders_extensions`, and

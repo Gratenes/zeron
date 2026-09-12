@@ -576,7 +576,7 @@ final class WorkspaceStore {
         }
     }
 
-    func listModels(deviceId: String, harness: String, selectedModel: String? = nil) async -> [ModelInfo]? {
+    func listModels(deviceId: String, harness: String) async -> [ModelInfo]? {
         struct WireChoice: Decodable {
             var id: String
             var label: String
@@ -594,12 +594,8 @@ final class WorkspaceStore {
             var reasoningLevels: [String]?
             var options: [WireOption]?
         }
-        var params = ["harness": harness]
-        if harness == "mimir", let selectedModel, !selectedModel.isEmpty {
-            params["model"] = selectedModel
-        }
         let wire: [WireModel]? = try? await relay(for: deviceId)
-            .call(method: "ListModels", params: params)
+            .call(method: "ListModels", params: ["harness": harness])
         return wire.map { models in
             models.map {
                 ModelInfo(id: $0.id, label: $0.label, description: $0.description,

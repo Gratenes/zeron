@@ -147,6 +147,8 @@ fn main() -> anyhow::Result<()> {
                             .iter()
                             .any(|entry| entry.status == Some(zeron_doc::MessageStatus::Streaming));
                         state.apply_sessions(vec![zeron_proto::Session {
+                            goal: None,
+                            goal_control: false,
                             last_completed_turn: None,
                             chat_id: "profile".into(),
                             device_id: "local".into(),

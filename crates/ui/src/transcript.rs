@@ -9301,6 +9301,7 @@ mod tests {
                     this.state.update(cx, |state, _| {
                         state.sessions.push(zeron_proto::Session {
                             goal: None,
+                            goal_control: false,
                             last_completed_turn: None,
                             chat_id: "chat".into(),
                             device_id: "test".into(),

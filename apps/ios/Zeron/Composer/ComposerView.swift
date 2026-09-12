@@ -251,8 +251,7 @@ struct ComposerView: View {
     @State private var showTraitPicker = false
     @State private var showOptionPicker: ModelOptionInfo?
     /// Live catalog for the chat's harness from its space's device.
-    @State private var catalogs: [String: ModelCatalogState] = [:]
-    @State private var catalogContext: [String] = [] // chat / run device / harness
+    @State private var catalogs: [String: [ModelInfo]] = [:]
     @State private var queueEdit: QueueComposerEdit?
     private var editingQueuedId: String? { queueEdit?.lease.rowId }
     private var queueEditLease: QueueEditLease? { queueEdit?.lease }
@@ -262,34 +261,28 @@ struct ComposerView: View {
     /// after navigation removed this view.
     @State private var queueEditorVisible = false
 
-    private var currentChat: Chat { model.chats.first { $0.id == chat.id } ?? chat }
-    private var harness: String { currentChat.config?.harness ?? "claude-code" }
+    private var harness: String { chat.config?.harness ?? "claude-code" }
 
-    private var currentCatalog: ModelCatalogState {
-        let target = model.space(for: currentChat)?.deviceId ?? currentChat.deviceId
-        if catalogContext == [currentChat.id, target, harness], let catalog = catalogs[harness] {
-            return catalog
-        }
-        return ModelCatalogState(models: HarnessCatalog.models(for: harness))
+    private var models: [ModelInfo] {
+        catalogs[harness] ?? HarnessCatalog.models(for: harness)
     }
 
-    private var models: [ModelInfo] { currentCatalog.models }
-    private var effectiveConfig: ChatConfig { currentCatalog.resolvedConfig(currentChat.config) }
     private var currentModel: ModelInfo {
-        HarnessCatalog.selectedModel(in: models, id: effectiveConfig.model, harness: harness)
+        models.first { $0.id == chat.config?.model }
+            ?? models.first
+            ?? HarnessCatalog.defaultModel(for: harness)
     }
-    private var currentReasoning: String? { effectiveConfig.reasoning }
 
-    private var submissionChat: Chat {
-        var snapshot = currentChat
-        snapshot.config = effectiveConfig
-        return snapshot
+    private var currentReasoning: String? {
+        guard !currentModel.reasoningLevels.isEmpty else { return nil }
+        if let r = chat.config?.reasoning, currentModel.reasoningLevels.contains(r) { return r }
+        return HarnessCatalog.defaultReasoning(for: currentModel)
     }
 
     private func currentChoice(for option: ModelOptionInfo) -> ModelOptionChoiceInfo {
         HarnessCatalog.selectedChoice(
             for: option,
-            selectedId: currentChat.config?.modelOptions[option.id]?.stringValue
+            selectedId: chat.config?.modelOptions[option.id]?.stringValue
         )
     }
 
@@ -401,18 +394,23 @@ struct ComposerView: View {
         .sheet(isPresented: $showModelPicker) {
             ModelPickerSheet(
                 harness: .constant(harness),
-                modelId: currentModel.id,
-                reasoning: currentChat.config?.reasoning,
-                onSelect: { modelId, effort in writeConfig(model: modelId, reasoning: effort) },
+                modelId: Binding(
+                    get: { currentModel.id },
+                    set: { writeConfig(model: $0, reasoning: chat.config?.reasoning) }
+                ),
+                reasoning: Binding(
+                    get: { chat.config?.reasoning },
+                    set: { writeConfig(model: chat.config?.model, reasoning: $0) }
+                ),
                 lockedHarness: true,
-                catalogs: [harness: currentCatalog]
+                catalogs: catalogs
             )
         }
         .sheet(isPresented: $showTraitPicker) {
             TraitPickerSheet(
                 reasoning: Binding(
                     get: { currentReasoning },
-                    set: { writeConfig(model: currentChat.config?.model, reasoning: $0) }
+                    set: { writeConfig(model: chat.config?.model, reasoning: $0) }
                 ),
                 levels: currentModel.reasoningLevels
             )
@@ -423,24 +421,9 @@ struct ComposerView: View {
                 set: { writeOption(option: option, choiceId: $0) }
             ))
         }
-        .task(id: [currentChat.id, harness, model.space(for: currentChat)?.deviceId ?? "",
-                   harness == "mimir" ? (currentChat.config?.model ?? currentModel.id) : ""]) {
-            guard !Task.isCancelled, let space = model.space(for: currentChat) else { return }
-            let sourceChat = currentChat
-            let requestedHarness = harness
-            let context = [sourceChat.id, space.deviceId, requestedHarness]
-            if catalogContext != context {
-                catalogs.removeAll()
-                catalogContext = context
-            }
-            let selection = requestedHarness == "mimir" ? (sourceChat.config?.model ?? currentModel.id) : nil
-            let catalog = await model.listModels(space: space, harness: requestedHarness,
-                                                 selectedModel: selection)
-            guard !Task.isCancelled, currentChat.id == sourceChat.id,
-                  currentChat.config?.model == sourceChat.config?.model,
-                  harness == requestedHarness,
-                  model.space(for: currentChat)?.deviceId == space.deviceId else { return }
-            catalogs[requestedHarness, default: ModelCatalogState()].update(catalog, selectedModel: selection)
+        .task(id: "\(chat.id)/\(harness)") {
+            guard let space = model.space(for: chat) else { return }
+            catalogs[harness] = await model.listModels(space: space, harness: harness)
         }
         .task(id: queueEdit?.terminal == true ? nil : queueEditLease?.leaseId) {
             guard let lease = queueEditLease, queueEdit?.terminal != true else { return }
@@ -473,23 +456,34 @@ struct ComposerView: View {
     /// picks it up on the next run dispatch). Compatible model options survive
     /// edits; changing model prunes traits the destination does not advertise.
     private func writeConfig(model newModel: String?, reasoning newReasoning: String?) {
-        var config = currentChat.config ?? ChatConfig(harness: harness, model: nil,
+        var config = chat.config ?? ChatConfig(harness: harness, model: nil,
                                                reasoning: nil, sandbox: "workspace-write")
         let changedModel = newModel != nil && newModel != config.model
         config.model = newModel
         config.reasoning = newReasoning
         if changedModel, let newModel,
            let target = models.first(where: { $0.id == newModel }) {
-            config.modelOptions = HarnessCatalog.prunedOptions(config.modelOptions, for: target,
-                                                               harness: config.harness)
+            var compatible: [String: JSONValue] = [:]
+            for option in target.options {
+                guard let selected = config.modelOptions[option.id]?.stringValue,
+                      selected != option.defaultChoice,
+                      option.choices.contains(where: { $0.id == selected }) else { continue }
+                compatible[option.id] = .string(selected)
+            }
+            config.modelOptions = compatible
         }
         model.setChatConfig(chatId: chat.id, config: config)
     }
 
     private func writeOption(option: ModelOptionInfo, choiceId: String) {
-        let saved = currentChat.config ?? ChatConfig(harness: harness, model: currentModel.id,
-                                                     reasoning: currentReasoning, sandbox: "workspace-write")
-        let config = HarnessCatalog.selectingOption(option, choiceId: choiceId, in: saved)
+        var config = chat.config ?? ChatConfig(harness: harness, model: currentModel.id,
+                                               reasoning: currentReasoning,
+                                               sandbox: "workspace-write")
+        if choiceId == option.defaultChoice {
+            config.modelOptions.removeValue(forKey: option.id)
+        } else {
+            config.modelOptions[option.id] = .string(choiceId)
+        }
         model.setChatConfig(chatId: chat.id, config: config)
     }
 
@@ -608,12 +602,9 @@ struct ComposerView: View {
             return
         }
         guard !prompt.isEmpty || !staged.isEmpty else { return }
-        // Freeze the same effective values shown by the chips at submission,
-        // before an attachment await can outlive this chat/model selection.
-        let snapshot = submissionChat
 
         if staged.isEmpty {
-            deliver(content: prompt, paths: [], chat: snapshot)
+            deliver(content: prompt, paths: [])
             clearDraft(matching: submittedText)
             return
         }
@@ -635,7 +626,7 @@ struct ComposerView: View {
                     path: UploadStash.pendingRef(uploadId: transfer.uploadId, name: transfer.name),
                     name: att.name, data: att.data)
             }
-            store.sendWithTransfers(prompt: prompt, chat: snapshot, live: runLive,
+            store.sendWithTransfers(prompt: prompt, chat: chat, live: runLive,
                                     transfers: transfers)
             attachments = []
             clearDraft(matching: submittedText)
@@ -667,7 +658,7 @@ struct ComposerView: View {
                                                      name: att.name, data: att.data)
                     paths.append(path)
                 }
-                deliver(content: withAttachments(text: prompt, paths: paths), paths: paths, chat: snapshot)
+                deliver(content: withAttachments(text: prompt, paths: paths), paths: paths)
                 attachments = []
                 clearDraft(matching: submittedText)
             } catch {
@@ -676,7 +667,7 @@ struct ComposerView: View {
         }
     }
 
-    private func deliver(content: String, paths: [String], chat: Chat) {
+    private func deliver(content: String, paths: [String]) {
         // All active-turn messages wait in the shared queue.
         if runLive {
             let queueText = model.hostSupportsCleanQueueAttachmentText(chat)

@@ -1,7 +1,7 @@
 //! Mimir-specific identity of provider-qualified models. Everything is configured
 //! through standard ACP selects; no native settings/journals are read by Zeron.
 
-use super::{config, models_from_session};
+use super::{boolean_config_value, config, models_from_session};
 use crate::{
     HarnessError,
     jsonrpc::{Incoming, RpcClient},
@@ -81,6 +81,11 @@ pub(super) fn validate_settings(
     traits: &serde_json::Map<String, Value>,
 ) -> Result<(), HarnessError> {
     let verify = |option: Option<&Value>, expected: Value, label: &str| {
+        let expected = if option.is_some_and(|o| o["type"] == "boolean") {
+            boolean_config_value(&expected).unwrap_or(expected)
+        } else {
+            expected
+        };
         let actual = option
             .and_then(|o| o.get("currentValue"))
             .unwrap_or(&Value::Null);

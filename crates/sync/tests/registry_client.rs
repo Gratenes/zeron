@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use zeron_doc::{REGISTRY_DOC_ID, RegistryDoc};
-use zeron_proto::{Chat, Device, Session, SessionStatus};
+use zeron_proto::{Chat, Device, GoalPhase, GoalState, Session, SessionStatus};
 use zeron_sync::registry::mock_server::MockRegistryServer;
 use zeron_sync::{DocsStore, RegistryClient, RegistryEvent};
 
@@ -114,7 +114,14 @@ async fn two_clients_converge_and_stream_live_updates() {
     {
         let mut doc = doc_a.lock().unwrap();
         doc.upsert_session(&Session {
-            goal: None,
+            goal: Some(GoalState {
+                id: "goal-1".into(),
+                objective: "Replicate goal".into(),
+                phase: GoalPhase::Paused,
+                reason: Some("Waiting".into()),
+                completion: None,
+            }),
+            goal_control: true,
             last_completed_turn: None,
             chat_id: "chat-1".into(),
             device_id: "dev-a".into(),
@@ -132,7 +139,13 @@ async fn two_clients_converge_and_stream_live_updates() {
             .read_sessions()
             .unwrap()
             .first()
-            .is_some_and(|s| s.status == SessionStatus::Working)
+            .is_some_and(|s| {
+                s.status == SessionStatus::Working
+                    && s.goal_control
+                    && s.goal.as_ref().is_some_and(|goal| {
+                        goal.phase == GoalPhase::Paused && goal.objective == "Replicate goal"
+                    })
+            })
     })
     .await;
 
@@ -425,6 +438,7 @@ async fn churn_stays_bounded_no_history_growth() {
             let mut d = doc.lock().unwrap();
             d.upsert_session(&Session {
                 goal: None,
+                goal_control: false,
                 last_completed_turn: None,
                 chat_id: "chat-1".into(),
                 device_id: "dev-a".into(),

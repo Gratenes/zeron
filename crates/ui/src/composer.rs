@@ -5438,17 +5438,20 @@ impl Composer {
         self.pickers.read(cx).no_agents_available()
     }
 
+    fn is_goal_control(&self, prompt: &str, cx: &App) -> bool {
+        let state = self.state.read(cx);
+        state
+            .selected_chat
+            .as_deref()
+            .and_then(|chat_id| state.session_for(chat_id))
+            .is_some_and(|session| crate::goal::is_control(session.goal_control, prompt))
+    }
+
     fn button_mode(&self, cx: &App) -> SendButtonMode {
         if self.editing_queued.is_some() {
             return SendButtonMode::Send;
         }
-        if self
-            .pickers
-            .read(cx)
-            .resolved(cx)
-            .harness
-            .is_some_and(|harness| crate::goal::is_control(harness, self.input.read(cx).text()))
-        {
+        if self.is_goal_control(self.input.read(cx).text(), cx) {
             return SendButtonMode::Send;
         }
         let has_text = composer_has_content(
@@ -5533,7 +5536,7 @@ impl Composer {
             cx.notify();
             return;
         };
-        let goal_control = !is_new && crate::goal::is_control(harness, &text);
+        let goal_control = !is_new && self.is_goal_control(&text, cx);
         let queue = queue && !goal_control;
         if goal_control && (!self.staged().is_empty() || !self.staged_comments(cx).is_empty()) {
             self.failure =

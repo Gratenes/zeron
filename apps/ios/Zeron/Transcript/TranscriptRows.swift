@@ -267,7 +267,6 @@ extension RenderToolCall {
         case "glob": return "Glob"
         case "webFetch": return "Fetch"
         case "webSearch": return "Web"
-        case "document": return "Document"
         case "todo": return "Todo"
         case "mcp": return "MCP"
         default: return "Tool"
@@ -285,7 +284,6 @@ extension RenderToolCall {
         case "glob": return string("pattern") ?? ""
         case "webFetch": return string("url") ?? ""
         case "webSearch": return string("query") ?? ""
-        case "document": return string("title") ?? ""
         case "todo":
             return string("summary") ?? "task list"
         case "mcp":
@@ -306,7 +304,7 @@ extension RenderToolCall {
     var chipSymbol: String {
         switch tag {
         case "exec": return "terminal"
-        case "readFile", "applyPatch", "document": return "doc.text"
+        case "readFile", "applyPatch": return "doc.text"
         case "writeFile": return "doc.badge.plus"
         case "editFile": return "pencil"
         case "search": return "magnifyingglass"

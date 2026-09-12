@@ -1614,7 +1614,7 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
 
 #[cfg(test)]
 mod tests {
-    use super::{device_name_on_boot, linked_worktree_root};
+    use super::{device_name_on_boot, linked_worktree_root, merge_sessions};
 
     #[tokio::test]
     async fn presence_publish_keeps_unchanged_lists_quiet_and_late_subscribers_current() {
@@ -1726,4 +1726,34 @@ mod tests {
         std::fs::write(odd.join(".git"), "gitdir: /somewhere/else\n").unwrap();
         assert_eq!(linked_worktree_root(&odd), None);
     }
+
+    #[test]
+    fn remote_registry_session_keeps_goal_capability_for_ui_routing() {
+        let mut registry = zeron_doc::RegistryDoc::new("host");
+        let goal = zeron_proto::GoalState {
+            id: "goal-1".into(),
+            objective: "Ship replication".into(),
+            phase: zeron_proto::GoalPhase::Paused,
+            reason: Some("Waiting".into()),
+            completion: None,
+        };
+        registry
+            .upsert_session(&zeron_proto::Session {
+                goal: Some(goal.clone()),
+                goal_control: true,
+                last_completed_turn: None,
+                chat_id: "chat-1".into(),
+                device_id: "host".into(),
+                status: zeron_proto::SessionStatus::Working,
+                started_at: None,
+                updated_at: chrono::Utc::now(),
+            })
+            .unwrap();
+
+        let merged = merge_sessions("viewer", &registry.read_sessions().unwrap(), &[]);
+        assert_eq!(merged.len(), 1);
+        assert!(merged[0].goal_control);
+        assert_eq!(merged[0].goal.as_ref(), Some(&goal));
+    }
+
 }

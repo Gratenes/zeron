@@ -49,86 +49,11 @@ struct ModelInfo: Identifiable, Hashable {
     }
 }
 
-/// Last usable catalog plus refresh status; failed detail queries never erase
-/// the user's model list or masquerade as a successfully empty catalog.
-struct ModelCatalogState {
-    var models: [ModelInfo] = []
-    var verifiedModel: String?
-    var error: String?
-
-    mutating func update(_ response: [ModelInfo]?, selectedModel: String? = nil) {
-        guard let response else {
-            error = "Could not refresh model details. Your selection is unchanged."
-            return
-        }
-        models = response
-        verifiedModel = selectedModel
-        error = nil
-    }
-
-    func resolvedConfig(_ saved: ChatConfig?) -> ChatConfig {
-        var config = saved ?? ChatConfig(harness: "claude-code", model: nil,
-                                         reasoning: nil, sandbox: "workspace-write")
-        let selected = HarnessCatalog.selectedModel(in: models, id: config.model, harness: config.harness)
-        config.model = selected.id.isEmpty ? nil : selected.id
-        config.reasoning = reasoning(for: selected, harness: config.harness, current: config.reasoning)
-        return config
-    }
-
-
-    func reasoning(for model: ModelInfo, harness: String, current: String?) -> String? {
-        if harness == "mimir", model.reasoningLevels.isEmpty, verifiedModel != model.id {
-            return current // Unknown is not a verified no-reasoning model.
-        }
-        if let current, model.reasoningLevels.contains(current) { return current }
-        return HarnessCatalog.defaultReasoning(for: model)
-    }
-}
-
-
 enum HarnessCatalog {
-    static func preservesDefaultOption(_ optionId: String, harness: String) -> Bool {
-        harness == "mimir" && optionId == "mimir.mode"
-    }
-
-    static func selectingOption(_ option: ModelOptionInfo, choiceId: String, in saved: ChatConfig) -> ChatConfig {
-        var config = saved
-        if choiceId == option.defaultChoice && !preservesDefaultOption(option.id, harness: config.harness) {
-            config.modelOptions.removeValue(forKey: option.id)
-        } else {
-            config.modelOptions[option.id] = .string(choiceId)
-        }
-        return config
-    }
-
-
-    static func prunedOptions(_ selections: [String: JSONValue], for model: ModelInfo,
-                              harness: String) -> [String: JSONValue] {
-        // Workflow modes belong to the session, not the model. Keep an
-        // explicit mode even while the next model's options are unverified.
-        var result = selections.filter { preservesDefaultOption($0.key, harness: harness) }
-        for option in model.options {
-            guard let selected = selections[option.id]?.stringValue,
-                  selected != option.defaultChoice || preservesDefaultOption(option.id, harness: harness),
-                  option.choices.contains(where: { $0.id == selected }) else { continue }
-            result[option.id] = .string(selected)
-        }
-        return result
-    }
-
-
-    static func selectedModel(in models: [ModelInfo], id: String?, harness: String) -> ModelInfo {
-        if let selected = models.first(where: { $0.id == id }) { return selected }
-        if harness == "mimir", let id, !id.isEmpty {
-            return ModelInfo(id: id, label: id, description: nil, reasoningLevels: [])
-        }
-        return models.first ?? defaultModel(for: harness)
-    }
-
     /// Static fallback = the engine's `default_enabled()` pair. The ACP
-    /// agents (grok/hermes/pi/mimir) appear only through a device's live
-    /// `ListHarnesses` catalog, following CLI detection and the device's
-    /// Settings → Agents preferences.
+    /// agents (grok/hermes/pi) appear only through a device's live
+    /// `ListHarnesses` catalog — they're opt-in per device via
+    /// Settings → Agents on the desktop.
     static let harnesses: [HarnessInfo] = [
         HarnessInfo(id: "claude-code", label: "Claude Code"),
         HarnessInfo(id: "codex", label: "Codex"),
@@ -143,7 +68,6 @@ enum HarnessCatalog {
         "grok": "Grok",
         "hermes": "Hermes",
         "pi": "Pi",
-        "mimir": "Mimir",
         "cursor": "Cursor",
         "opencode": "OpenCode",
         "mock": "Mock",
@@ -195,10 +119,6 @@ enum HarnessCatalog {
                           description: "Runs the model configured in pi (`pi` settings)",
                           reasoningLevels: ["minimal", "low", "medium", "high", "xhigh", "max"]),
             ]
-        case "mimir":
-            // Provider, model and effort choices depend on the run device's
-            // configuration. Only its live ACP catalog can supply these ids.
-            return []
         case "opencode":
             // Static fallback only — a reachable host answers `listModels`
             // with its live discovery (connected providers). The anonymous
@@ -261,8 +181,7 @@ enum HarnessCatalog {
     }
 
     static func defaultModel(for harness: String) -> ModelInfo {
-        models(for: harness).first
-            ?? ModelInfo(id: "", label: "Configured model", description: nil, reasoningLevels: [])
+        models(for: harness)[0]
     }
 
     /// pickers.rs — High when available, then Medium, then the first level.
@@ -283,7 +202,6 @@ enum HarnessCatalog {
 
     static func reasoningLabel(_ level: String) -> String {
         switch level {
-        case "off": return "Off"
         case "minimal": return "Minimal"
         case "low": return "Low"
         case "medium": return "Medium"

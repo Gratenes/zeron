@@ -1,10 +1,10 @@
 //! Compact public goal state. Model-turn activity and goal completion are independent.
 use crate::theme::Theme;
 use gpui::{IntoElement, SharedString, div, prelude::*, px};
-use zeron_proto::{GoalPhase, GoalState, HarnessId};
+use zeron_proto::{GoalPhase, GoalState};
 
-pub(crate) fn is_control(harness: HarnessId, prompt: &str) -> bool {
-    harness == HarnessId::Mimir && zeron_proto::goal_control_command(prompt).is_some()
+pub(crate) fn is_control(goal_control: bool, prompt: &str) -> bool {
+    goal_control && zeron_proto::goal_control_command(prompt).is_some()
 }
 
 fn label(phase: GoalPhase) -> Option<&'static str> {
@@ -107,13 +107,13 @@ mod tests {
     }
 
     #[test]
-    fn controls_bypass_queue_but_start_and_resume_remain_tracked_prompts() {
+    fn only_negotiated_controls_bypass_queue_and_start_and_resume_remain_prompts() {
         for prompt in ["/goal", "/goal show", "/goal pause", "/goal clear", "/goal edit ship it"] {
-            assert!(is_control(HarnessId::Mimir, prompt));
-            assert!(!is_control(HarnessId::Codex, prompt));
+            assert!(is_control(true, prompt));
+            assert!(!is_control(false, prompt));
         }
         for prompt in ["/goal ship it", "/goal resume", "/goal resume continue", "/goalkeeper"] {
-            assert!(!is_control(HarnessId::Mimir, prompt));
+            assert!(!is_control(true, prompt));
         }
     }
 }

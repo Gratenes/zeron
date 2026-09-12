@@ -1,14 +1,23 @@
 //! Real ACP decoding, native controls, and replacement child docs through public engine APIs.
 #![cfg(unix)]
+
+use async_trait::async_trait;
+use futures::{StreamExt, stream::BoxStream};
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use zeron_doc::{MessagePart, MessageRole, SessionCommandPayload};
 use zeron_engine::{EngineCore, HarnessRegistry};
-use zeron_harness::AcpHarness;
-use zeron_proto::{ChatConfig, GoalPhase, HarnessId, RunRequest, SandboxLevel, SessionStatus};
+use zeron_harness::{AcpHarness, Harness, HarnessError, RunControls};
+use zeron_proto::{
+    AgentEvent, ChatConfig, DoneStatus, GoalPhase, HarnessId, Model, ReasoningLevel, RunRequest,
+    SandboxLevel, SessionStatus, SteeringMode,
+};
 const CHAT: &str = "native-goal";
 
 fn core(path: &Path) -> EngineCore {
@@ -97,6 +106,243 @@ fn text(core: &EngineCore, doc: &str) -> String {
         .collect()
 }
 
+struct LifecycleMimir {
+    negotiate_first: bool,
+    runs: AtomicUsize,
+}
+
+impl LifecycleMimir {
+    fn extension_absent() -> Self {
+        Self {
+            negotiate_first: false,
+            runs: AtomicUsize::new(0),
+        }
+    }
+
+    fn negotiated_once() -> Self {
+        Self {
+            negotiate_first: true,
+            runs: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl Harness for LifecycleMimir {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mimir
+    }
+
+    fn display_name(&self) -> &str {
+        "Mimir lifecycle fixture"
+    }
+
+    fn supports_steering(&self) -> bool {
+        true
+    }
+
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(Vec::new())
+    }
+
+    async fn run(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let run = self.runs.fetch_add(1, Ordering::SeqCst);
+        let mut initial = vec![Ok(AgentEvent::SessionStarted {
+            harness: HarnessId::Mimir,
+            model: "fixture".into(),
+            tools: Vec::new(),
+            cwd: request.cwd,
+            session_id: format!("lifecycle-{run}"),
+            assistant_message_id: format!("assistant-{run}"),
+        })];
+        if self.negotiate_first && run == 0 {
+            initial.push(Ok(AgentEvent::GoalState { goal: None }));
+        }
+        let tail = futures::stream::unfold(Some(controls), move |state| async move {
+            let mut controls = state?;
+            tokio::select! {
+                _ = controls.interrupt.cancelled() => Some((Ok(AgentEvent::Done {
+                    status: DoneStatus::Interrupted,
+                    result: None,
+                    error: None,
+                    session_id: Some(format!("lifecycle-{run}")),
+                }), None)),
+                steer = controls.steering.recv() => steer.map(|steer| (Ok(AgentEvent::Steered {
+                    assistant_message_id: None,
+                    next_assistant_message_id: steer.message_id,
+                }), Some(controls))),
+            }
+        });
+        Ok(futures::stream::iter(initial).chain(tail).boxed())
+    }
+}
+
+#[tokio::test]
+async fn extension_absent_goal_control_stays_in_the_visible_turn_boundary_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(LifecycleMimir::extension_absent()));
+    let core =
+        EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mimir, None).unwrap();
+    create(&core, dir.path());
+    core.sessions
+        .dispatch(
+            CHAT,
+            HarnessId::Mimir,
+            request(dir.path(), "start without extension"),
+            None,
+        )
+        .await
+        .unwrap();
+    wait(|| {
+        core.sessions
+            .session_status(CHAT)
+            .is_some_and(|session| session.status == SessionStatus::Working)
+    })
+    .await;
+
+    let command_id = core
+        .doc_host
+        .queue_command(
+            CHAT,
+            SessionCommandPayload::Steer {
+                prompt: "/goal pause".into(),
+                message_id: Some("pause-without-extension".into()),
+            },
+        )
+        .unwrap();
+    wait(|| {
+        core.doc_host
+            .open(CHAT)
+            .unwrap()
+            .doc()
+            .read_commands()
+            .unwrap()
+            .iter()
+            .any(|command| {
+                command.id == command_id
+                    && command.status == zeron_doc::SessionCommandStatus::Applied
+            })
+    })
+    .await;
+
+    let handle = core.doc_host.open(CHAT).unwrap();
+    assert_eq!(
+        handle
+            .doc()
+            .read_queue()
+            .unwrap()
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/goal pause"],
+        "without negotiated goalControl, the command must remain visible and editable"
+    );
+    assert!(
+        handle
+            .doc()
+            .read_entries()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.id != "pause-without-extension"),
+        "a held control is not shown as already sent"
+    );
+    core.shutdown().await;
+}
+
+
+#[tokio::test]
+async fn negotiated_capability_survives_a_same_run_steered_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new();
+    registry.register(Arc::new(LifecycleMimir::negotiated_once()));
+    let core =
+        EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mimir, None).unwrap();
+    create(&core, dir.path());
+    core.sessions
+        .dispatch(CHAT, HarnessId::Mimir, request(dir.path(), "start"), None)
+        .await
+        .unwrap();
+    wait(|| core.sessions.session_status(CHAT).is_some_and(|s| s.goal_control)).await;
+
+    core.sessions
+        .steer(CHAT, "ordinary follow-up", Some("ordinary".into()))
+        .await
+        .unwrap();
+    wait(|| {
+        core.sessions.subscribe(CHAT, 0).unwrap().0.iter().any(
+            |event| matches!(event.event, AgentEvent::Steered { .. }),
+        )
+    })
+    .await;
+    assert!(core.sessions.session_status(CHAT).unwrap().goal_control);
+
+    let command = core
+        .doc_host
+        .queue_command(
+            CHAT,
+            SessionCommandPayload::Steer {
+                prompt: "/goal pause".into(),
+                message_id: Some("pause-after-boundary".into()),
+            },
+        )
+        .unwrap();
+    wait(|| {
+        core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap().iter().any(
+            |entry| entry.id == command && entry.status == zeron_doc::SessionCommandStatus::Applied,
+        )
+    })
+    .await;
+    assert!(core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap().is_empty());
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn authoritative_retirement_clears_capability_before_an_extension_absent_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = HarnessRegistry::new();
+    let harness = Arc::new(LifecycleMimir::negotiated_once());
+    registry.register(harness.clone());
+    let core =
+        EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mimir, None).unwrap();
+    create(&core, dir.path());
+    core.sessions
+        .dispatch(CHAT, HarnessId::Mimir, request(dir.path(), "first"), None)
+        .await
+        .unwrap();
+    wait(|| core.sessions.session_status(CHAT).is_some_and(|s| s.goal_control)).await;
+
+    core.sessions.interrupt(CHAT).await.unwrap();
+    wait(|| {
+        core.sessions.session_status(CHAT).is_some_and(|s| !s.goal_control)
+            && core.workspace.read_sessions().unwrap().iter().any(
+                |session| session.chat_id == CHAT && !session.goal_control,
+            )
+    })
+    .await;
+
+    core.sessions
+        .dispatch(CHAT, HarnessId::Mimir, request(dir.path(), "second"), None)
+        .await
+        .unwrap();
+    wait(|| harness.runs.load(Ordering::SeqCst) == 2).await;
+    assert!(!core.sessions.session_status(CHAT).unwrap().goal_control);
+    assert!(!core.sessions.is_control_prompt(CHAT, "/goal pause"));
+    core.shutdown().await;
+}
+
 #[tokio::test]
 async fn active_goal_controls_bypass_queue_without_success_or_extra_model_lease() {
     let dir = tempfile::tempdir().unwrap();
@@ -114,7 +360,9 @@ async fn active_goal_controls_bypass_queue_without_success_or_extra_model_lease(
     wait(|| {
         core.sessions
             .session_status(CHAT)
-            .is_some_and(|s| s.goal.is_some_and(|g| g.phase == GoalPhase::Active))
+            .is_some_and(|s| {
+                s.goal_control && s.goal.is_some_and(|g| g.phase == GoalPhase::Active)
+            })
             && child_ref(&core).is_some()
     })
     .await;

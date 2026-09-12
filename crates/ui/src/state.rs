@@ -2994,6 +2994,7 @@ mod tests {
     ) -> Session {
         Session {
             goal: None,
+            goal_control: false,
             last_completed_turn: None,
             chat_id: chat_id.into(),
             device_id: "dev".into(),
@@ -3080,6 +3081,7 @@ mod tests {
         let now = Utc::now();
         let mut row = Session {
             goal: None,
+            goal_control: false,
             last_completed_turn: None,
             chat_id: "chat".into(),
             device_id: "host".into(),
@@ -3112,6 +3114,7 @@ mod tests {
         let now = Utc::now();
         state.sessions = vec![Session {
             goal: None,
+            goal_control: false,
             last_completed_turn: None,
             chat_id: "chat".into(),
             device_id: "host".into(),
