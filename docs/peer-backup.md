@@ -76,9 +76,12 @@ The destination must be absent; even an empty existing directory is rejected.
 Restore never merges with an existing installation. The command verifies the
 manifest version and exact inventory, denies symlinks/path traversal, checks
 every length and digest, runs SQLite `quick_check`, and validates the session's
-profile/device/address binding. It restores into a private staging tree, takes
-the standard engine lock there, and atomically publishes the destination while
-that lock is held. Start the peer normally with
+profile/device/address binding. It restores into a private staging tree and
+checks the ordinary engine lock there. Unix holds the lock across publication;
+Windows closes staging handles before its atomic no-overwrite rename. There are
+no writes after publication, so an engine starting at the destination receives
+the complete restored tree and acquires its usual instance lock. Start the peer
+normally with
 `ZERON_DATA_DIR=/srv/zeron-restored zeron headless`; its profile, trusted device
 identity, and Tailcat address are unchanged.
 

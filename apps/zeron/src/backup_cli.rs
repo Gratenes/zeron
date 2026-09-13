@@ -60,15 +60,19 @@ pub fn restore(
 
     let result = (|| -> anyhow::Result<()> {
         restore_generation(generation, &stage, true)?;
-        // Acquire the ordinary engine lock in the fully restored tree. Renaming
-        // the directory moves the locked inode with it, so no engine can open
-        // the destination during the publication boundary.
+        // Keep the ordinary lock across publication where directory renames can
+        // carry an open locked inode. Windows rejects renaming a directory that
+        // contains this open handle, so release it after all restored writes and
+        // validation are complete but before the atomic no-replace publication.
         let lock = InstanceLock::acquire(&stage)?;
         anyhow::ensure!(
             !destination.exists(),
             "restore destination appeared during restore; nothing was overwritten"
         );
+        #[cfg(windows)]
+        drop(lock);
         zeron_engine::peer_runtime::backup::publish_directory(&stage, destination)?;
+        #[cfg(not(windows))]
         drop(lock);
         Ok(())
     })();

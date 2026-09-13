@@ -24,6 +24,26 @@ private final class PeerURLProtocol: URLProtocol {
 
     override func stopLoading() {}
 
+    static func body(of request: URLRequest, limit: Int = 1024 * 1024) throws -> Data? {
+        if let body = request.httpBody {
+            guard body.count <= limit else { throw URLError(.dataLengthExceedsMaximum) }
+            return body
+        }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+        while true {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count < 0 { throw stream.streamError ?? URLError(.cannotDecodeRawData) }
+            if count == 0 { return body }
+            guard count <= limit - body.count else { throw URLError(.dataLengthExceedsMaximum) }
+            body.append(contentsOf: buffer[..<count])
+        }
+    }
+
+
     static func session() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [PeerURLProtocol.self]
@@ -48,7 +68,7 @@ final class PeerIntegrationTests: XCTestCase {
             case 1:
                 XCTAssertEqual(request.httpMethod, "POST")
                 XCTAssertEqual(request.url?.path, "/attachment/upload-1")
-                let body = try XCTUnwrap(request.httpBody)
+                let body = try XCTUnwrap(try PeerURLProtocol.body(of: request))
                 let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
                 XCTAssertEqual(json["targetDevice"] as? String, "dev_host")
                 XCTAssertEqual(json["fileName"] as? String, "photo.png")
@@ -61,7 +81,8 @@ final class PeerIntegrationTests: XCTestCase {
                 let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
                 XCTAssertEqual(query?.first { $0.name == "targetDevice" }?.value, "dev_host")
                 XCTAssertEqual(query?.first { $0.name == "offset" }?.value, "4")
-                XCTAssertEqual(request.httpBody, bytes.subdata(in: 4..<bytes.count))
+                let body = try XCTUnwrap(try PeerURLProtocol.body(of: request))
+                XCTAssertEqual(body, bytes.subdata(in: 4..<bytes.count))
                 return (200, try self.meta(committed: false, nextOffset: 10, length: bytes.count))
             case 3:
                 XCTAssertEqual(request.httpMethod, "POST")
