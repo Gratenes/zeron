@@ -95,6 +95,10 @@ struct DeviceIdentity: Equatable {
         "dev_" + Data(SHA256.hash(data: publicKeyData)).base64URLEncodedString()
     }
 
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.profileId == rhs.profileId && lhs.publicKeyData == rhs.publicKeyData
+    }
+
     func redeemSignature(invite: PeerInvite) throws -> String {
         guard invite.profileId == profileId,
               let secret = Data(base64URL: invite.secret), secret.count == 32 else {

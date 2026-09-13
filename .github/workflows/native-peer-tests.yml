@@ -54,4 +54,7 @@ jobs:
       - name: Durable sync, restart and attachment custody
         run: cargo test --locked -p zeron-sync --test peer_clients --test peer_attachments
       - name: Peer authorization, backup/restore and engine recovery
-        run: cargo test --locked -p zeron-engine --test peer_auth --test peer_backup --test peer_preservation --test queued_attachments
+        run: cargo test --locked -p zeron-engine --test peer_auth --test peer_backup --test peer_preservation --test queued_attachments --test relay_delivery
+      - name: Managed authentication and concurrent re-pairing
+        if: runner.os == 'macOS'
+        run: cargo test --locked -p zeron-engine --test auth

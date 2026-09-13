@@ -264,6 +264,10 @@ struct DocHostInner {
     /// terminalizes the latter as Rejected instead of leaving a forever-
     /// Pending entry no retry could ever reach (2026-08-19 swallowed-send).
     executing: Mutex<HashSet<String>>,
+    /// Command ids with an active remote-delivery escort. Restored snapshots,
+    /// registry recovery, and explicit retry can all discover the same pending
+    /// row; only one may upload/relay it at a time.
+    delivering: Mutex<HashSet<String>>,
     /// Peer links (engine assembly, edge runtimes only) — the transport that
     /// pushes queued attachment bytes to a remote host.
     links: OnceLock<Arc<zeron_rpc::LinkCache>>,
@@ -311,6 +315,19 @@ struct TransferProgressGuard<'a> {
 impl Drop for TransferProgressGuard<'_> {
     fn drop(&mut self) {
         self.host.transfer_progress_clear(self.upload_id);
+    }
+}
+
+/// Releases a command's delivery single-flight slot even when runtime
+/// shutdown cancels the worker while an HTTP chunk is in flight.
+struct DeliveryGuard {
+    inner: Arc<DocHostInner>,
+    command_id: String,
+}
+
+impl Drop for DeliveryGuard {
+    fn drop(&mut self) {
+        lock(&self.inner.delivering).remove(&self.command_id);
     }
 }
 
@@ -725,6 +742,7 @@ impl DocHost {
                 transfers: watch::channel(Vec::new()).0,
                 connectivity_grace: Mutex::new(DegradeGrace::default()),
                 executing: Mutex::new(HashSet::new()),
+                delivering: Mutex::new(HashSet::new()),
                 links: OnceLock::new(),
                 http: reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
@@ -864,7 +882,24 @@ impl DocHost {
     /// Wire the peer-link cache (engine assembly, edge runtimes only) — the
     /// transport for queued attachment transfers to a remote host.
     pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
-        let _ = self.inner.links.set(links);
+        if self.inner.links.set(links).is_err() {
+            return;
+        }
+        // Runtime assembly reaches this point after uploads and the restored
+        // registry are wired. Re-open remote chats so locally-issued pending
+        // attachment refs regain an escort without a user Retry RPC.
+        let chats = self
+            .workspace()
+            .and_then(|workspace| workspace.read_chats().ok())
+            .unwrap_or_default();
+        for chat in chats {
+            if chat.device_id == self.inner.config.device_id {
+                continue;
+            }
+            if let Ok(handle) = self.open(&chat.id) {
+                self.rearm_pending_deliveries(&chat.id, &handle);
+            }
+        }
     }
 
     /// Re-evaluate every open chat's command queue NOW. Called after an
@@ -1339,6 +1374,7 @@ impl DocHost {
         }
         // Publish only after the durable subscription and bootstrap are installed.
         lock(&self.inner.handles).insert(chat_id.to_string(), handle.clone());
+        self.rearm_pending_deliveries(chat_id, &handle);
         drop(opening);
         self.spawn_worker(chat_task(self.clone(), Arc::downgrade(&handle), changed_rx));
         self.evict_over_budget();
@@ -3212,6 +3248,38 @@ impl DocHost {
     ///    rows didn't; there was no second road for the command).
     ///
     /// Stops the moment any path lands. No-op for locally-hosted chats.
+    /// Re-arm a restored outgoing attachment transfer. Only this device's
+    /// still-pending commands are eligible, and every referenced source file
+    /// must remain in the profile uploads jail. The delivery single-flight
+    /// handles overlap between open(), startup registry scan, and Retry.
+    fn rearm_pending_deliveries(&self, chat_id: &str, handle: &Arc<ChatDocHandle>) {
+        let Some(uploads) = self.inner.uploads.get() else {
+            return;
+        };
+        let Ok(commands) = handle.doc.read_commands() else {
+            return;
+        };
+        for entry in commands {
+            if entry.status != SessionCommandStatus::Pending
+                || entry.issued_by != self.inner.config.device_id
+                || self.inner.store.is_processed(&entry.id).unwrap_or(false)
+            {
+                continue;
+            }
+            let transfers = command_transfers(&entry);
+            if transfers.is_empty()
+                || !transfers.iter().all(|transfer| {
+                    uploads
+                        .pending_target(&transfer.upload_id, &transfer.file_name)
+                        .is_file()
+                })
+            {
+                continue;
+            }
+            self.spawn_command_delivery(chat_id, entry, transfers);
+        }
+    }
+
     fn spawn_command_delivery(
         &self,
         chat_id: &str,
@@ -3221,9 +3289,17 @@ impl DocHost {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return; // bare sync callers (unit tests) skip rather than panic
         };
+        if !lock(&self.inner.delivering).insert(entry.id.clone()) {
+            return;
+        }
+        let guard = DeliveryGuard {
+            inner: self.inner.clone(),
+            command_id: entry.id.clone(),
+        };
         let host = self.clone();
         let chat = chat_id.to_string();
         self.spawn_worker_on(&runtime, async move {
+            let _guard = guard;
             let Some(target) = host.remote_host_for(&chat) else {
                 return; // local host (or no row yet claimed remotely)
             };

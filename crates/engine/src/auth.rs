@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -232,7 +232,7 @@ impl ActivePeer {
 
 struct AuthInner {
     config: AuthConfig,
-    identity: Arc<DeviceIdentity>,
+    identity: Mutex<Arc<DeviceIdentity>>,
     store: AuthStore,
     http: reqwest::Client,
     session: Mutex<Option<StoredSession>>,
@@ -243,6 +243,8 @@ struct AuthInner {
     last_error: Mutex<Option<String>>,
     state_tx: watch::Sender<AuthState>,
     token_tx: watch::Sender<u64>,
+    transition_gate: tokio::sync::Mutex<()>,
+    transition_epoch: AtomicU64,
     runtime_gate: tokio::sync::Mutex<()>,
     refresh_gate: tokio::sync::Mutex<()>,
 }
@@ -280,7 +282,7 @@ impl Auth {
         Ok(Self {
             inner: Arc::new(AuthInner {
                 config,
-                identity,
+                identity: Mutex::new(identity),
                 store,
                 http,
                 session: Mutex::new(session),
@@ -291,6 +293,8 @@ impl Auth {
                 last_error: Mutex::new(None),
                 state_tx,
                 token_tx,
+                transition_gate: tokio::sync::Mutex::new(()),
+                transition_epoch: AtomicU64::new(0),
                 runtime_gate: tokio::sync::Mutex::new(()),
                 refresh_gate: tokio::sync::Mutex::new(()),
             }),
@@ -362,6 +366,8 @@ impl Auth {
         name: &str,
         derp_map: Option<String>,
     ) -> Result<PeerStatus, EngineError> {
+        let transition = self.inner.transition_gate.lock().await;
+        let transition_epoch = self.inner.transition_epoch.load(Ordering::Acquire);
         if self.session().is_some() {
             return Err(EngineError::Other(
                 "a peer profile is already configured".into(),
@@ -381,7 +387,7 @@ impl Auth {
             .inner
             .store
             .create_profile(
-                &self.inner.identity.public_key(),
+                &self.identity().public_key(),
                 (!name.trim().is_empty()).then_some(name.trim()),
             )
             .map_err(|error| EngineError::Other(error.to_string()))?;
@@ -395,12 +401,16 @@ impl Auth {
             local_port,
             derp_map,
         };
-        self.install_session(session, ActivePeer::Host(runtime))?;
+        self.install_session(session, ActivePeer::Host(runtime), None, transition_epoch)?;
+
+        drop(transition);
         self.refresh_token().await?;
         Ok(self.peer_status().await)
     }
 
     pub async fn pair(&self, code: &str) -> Result<(), EngineError> {
+        let transition = self.inner.transition_gate.lock().await;
+        let transition_epoch = self.inner.transition_epoch.load(Ordering::Acquire);
         if self.session().is_some() {
             return Err(EngineError::Other(
                 "a peer profile is already configured".into(),
@@ -412,13 +422,13 @@ impl Auth {
         let connection = PeerConnection::connect(&runtime_config, &invitation.address)
             .await
             .map_err(|error| EngineError::Other(error.to_string()))?;
-        let proof = self
-            .inner
-            .identity
+        let url = connection.url().to_string();
+        let mut pairing_identity = self.identity();
+        let mut replacing_identity = false;
+        let mut proof = pairing_identity
             .redeem_request(&invitation.invite, None)
             .map_err(|error| EngineError::Other(error.to_string()))?;
-        let url = connection.url().to_string();
-        let response = self
+        let mut response = self
             .inner
             .http
             .post(format!("{url}/pair/redeem"))
@@ -426,6 +436,24 @@ impl Auth {
             .send()
             .await
             .map_err(peer_http_error)?;
+        if response.status() == reqwest::StatusCode::FORBIDDEN {
+            // Revoked public keys stay revoked. Stage a fresh credential in
+            // memory, redeem the still-unused invitation with it, and publish
+            // the key only after the peer accepts it.
+            pairing_identity = Arc::new(DeviceIdentity::generate());
+            replacing_identity = true;
+            proof = pairing_identity
+                .redeem_request(&invitation.invite, None)
+                .map_err(|error| EngineError::Other(error.to_string()))?;
+            response = self
+                .inner
+                .http
+                .post(format!("{url}/pair/redeem"))
+                .json(&proof)
+                .send()
+                .await
+                .map_err(peer_http_error)?;
+        }
         if !response.status().is_success() {
             return Err(http_status_error("pair invitation", response.status()));
         }
@@ -440,12 +468,13 @@ impl Auth {
             .await
             .map_err(|_| EngineError::Other("peer returned malformed pairing response".into()))?;
         if redeemed.profile_id != invitation.invite.profile_id
-            || redeemed.device_id != self.inner.identity.device_id()
+            || redeemed.device_id != pairing_identity.device_id()
         {
             return Err(EngineError::Other(
                 "peer returned a mismatched device identity".into(),
             ));
         }
+        let replacement_identity = replacing_identity.then_some(pairing_identity);
         let session = StoredSession {
             version: SESSION_VERSION,
             profile_id: redeemed.profile_id,
@@ -456,7 +485,14 @@ impl Auth {
             local_port,
             derp_map: invitation.derp_map,
         };
-        self.install_session(session, ActivePeer::Client(connection))?;
+        self.install_session(
+            session,
+            ActivePeer::Client(connection),
+            replacement_identity,
+            transition_epoch,
+        )?;
+
+        drop(transition);
         self.refresh_token().await?;
         Ok(())
     }
@@ -577,10 +613,15 @@ impl Auth {
     }
 
     pub fn sign_out(&self) {
+        // This synchronous API cannot wait on the async transition gate. Advancing
+        // the epoch cancels an in-flight initialize/pair before publication, while
+        // the session mutex orders sign-out against a publication already underway.
+        self.inner.transition_epoch.fetch_add(1, Ordering::AcqRel);
+        let mut session = lock(&self.inner.session);
         if let Err(error) = self.persist_session(None) {
             self.record_error(error.to_string());
         }
-        *lock(&self.inner.session) = None;
+        *session = None;
         *lock(&self.inner.token) = None;
         lock(&self.inner.active).take();
         self.inner.state_tx.send_replace(AuthState::SignedOut);
@@ -672,8 +713,7 @@ impl Auth {
             .await
             .map_err(|_| EngineError::Other("peer returned malformed challenge".into()))?;
         let proof = self
-            .inner
-            .identity
+            .identity()
             .sign_challenge(&challenge)
             .map_err(|error| EngineError::Other(error.to_string()))?;
         let auth_response = self
@@ -777,11 +817,25 @@ impl Auth {
         &self,
         session: StoredSession,
         active: ActivePeer,
+        replacement_identity: Option<Arc<DeviceIdentity>>,
+        transition_epoch: u64,
     ) -> Result<(), EngineError> {
         validate_session(&session)?;
+        let mut session_slot = lock(&self.inner.session);
+        if self.inner.transition_epoch.load(Ordering::Acquire) != transition_epoch {
+            return Err(EngineError::Other(
+                "authentication transition was cancelled".into(),
+            ));
+        }
+        if let Some(identity) = replacement_identity {
+            identity
+                .persist(self.inner.config.data_dir.join(IDENTITY_FILE))
+                .map_err(|error| EngineError::Other(error.to_string()))?;
+            *lock(&self.inner.identity) = identity;
+        }
         self.persist_session(Some(&session))?;
         *lock(&self.inner.active) = Some(active);
-        *lock(&self.inner.session) = Some(session.clone());
+        *session_slot = Some(session.clone());
         *lock(&self.inner.token) = None;
         *lock(&self.inner.last_error) = None;
         self.inner.state_tx.send_replace(auth_state(&session));
@@ -796,6 +850,10 @@ impl Auth {
         config.derp_map = derp_map;
         config.local_port = local_port;
         config
+    }
+
+    fn identity(&self) -> Arc<DeviceIdentity> {
+        lock(&self.inner.identity).clone()
     }
 
     fn session(&self) -> Option<StoredSession> {

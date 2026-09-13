@@ -62,10 +62,15 @@ mod unix {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
 
+    use base64::Engine as _;
+    use zeron_engine::peer_auth::{DeviceIdentity, RedeemRequest};
+
     struct Fixture {
         _root: tempfile::TempDir,
         host_dir: PathBuf,
         client_dir: PathBuf,
+        target: PathBuf,
+
         adapter: PathBuf,
     }
 
@@ -120,7 +125,7 @@ case "$mode" in
     printf '%s' "$$" > "$state.pid"
 
     printf '%s' "$listen" > "$state.listen"
-    [ "$(stat -c %a "$config")" = 600 ]
+    [ "$(LC_ALL=C ls -ld "$config" | cut -c 1-10)" = '-rw-------' ]
     grep -q '"address":"tc' "$config"
     target="$(cat "$target_file")"
     printf '{{"url":"http://%s"}}\n' "$target"
@@ -137,10 +142,28 @@ exec sleep 86400 >/dev/null 2>&1
             Self {
                 host_dir: root.path().join("host"),
                 client_dir: root.path().join("client"),
+                target: map,
+
                 adapter,
                 _root: root,
             }
         }
+    }
+
+    async fn reject_repair_redeem(
+        axum::extract::State(requests): axum::extract::State<
+            std::sync::Arc<std::sync::Mutex<Vec<RedeemRequest>>>,
+        >,
+        axum::Json(request): axum::Json<RedeemRequest>,
+    ) -> axum::http::StatusCode {
+        let mut requests = requests.lock().expect("redeem request lock");
+        let status = if requests.is_empty() {
+            axum::http::StatusCode::FORBIDDEN
+        } else {
+            axum::http::StatusCode::UNAUTHORIZED
+        };
+        requests.push(request);
+        status
     }
 
     #[tokio::test]
@@ -252,6 +275,35 @@ exec sleep 86400 >/dev/null 2>&1
         assert_eq!(reopened.state(), AuthState::SignedOut);
         assert!(!fixture.client_dir.join("peer-session.json").exists());
 
+        // Sign-out retains the installation's signing credential. A revoked
+        // credential cannot be revived, so normal Pair must stage a fresh key
+        // and publish it only after redemption succeeds.
+        let retained_identity = std::fs::read(fixture.client_dir.join("peer-device.json"))
+            .expect("retained signing identity");
+        assert!(reopened.pair("not-an-invitation").await.is_err());
+        assert_eq!(
+            std::fs::read(fixture.client_dir.join("peer-device.json")).unwrap(),
+            retained_identity,
+            "a failed pair must preserve the recoverable existing credential"
+        );
+        let repair_code = host.invite().await.expect("fresh repair invitation");
+        reopened
+            .pair(&repair_code)
+            .await
+            .expect("re-pair revoked installation through normal API");
+        let repaired_device = reopened.device_id().expect("repaired device id");
+        assert_ne!(repaired_device, authenticated_device);
+        assert!(reopened.access_token().await.is_some());
+        let devices = host.devices().await.expect("device list after repair");
+        assert!(devices.iter().any(|device| {
+            device.device_id == authenticated_device && device.revoked_at.is_some()
+        }));
+        assert!(
+            devices.iter().any(|device| {
+                device.device_id == repaired_device && device.revoked_at.is_none()
+            })
+        );
+
         let backup_root = fixture.host_dir.join("peer/backups");
         tokio::time::timeout(Duration::from_secs(2), async {
             while !backup_root.join("latest.json").is_file() {
@@ -265,6 +317,150 @@ exec sleep 86400 >/dev/null 2>&1
                 .unwrap();
         let generation = backup_root.join(latest["generationId"].as_str().unwrap());
         verify_generation(&generation).expect("published generation verifies");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_repair_publishes_exactly_one_consistent_identity_and_session() {
+        let fixture = Fixture::new();
+        let host = Auth::open(auth_config(&fixture.host_dir, &fixture.adapter)).expect("host auth");
+        host.initialize_peer("host", None)
+            .await
+            .expect("initialize host");
+        let client =
+            Auth::open(auth_config(&fixture.client_dir, &fixture.adapter)).expect("client auth");
+        client
+            .pair(&host.invite().await.expect("initial invitation"))
+            .await
+            .expect("initial pair");
+        let revoked_device = client.device_id().expect("initial device");
+        host.revoke(&revoked_device).await.expect("revoke client");
+        client.sign_out();
+
+        let codes = (
+            host.invite().await.expect("first repair invitation"),
+            host.invite().await.expect("second repair invitation"),
+        );
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let first = {
+            let client = client.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                client.pair(&codes.0).await
+            })
+        };
+        let second = {
+            let client = client.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                client.pair(&codes.1).await
+            })
+        };
+        barrier.wait().await;
+        let results = (
+            first.await.expect("first task"),
+            second.await.expect("second task"),
+        );
+        assert_eq!(
+            usize::from(results.0.is_ok()) + usize::from(results.1.is_ok()),
+            1,
+            "only one concurrent profile transition may publish"
+        );
+
+        let repaired_device = client.device_id().expect("winning repair device");
+        assert_ne!(repaired_device, revoked_device);
+        let persisted_identity =
+            std::fs::read(fixture.client_dir.join("peer-device.json")).expect("persisted identity");
+        drop(client);
+
+        let reopened = Auth::open(auth_config(&fixture.client_dir, &fixture.adapter))
+            .expect("reopen repaired client");
+        assert_eq!(
+            reopened.device_id().as_deref(),
+            Some(repaired_device.as_str())
+        );
+        assert_eq!(
+            std::fs::read(fixture.client_dir.join("peer-device.json")).unwrap(),
+            persisted_identity
+        );
+        reopened.resume().await;
+        assert!(
+            reopened.access_token().await.is_some(),
+            "the persisted session must authenticate with the persisted key"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_fresh_repair_candidate_preserves_retained_identity() {
+        let fixture = Fixture::new();
+        let host = Auth::open(auth_config(&fixture.host_dir, &fixture.adapter)).expect("host auth");
+        host.initialize_peer("host", None)
+            .await
+            .expect("initialize host");
+        let client =
+            Auth::open(auth_config(&fixture.client_dir, &fixture.adapter)).expect("client auth");
+        client
+            .pair(&host.invite().await.expect("initial invitation"))
+            .await
+            .expect("initial pair");
+        let revoked_device = client.device_id().expect("initial device");
+        host.revoke(&revoked_device).await.expect("revoke client");
+        client.sign_out();
+        let identity_path = fixture.client_dir.join("peer-device.json");
+        let retained_identity = std::fs::read(&identity_path).expect("retained identity");
+        let retained_public_key = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            DeviceIdentity::load_or_create(&identity_path)
+                .expect("load retained identity")
+                .public_key(),
+        );
+        let repair_code = host.invite().await.expect("repair invitation");
+
+        // Redirect this connection to a controlled peer: the retained key gets
+        // the 403 that activates fallback, then the fresh candidate is rejected.
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = axum::Router::new()
+            .route("/pair/redeem", axum::routing::post(reject_repair_redeem))
+            .with_state(requests.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind controlled peer");
+        std::fs::write(
+            &fixture.target,
+            listener
+                .local_addr()
+                .expect("controlled peer address")
+                .to_string(),
+        )
+        .expect("redirect adapter");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve controlled peer");
+        });
+
+        assert!(client.pair(&repair_code).await.is_err());
+        server.abort();
+        let requests = requests.lock().expect("redeem requests");
+        assert_eq!(requests.len(), 2, "fallback must make exactly two redeems");
+        assert_eq!(
+            requests[0].public_key, retained_public_key,
+            "the first redeem must use the retained key"
+        );
+        assert_ne!(
+            requests[1].public_key, retained_public_key,
+            "the second redeem must use a fresh candidate key"
+        );
+        assert_ne!(requests[1].public_key, requests[0].public_key);
+        drop(requests);
+
+        assert_eq!(client.state(), AuthState::SignedOut);
+        assert!(!fixture.client_dir.join("peer-session.json").exists());
+        assert_eq!(
+            std::fs::read(identity_path).unwrap(),
+            retained_identity,
+            "a rejected fresh candidate must not replace the retained key"
+        );
     }
 
     #[tokio::test]

@@ -12,12 +12,21 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::body::Bytes;
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::{HeaderValue, header};
+use axum::response::Response;
+use axum::routing::{post, put};
+use axum::{Json, Router};
+use base64::Engine as _;
 use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt};
+use sha2::{Digest as _, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -26,7 +35,7 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 };
 
 use zeron_doc::{MessageRole, MessageStatus, SessionCommandPayload};
-use zeron_engine::{EngineCore, HarnessRegistry};
+use zeron_engine::{EdgeConfig, EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
     AgentEvent, Device, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
@@ -187,6 +196,100 @@ fn assemble(dir: &std::path::Path, device_id: &str) -> EngineCore {
     EngineCore::assemble(dir, registry(), HarnessId::Mock, None).expect("engine assembles")
 }
 
+fn assemble_with_edge(
+    dir: &std::path::Path,
+    device_id: &str,
+    edge: Option<EdgeConfig>,
+) -> EngineCore {
+    std::fs::create_dir_all(dir).expect("create data dir");
+    std::fs::write(dir.join("device-id"), device_id).expect("write device id");
+    EngineCore::assemble(dir, registry(), HarnessId::Mock, edge).expect("engine assembles")
+}
+
+#[derive(Default)]
+struct CustodyState {
+    bytes: Mutex<Vec<u8>>,
+    init_count: AtomicUsize,
+    chunk_count: AtomicUsize,
+    commit_count: AtomicUsize,
+    block_chunk_ack: AtomicBool,
+    chunk_stored: tokio::sync::Notify,
+    release_chunk_ack: tokio::sync::Notify,
+}
+
+async fn custody_init(State(state): State<Arc<CustodyState>>) -> Json<serde_json::Value> {
+    state.init_count.fetch_add(1, Ordering::SeqCst);
+    Json(serde_json::json!({
+        "nextOffset": state.bytes.lock().unwrap().len(),
+        "committed": false,
+    }))
+}
+
+async fn custody_chunk(
+    State(state): State<Arc<CustodyState>>,
+    Query(query): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Json<serde_json::Value> {
+    state.chunk_count.fetch_add(1, Ordering::SeqCst);
+    let offset = query
+        .get("offset")
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("chunk offset");
+    let next = {
+        let mut stored = state.bytes.lock().unwrap();
+        if offset == stored.len() {
+            stored.extend_from_slice(&body);
+        }
+        stored.len()
+    };
+    if state.block_chunk_ack.swap(false, Ordering::SeqCst) {
+        state.chunk_stored.notify_one();
+        state.release_chunk_ack.notified().await;
+    }
+    Json(serde_json::json!({ "nextOffset": next }))
+}
+
+async fn custody_commit(State(state): State<Arc<CustodyState>>) -> Json<serde_json::Value> {
+    state.commit_count.fetch_add(1, Ordering::SeqCst);
+    Json(serde_json::json!({ "committed": true }))
+}
+
+async fn custody_get(
+    State(state): State<Arc<CustodyState>>,
+    AxumPath(_upload): AxumPath<String>,
+) -> Response {
+    let bytes = state.bytes.lock().unwrap().clone();
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let mut response = Response::new(axum::body::Body::from(bytes));
+    response.headers_mut().insert(
+        "x-attachment-digest",
+        HeaderValue::from_str(&digest).unwrap(),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response
+}
+
+async fn fake_custody_peer() -> (String, Arc<CustodyState>, tokio::task::JoinHandle<()>) {
+    let state = Arc::new(CustodyState {
+        block_chunk_ack: AtomicBool::new(true),
+        ..CustodyState::default()
+    });
+    let app = Router::new()
+        .route("/attachment/{upload}", post(custody_init).get(custody_get))
+        .route("/attachment/{upload}/chunk", put(custody_chunk))
+        .route("/attachment/{upload}/commit", post(custody_commit))
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind custody");
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{address}"), state, task)
+}
+
 fn complete_assistant_count(core: &EngineCore) -> usize {
     core.doc_host
         .open(CHAT)
@@ -323,6 +426,120 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
         1,
         "the doc row + a duplicate relay must not double-run the command"
     );
+
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sender_restarts_before_and_during_custody_upload_then_recovers_once() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let (custody_url, custody, _custody_server) = fake_custody_peer().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let sender_dir = dirs.path().join("sender");
+    let edge = EdgeConfig::with_static_token(&custody_url, "test-user");
+
+    let core_b = assemble_with_edge(&dirs.path().join("target"), "device-b", Some(edge.clone()));
+    let _host = core_b.start_host_relay(&relay_url, Arc::new(StaticToken("test-user".into())));
+
+    // Queue durably while there is no custody transport. This is the restart
+    // before upload: no Retry RPC is issued, and no in-memory escort survives.
+    let core_a = assemble_with_edge(&sender_dir, "device-a", None);
+    core_a.workspace.upsert_device_row(&Device {
+        id: "device-b".into(),
+        name: "b".into(),
+        platform: "linux".into(),
+        last_seen_at: Some(chrono::Utc::now()),
+        created_at: None,
+        version: Some("0.2.12".into()),
+        capabilities: zeron_proto::capabilities::current(),
+    });
+    core_a
+        .workspace
+        .create_chat(CHAT, None, Some("device-b"), None, None)
+        .expect("remote chat row");
+    let bytes = b"restart-resumable attachment";
+    core_a
+        .uploads
+        .append(
+            "restart-upload",
+            &base64::engine::general_purpose::STANDARD.encode(bytes),
+            Some(0),
+        )
+        .expect("stage attachment");
+    core_a
+        .uploads
+        .commit("restart-upload", "proof.png")
+        .expect("commit local attachment");
+    let pending = zeron_engine::uploads::pending_ref("restart-upload", "proof.png");
+    core_a
+        .doc_host
+        .queue_command_with_transfers(
+            CHAT,
+            SessionCommandPayload::Run {
+                request: RunRequest {
+                    prompt: format!("inspect\n- {pending}"),
+                    harness: None,
+                    model: None,
+                    reasoning: None,
+                    model_options: Default::default(),
+                    cwd: "~".into(),
+                    sandbox: SandboxLevel::WorkspaceWrite,
+                    auto_approve: true,
+                    attachments: vec![pending],
+                    worktree: None,
+                    resume: None,
+                },
+                message_id: "msg-restart-custody".into(),
+            },
+            vec![zeron_engine::uploads::AttachmentTransfer {
+                upload_id: "restart-upload".into(),
+                file_name: "proof.png".into(),
+            }],
+        )
+        .expect("durably queue attachment command");
+    core_a.shutdown().await;
+    drop(core_a);
+    assert_eq!(custody.init_count.load(Ordering::SeqCst), 0);
+
+    // Startup discovery re-arms the restored row. The peer stores the chunk
+    // but withholds its ACK, placing shutdown inside the custody upload.
+    let core_a = assemble_with_edge(&sender_dir, "device-a", Some(edge.clone()));
+    let mut links =
+        LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
+    links.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(links));
+    tokio::time::timeout(Duration::from_secs(5), custody.chunk_stored.notified())
+        .await
+        .expect("first runtime reached in-flight chunk");
+    core_a.shutdown().await;
+    drop(core_a);
+    custody.release_chunk_ack.notify_one();
+
+    // A second ordinary runtime start must ask for status, resume at the
+    // peer's saved offset, commit, and relay the command exactly once.
+    let core_a = assemble_with_edge(&sender_dir, "device-a", Some(edge));
+    let mut links =
+        LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
+    links.probe_timeout = Duration::from_secs(5);
+    core_a.set_links(LinkCache::new(links));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while complete_assistant_count(&core_b) != 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "restored attachment command never executed"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(complete_assistant_count(&core_b), 1);
+    assert_eq!(custody.init_count.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        custody.chunk_count.load(Ordering::SeqCst),
+        1,
+        "the restarted sender must resume from the persisted peer offset"
+    );
+    assert_eq!(custody.commit_count.load(Ordering::SeqCst), 1);
 
     core_a.shutdown().await;
     core_b.shutdown().await;

@@ -676,6 +676,22 @@ struct StoredIdentity {
 }
 
 impl DeviceIdentity {
+    /// Generate a replacement credential without touching the durable identity.
+    /// Pairing uses this to prove a fresh key before publishing it locally.
+    pub fn generate() -> Self {
+        Self {
+            signing_key: SigningKey::generate(&mut OsRng),
+        }
+    }
+
+    pub fn persist(&self, path: impl AsRef<Path>) -> Result<(), AuthError> {
+        let stored = StoredIdentity {
+            version: IDENTITY_VERSION,
+            secret_key: encode(&self.signing_key.to_bytes()),
+        };
+        let bytes = serde_json::to_vec(&stored).map_err(|_| AuthError::MalformedIdentity)?;
+        atomic_private_write(path.as_ref(), &bytes)
+    }
     pub fn load_or_create(path: impl AsRef<Path>) -> Result<Self, AuthError> {
         let path = path.as_ref();
         match std::fs::read(path) {

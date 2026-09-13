@@ -47,6 +47,19 @@ final class PairingProtocolTests: XCTestCase {
         XCTAssertThrowsError(try wrongProfile.redeemSignature(invite: invite))
     }
 
+    func testIdentityEqualityUsesProfileAndPublicKey() throws {
+        let rawKey = Data((0..<32).map(UInt8.init))
+        let sameKey = try Curve25519.Signing.PrivateKey(rawRepresentation: rawKey)
+        let reloadedKey = try Curve25519.Signing.PrivateKey(rawRepresentation: rawKey)
+        let differentKey = try Curve25519.Signing.PrivateKey(
+            rawRepresentation: Data((1...32).map(UInt8.init)))
+        let identity = DeviceIdentity(profileId: profile, privateKey: sameKey)
+
+        XCTAssertEqual(identity, DeviceIdentity(profileId: profile, privateKey: reloadedKey))
+        XCTAssertNotEqual(identity, DeviceIdentity(profileId: "other-profile", privateKey: reloadedKey))
+        XCTAssertNotEqual(identity, DeviceIdentity(profileId: profile, privateKey: differentKey))
+    }
+
     func testChallengeProofAndDerivedDeviceIdMatchServerContract() throws {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data((0..<32).map(UInt8.init)))
         let identity = DeviceIdentity(profileId: profile, privateKey: key)
