@@ -96,7 +96,8 @@ struct DeviceIdentity: Equatable {
     }
 
     func redeemSignature(invite: PeerInvite) throws -> String {
-        guard let secret = Data(base64URL: invite.secret), secret.count == 32 else {
+        guard invite.profileId == profileId,
+              let secret = Data(base64URL: invite.secret), secret.count == 32 else {
             throw PairingError.invalidInvitation
         }
         let payload = Self.framed(domain: Self.redeemDomain, fields: [
@@ -122,6 +123,11 @@ struct DeviceIdentity: Equatable {
         Self(profileId: "", privateKey: .init())
     }
 
+    func bound(profileId: String) throws -> Self {
+        guard !profileId.isEmpty else { throw PairingError.invalidResponse }
+        return Self(profileId: profileId, privateKey: privateKey)
+    }
+
     static func load(profileId: String) -> Self? {
         guard let data = Keychain.loadData(key: key(profileId)),
               let privateKey = try? Curve25519.Signing.PrivateKey(rawRepresentation: data)
@@ -129,10 +135,10 @@ struct DeviceIdentity: Equatable {
         return Self(profileId: profileId, privateKey: privateKey)
     }
 
-    func persist(profileId: String) throws -> Self {
+    func persist() throws -> Self {
         guard !profileId.isEmpty else { throw PairingError.invalidResponse }
         try Keychain.saveData(privateKey.rawRepresentation, key: Self.key(profileId))
-        return Self(profileId: profileId, privateKey: privateKey)
+        return self
     }
 
     static func delete(profileId: String) { Keychain.delete(key: key(profileId)) }

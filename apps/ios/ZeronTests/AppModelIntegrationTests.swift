@@ -108,6 +108,85 @@ final class AppModelIntegrationTests: XCTestCase {
     }
 
     @MainActor
+    func testFailedRedeemPreservesSavedIdentityAndRetryUsesIt() async throws {
+        let profile = "redeem-failure-\(UUID().uuidString.lowercased())"
+        let saved = try identity(profile: profile, seed: 6)
+        _ = try saved.persist()
+        var renewDeviceIds: [String] = []
+        let model = AppModel(nativeFactory: pairingNativeFactory(),
+                             sessionRenewer: { _, identity in
+            renewDeviceIds.append(identity.deviceId)
+            return PairingSession(token: "recovered", expiresAt: Int64.max,
+                                  principal: AuthPrincipal(profileId: identity.profileId,
+                                                           deviceId: identity.deviceId))
+        }, invitationRedeemer: { _, invitation, candidate, _ in
+            XCTAssertEqual(candidate.profileId, invitation.invite.profileId,
+                           "the candidate must sign with the invited profile id")
+            XCTAssertEqual(DeviceIdentity.load(profileId: profile), saved,
+                           "redeem must run before the candidate touches Keychain")
+            throw PairingError.http(409, "invite already consumed")
+        })
+        defer { model.signOut() }
+        model.storedProfileId = profile
+        model.peerAddressString = "saved-peer.test:443"
+        model.storedDeviceId = saved.deviceId
+
+        do {
+            try await model.pair(invitationText: try invitationText(profile: profile))
+            XCTFail("consumed invitation should fail")
+        } catch PairingError.http(let status, _) {
+            XCTAssertEqual(status, 409)
+        }
+
+        XCTAssertEqual(DeviceIdentity.load(profileId: profile), saved,
+                       "failed redemption must leave the recoverable key unchanged")
+        model.retrySavedIdentity()
+        try await waitUntil { model.diagnosticsConfig?.peerURL.port == 49_152 }
+        XCTAssertEqual(renewDeviceIds, [saved.deviceId])
+        XCTAssertEqual(model.diagnosticsConfig?.deviceId, saved.deviceId)
+    }
+
+    @MainActor
+    func testRedeemedCandidateIsSavedBeforeTransientRenewalFailureAndCanRetry() async throws {
+        let profile = "redeem-success-\(UUID().uuidString.lowercased())"
+        var redeemedDeviceId: String?
+        var renewAttempts = 0
+        let model = AppModel(nativeFactory: pairingNativeFactory(),
+                             sessionRenewer: { _, identity in
+            renewAttempts += 1
+            if renewAttempts == 1 { throw URLError(.networkConnectionLost) }
+            return PairingSession(token: "recovered", expiresAt: Int64.max,
+                                  principal: AuthPrincipal(profileId: identity.profileId,
+                                                           deviceId: identity.deviceId))
+        }, invitationRedeemer: { _, invitation, candidate, _ in
+            XCTAssertEqual(candidate.profileId, profile)
+            XCTAssertEqual(candidate.profileId, invitation.invite.profileId)
+            XCTAssertNil(DeviceIdentity.load(profileId: profile),
+                         "candidate must remain in memory until redemption succeeds")
+            redeemedDeviceId = candidate.deviceId
+        })
+        defer { model.signOut() }
+
+        do {
+            try await model.pair(invitationText: try invitationText(profile: profile))
+            XCTFail("the injected first renewal should fail")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .networkConnectionLost)
+        }
+
+        let expectedDeviceId = try XCTUnwrap(redeemedDeviceId)
+        XCTAssertEqual(DeviceIdentity.load(profileId: profile)?.deviceId, expectedDeviceId,
+                       "successful redemption must install the candidate key")
+        XCTAssertEqual(model.storedProfileId, profile)
+        XCTAssertEqual(model.peerAddressString, "pair-peer.test:443")
+
+        model.retrySavedIdentity()
+        try await waitUntil { model.diagnosticsConfig?.deviceId == expectedDeviceId }
+        XCTAssertEqual(renewAttempts, 2)
+        XCTAssertEqual(model.diagnosticsConfig?.profileId, profile)
+    }
+
+    @MainActor
     func testForegroundRetriesAfterInitialRestoreAuthenticationFailure() async throws {
         let profile = "retry-\(UUID().uuidString)"
         let identity = try identity(profile: profile, seed: 4)
@@ -234,6 +313,27 @@ final class AppModelIntegrationTests: XCTestCase {
             .first { $0.label == "sessionStores" || $0.label == "_sessionStores" }?.value
             as? [String: SessionStore]
         return stores?[chatId]
+    }
+
+
+    private func pairingNativeFactory() -> AppModel.NativeFactory {
+        { _, directory, _ in
+            try FileManager.default.createDirectory(at: directory,
+                                                    withIntermediateDirectories: true)
+            return TestTailcatClient()
+        }
+    }
+
+    private func invitationText(profile: String) throws -> String {
+        let invitation = PairingInvitation(
+            version: 1,
+            address: "pair-peer.test:443",
+            invite: PeerInvite(version: 1, profileId: profile,
+                               inviteId: "invite-\(UUID().uuidString.lowercased())",
+                               secret: Data(repeating: 0x5a, count: 32).base64URLEncodedString(),
+                               expiresAt: Int64.max),
+            derpMap: nil)
+        return String(decoding: try JSONEncoder().encode(invitation), as: UTF8.self)
     }
 
 

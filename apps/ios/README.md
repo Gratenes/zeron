@@ -7,10 +7,14 @@ A native SwiftUI viewport onto the zeron mesh. The phone is a **peer
 
 ## Build & run
 
-Requires Xcode 26+ (iOS 26 SDK — Liquid Glass APIs), Go, `gomobile`, and
-`bind`. Build the required native adapter before opening Xcode:
+Requires Xcode 26+ (iOS 26 SDK — Liquid Glass APIs) and Go 1.27.1. Install
+the exact binding toolchain retained by `connectivity/tailcat/go.mod`, then build
+the required native adapter before opening Xcode:
 
 ```sh
+
+go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260908204917-8b95e45f8d3e
+go install golang.org/x/mobile/cmd/gobind@v0.0.0-20260908204917-8b95e45f8d3e
 cd apps/ios
 ./Native/build-xcframework.sh
 xcodebuild -project Zeron.xcodeproj -scheme Zeron \

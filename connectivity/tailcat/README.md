@@ -54,6 +54,16 @@ Release packages place `kratos-tailcat` adjacent to `zeron` (inside `Contents/Ma
 
 From the repository root:
 
+
+Apple binding builds require the pinned `gomobile` and `gobind` commands. The
+`gobind` tool directive in `go.mod` keeps the matching mobile module in the
+binding graph across `go mod tidy`:
+
+```sh
+go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260908204917-8b95e45f8d3e
+go install golang.org/x/mobile/cmd/gobind@v0.0.0-20260908204917-8b95e45f8d3e
+```
+
 ```sh
 scripts/build-tailcat.sh native     # host CLI
 scripts/build-tailcat.sh cross      # desktop/headless release matrix

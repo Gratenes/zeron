@@ -8,6 +8,7 @@ OUT_DIR=${OUT_DIR:-$REPO/target/tailcat}
 MODE=${1:-native}
 PKG=./cmd/kratos-tailcat
 PIN=fd101889796a
+MOBILE_PIN=v0.0.0-20260908204917-8b95e45f8d3e
 
 mkdir -p "$OUT_DIR"
 cd "$ROOT"
@@ -15,6 +16,15 @@ cd "$ROOT"
 # Refuse a release build if go.mod no longer contains the reviewed upstream pin.
 grep -q "$PIN" go.mod || {
   echo "Tailcat dependency is not pinned to reviewed commit $PIN" >&2
+  exit 1
+}
+
+grep -q "golang.org/x/mobile $MOBILE_PIN" go.mod || {
+  echo "Apple binding tools are not pinned to $MOBILE_PIN" >&2
+  exit 1
+}
+grep -q '^tool golang.org/x/mobile/cmd/gobind$' go.mod || {
+  echo "go.mod must retain the pinned gobind tool directive" >&2
   exit 1
 }
 
@@ -57,6 +67,13 @@ build_xcframework() {
   GOMOBILE=${GOMOBILE:-gomobile}
   command -v "$GOMOBILE" >/dev/null 2>&1 || {
     echo "gomobile is required (set GOMOBILE to its path)" >&2
+    exit 1
+  }
+  GOMOBILE=$(command -v "$GOMOBILE")
+  PATH=$(dirname "$GOMOBILE"):$PATH
+  export PATH
+  command -v gobind >/dev/null 2>&1 || {
+    echo "gobind is required; install golang.org/x/mobile/cmd/gobind@$MOBILE_PIN" >&2
     exit 1
   }
   "$GOMOBILE" bind \

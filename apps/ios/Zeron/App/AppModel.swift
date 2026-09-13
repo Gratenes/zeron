@@ -43,9 +43,11 @@ final class AppModel {
 
     typealias NativeFactory = @Sendable (String, URL, String?) throws -> any TailcatClient
     typealias SessionRenewer = (URL, DeviceIdentity) async throws -> PairingSession
+    typealias InvitationRedeemer = (URL, PairingInvitation, DeviceIdentity, String) async throws -> Void
     typealias IdentityLoader = (String) -> DeviceIdentity?
     @ObservationIgnored private let nativeFactory: NativeFactory
     @ObservationIgnored private let sessionRenewer: SessionRenewer
+    @ObservationIgnored private let invitationRedeemer: InvitationRedeemer
     @ObservationIgnored private let identityLoader: IdentityLoader
 
     init(nativeFactory: @escaping NativeFactory = { address, directory, derpMap in
@@ -54,9 +56,14 @@ final class AppModel {
          sessionRenewer: @escaping SessionRenewer = { url, identity in
              try await AuthClient(baseURL: url).renew(identity: identity)
          },
+         invitationRedeemer: @escaping InvitationRedeemer = { url, invitation, identity, deviceName in
+             try await AuthClient(baseURL: url).redeem(invitation: invitation, identity: identity,
+                                                        deviceName: deviceName)
+         },
          identityLoader: @escaping IdentityLoader = { DeviceIdentity.load(profileId: $0) }) {
         self.nativeFactory = nativeFactory
         self.sessionRenewer = sessionRenewer
+        self.invitationRedeemer = invitationRedeemer
         self.identityLoader = identityLoader
     }
 
@@ -214,17 +221,15 @@ final class AppModel {
 
         guard authGate.accepts(generation), demo == nil else { bootstrap.close(); return }
         let pendingIdentity = DeviceIdentity.createPending()
-        let identity = try pendingIdentity.persist(profileId: invitation.invite.profileId)
-        let auth = AuthClient(baseURL: bootstrap.url)
+        let candidate = try pendingIdentity.bound(profileId: invitation.invite.profileId)
         do {
-            try await auth.redeem(invitation: invitation, identity: identity,
-                                  deviceName: deviceName)
+            try await invitationRedeemer(bootstrap.url, invitation, candidate, deviceName)
         } catch {
-            DeviceIdentity.delete(profileId: identity.profileId)
             bootstrap.close()
             try? FileManager.default.removeItem(at: pending)
             throw error
         }
+        let identity = try candidate.persist()
 
         // Redeem is single-use. Persist the address, key and Tailcat state before
         // authentication so a transient challenge failure can resume on launch.

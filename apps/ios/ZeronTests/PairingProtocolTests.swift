@@ -30,7 +30,7 @@ final class PairingProtocolTests: XCTestCase {
 
     func testRedeemProofMatchesServerFraming() throws {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data((0..<32).map(UInt8.init)))
-        let identity = DeviceIdentity(profileId: "", privateKey: key)
+        let identity = DeviceIdentity(profileId: profile, privateKey: key)
         let secret = Data((32..<64).map(UInt8.init))
         let invite = PeerInvite(version: 1, profileId: profile, inviteId: inviteId,
                                 secret: secret.base64URLEncodedString(), expiresAt: 2_000_000_000)
@@ -41,6 +41,10 @@ final class PairingProtocolTests: XCTestCase {
         ])
         XCTAssertTrue(key.publicKey.isValidSignature(signature, for: payload))
         XCTAssertFalse(key.publicKey.isValidSignature(signature, for: Data(invite.secret.utf8)))
+
+        let wrongProfile = DeviceIdentity(profileId: "44444444-4444-4444-8444-444444444444",
+                                          privateKey: key)
+        XCTAssertThrowsError(try wrongProfile.redeemSignature(invite: invite))
     }
 
     func testChallengeProofAndDerivedDeviceIdMatchServerContract() throws {
