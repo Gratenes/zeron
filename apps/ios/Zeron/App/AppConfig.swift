@@ -1,226 +1,172 @@
-// Session-wide connection config: edge base URL, identity, token minting for
-// room sockets (WS auth rides the URL query — sockets can't set headers), and
-// the durable-nudge POST. Thread-safe (rooms call in from their actors).
+// Profile-bound connection configuration. Every application request goes to
+// the embedded Tailcat client's loopback proxy and carries a short-lived bearer
+// proven by the device's Ed25519 key.
 
 import Foundation
 
 final class AppConfig: @unchecked Sendable {
-    enum Mode: String {
-        case workos
-        case dev
-    }
-
-    let edgeURL: URL
-    let mode: Mode
-    let userId: String
-    let orgId: String
+    let peerURL: URL
+    let profileId: String
     let deviceId: String
     let deviceName: String
 
     private let lock = NSLock()
-    private var tokens: AuthTokens?
-    private var devBearer: String?
-    /// In-flight refresh shared by every caller (single-flight). WorkOS
-    /// refresh tokens are SINGLE-USE (rotated per use, desktop auth.rs
-    /// refresh_gate): without this, a cold launch's N room dials raced N
-    /// concurrent refreshes with the same token — one won and rotated it,
-    /// the rest failed, dialed with the dead access token, got rejected,
-    /// and every socket sat in backoff. That was the 5–10s "connecting"
-    /// stall on every app open past token expiry (~5 min).
-    private var refreshTask: Task<String?, Never>?
+    private let identity: DeviceIdentity?
+    private var session: PairingSession
+    private var renewTask: Task<PairingSession?, Never>?
 
-    init(edgeURL: URL, mode: Mode, userId: String, orgId: String,
-         deviceId: String, deviceName: String,
-         tokens: AuthTokens? = nil, devBearer: String? = nil) {
-        self.edgeURL = edgeURL
-        self.mode = mode
-        self.userId = userId
-        self.orgId = orgId
+    private let onRevoked: @Sendable () -> Void
+
+    private let authSession: URLSession
+
+    init(peerURL: URL, profileId: String, deviceId: String, deviceName: String,
+         identity: DeviceIdentity?, session: PairingSession,
+         authSession: URLSession = .shared,
+         onRevoked: @escaping @Sendable () -> Void = {}) {
+        self.peerURL = peerURL
+        self.profileId = profileId
         self.deviceId = deviceId
         self.deviceName = deviceName
-        self.tokens = tokens
-        self.devBearer = devBearer
+        self.identity = identity
+        self.session = session
+        self.onRevoked = onRevoked
+
+        self.authSession = authSession
     }
 
-    func updateTokens(_ new: AuthTokens) {
-        lock.withLock {
-            tokens = new
-        }
+    /// Test/demo initializer. Production always supplies an identity and renews.
+    init(peerURL: URL, profileId: String, deviceId: String, deviceName: String,
+         bearer: String = "test-bearer") {
+        self.peerURL = peerURL
+        self.profileId = profileId
+        self.deviceId = deviceId
+        self.deviceName = deviceName
+        identity = nil
+        session = PairingSession(token: bearer, expiresAt: Int64.max,
+                                 principal: AuthPrincipal(profileId: profileId,
+                                                          deviceId: deviceId))
+
+        onRevoked = {}
+
+        authSession = .shared
     }
 
-    /// Current bearer, refreshing the WorkOS access token when needed.
     func currentToken() async -> String? {
-        switch mode {
-        case .dev:
-            return lock.withLock { devBearer }
-        case .workos:
-            let current = lock.withLock { tokens }
-            guard let current else { return nil }
-            if !Self.isExpired(jwt: current.accessToken) {
-                return current.accessToken
-            }
-            return await refreshedToken(current: current)
-        }
-    }
-
-    /// Join (or start) the one in-flight refresh. The task clears itself
-    /// under the lock as its last act, so a caller either joins a live
-    /// refresh or starts a fresh one — never a second concurrent POST.
-    private func refreshedToken(current: AuthTokens) async -> String? {
+        let current = lock.withLock { session }
+        if current.expiresAt > Int64(Date().timeIntervalSince1970) + 60 { return current.token }
+        guard let identity else { return nil }
         let task = lock.withLock {
-            if let existing = refreshTask {
-                return existing
-            }
-
-            let task = Task<String?, Never> { [edgeURL, orgId] in
-                let client = AuthClient(baseURL: edgeURL)
-                let refreshed = try? await client.refresh(refreshToken: current.refreshToken,
-                                                          organizationId: orgId)
-                if let refreshed {
-                    self.updateTokens(refreshed)
-                    Keychain.save(refreshed.accessToken, key: "accessToken")
-                    Keychain.save(refreshed.refreshToken, key: "refreshToken")
-                } else {
-                    roomLog.error("auth: token refresh failed; using expired access token (server will reject and rooms will redial)")
+            if let renewTask { return renewTask }
+            let task = Task<PairingSession?, Never> { [peerURL, authSession] in
+                let refreshed: PairingSession?
+                do {
+                    refreshed = try await AuthClient(baseURL: peerURL, session: authSession)
+                        .renew(identity: identity)
+                } catch PairingError.revoked {
+                    refreshed = nil
+                    self.onRevoked()
+                } catch {
+                    refreshed = nil
                 }
                 self.lock.withLock {
-                    self.refreshTask = nil
+                    if let refreshed { self.session = refreshed }
+                    self.renewTask = nil
                 }
-                // Failure falls back to the expired token: let the server
-                // reject; the rooms' backoff redials retry through here.
-                return refreshed?.accessToken ?? current.accessToken
+                return refreshed
             }
-            refreshTask = task
+            renewTask = task
             return task
         }
-        return await task.value
+        return await task.value?.token
+
+    }
+
+    func reportUnauthorized() {
+        onRevoked()
     }
 
     private var wsBase: URL {
-        var components = URLComponents(url: edgeURL, resolvingAgainstBaseURL: false)!
+        var components = URLComponents(url: peerURL, resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "http" ? "ws" : "wss"
         return components.url!
     }
 
-    /// The workspace registry room (docs/registry-sync.md) — the row-table
-    /// replacement for the old ws Loro workspace doc.
     func registrySocketURL() async -> URL? {
         guard let token = await currentToken() else { return nil }
-        var url = wsBase.appending(path: "registry/\(orgId)/ws")
-        url.append(queryItems: [URLQueryItem(name: "token", value: token),
-                                URLQueryItem(name: "device", value: deviceId)])
+        var url = wsBase.appending(path: "registry/\(profileId)/ws")
+        url.append(queryItems: [.init(name: "token", value: token),
+                                .init(name: "device", value: deviceId)])
         return url
     }
 
-    /// The chat2 log-relay room (docs/chat2-sync.md B) — replaces the s2
-    /// session rooms, which mobile no longer dials at all. `device` rides the
-    /// URL so the DO can attribute sockets and honor excludeOwn backfills.
     func chat2SocketURL(chatId: String) async -> URL? {
         guard let token = await currentToken() else { return nil }
         var url = wsBase.appending(path: "chat2/\(chatId)/ws")
-        url.append(queryItems: [URLQueryItem(name: "token", value: token),
-                                URLQueryItem(name: "device", value: deviceId)])
+        url.append(queryItems: [.init(name: "token", value: token),
+                                .init(name: "device", value: deviceId)])
         return url
     }
 
-    /// GET /chat2/{chatId}/checkpoint — the Range-resumable doc snapshot
-    /// (auth via bearer header; the caller adds Range on resume).
     func chat2CheckpointRequest(chatId: String) async -> URLRequest? {
-        guard let token = await currentToken() else { return nil }
-        var request = URLRequest(url: edgeURL.appending(path: "chat2/\(chatId)/checkpoint"))
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        return request
+        authorized(peerURL.appending(path: "chat2/\(chatId)/checkpoint"),
+                   token: await currentToken())
     }
 
-    /// GET /chat2/{chatId}/rows?after= — pull over plain HTTPS: one request
-    /// collapses the socket's connect→hello→state→rowsReq→backfill, and it
-    /// works on networks that strip WS upgrades (airplane wifi).
     func chat2RowsRequest(chatId: String, after: UInt64) async -> URLRequest? {
-        guard let token = await currentToken() else { return nil }
-        var url = edgeURL.appending(path: "chat2/\(chatId)/rows")
-        url.append(queryItems: [URLQueryItem(name: "after", value: String(after)),
-                                URLQueryItem(name: "device", value: deviceId)])
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        return request
+        var url = peerURL.appending(path: "chat2/\(chatId)/rows")
+        url.append(queryItems: [.init(name: "after", value: String(after)),
+                                .init(name: "device", value: deviceId)])
+        return authorized(url, token: await currentToken())
     }
 
-    /// POST /chat2/{chatId}/rows?batchId= — push over plain HTTPS (batchId
-    /// dedupe makes replays no-ops); body is the raw update batch.
     func chat2PushRequest(chatId: String, batchId: String) async -> URLRequest? {
-        guard let token = await currentToken() else { return nil }
-        var url = edgeURL.appending(path: "chat2/\(chatId)/rows")
-        url.append(queryItems: [URLQueryItem(name: "batchId", value: batchId),
-                                URLQueryItem(name: "device", value: deviceId)])
-        var request = URLRequest(url: url)
+        var url = peerURL.appending(path: "chat2/\(chatId)/rows")
+        url.append(queryItems: [.init(name: "batchId", value: batchId),
+                                .init(name: "device", value: deviceId)])
+        guard var request = authorized(url, token: await currentToken()) else { return nil }
         request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         return request
     }
 
-    /// GET /registry/{orgId}/rows?since= — the WS hello's delta answer over
-    /// plain HTTPS. `beat=1` doubles as a presence beat.
     func registryRowsRequest(since: UInt64?) async -> URLRequest? {
-        guard let token = await currentToken() else { return nil }
-        var url = edgeURL.appending(path: "registry/\(orgId)/rows")
+        var url = peerURL.appending(path: "registry/\(profileId)/rows")
         var items = [URLQueryItem(name: "device", value: deviceId),
-                     URLQueryItem(name: "beat", value: "1")]
-        if let since { items.append(URLQueryItem(name: "since", value: String(since))) }
+                     .init(name: "beat", value: "1")]
+        if let since { items.append(.init(name: "since", value: String(since))) }
         url.append(queryItems: items)
-        // Bearer header, never ?token=: HTTP supports headers (unlike WS
-        // upgrades), and query strings can reach request logs.
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        return request
+        return authorized(url, token: await currentToken())
     }
 
-    /// POST /registry/{orgId}/push — one op batch over plain HTTPS (LWW
-    /// clocks make replays apply zero ops).
     func registryPushRequest() async -> URLRequest? {
-        guard let token = await currentToken() else { return nil }
-        var url = edgeURL.appending(path: "registry/\(orgId)/push")
-        url.append(queryItems: [URLQueryItem(name: "device", value: deviceId)])
-        var request = URLRequest(url: url)
+        var url = peerURL.appending(path: "registry/\(profileId)/push")
+        url.append(queryItems: [.init(name: "device", value: deviceId)])
+        guard var request = authorized(url, token: await currentToken()) else { return nil }
         request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
     }
 
-    /// Decode the JWT payload's `exp` (60s early-refresh margin). Unparseable
-    /// tokens read as non-expired — the server is the arbiter.
-    private static func isExpired(jwt: String) -> Bool {
-        let segments = jwt.split(separator: ".")
-        guard segments.count == 3 else { return false }
-        var base64 = String(segments[1]).replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        while base64.count % 4 != 0 { base64 += "=" }
-        guard let data = Data(base64Encoded: base64),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let exp = obj["exp"] as? TimeInterval else { return false }
-        return Date().timeIntervalSince1970 > exp - 60
-    }
-
-    /// GET /device/{deviceId}/status → whether the device's relay HOST socket
-    /// is currently attached (distinct from workspace presence).
     func deviceStatus(deviceId: String) async -> String {
-        guard let token = await currentToken() else { return "no-token" }
-        var request = URLRequest(url: edgeURL.appending(path: "device/\(deviceId)/status"))
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let request = authorized(peerURL.appending(path: "device/\(deviceId)/status"),
+                                       token: await currentToken()),
+              let (data, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse else { return "unreachable" }
         return "http=\(http.statusCode) body=\(String(data: data, encoding: .utf8) ?? "")"
     }
 
-    /// POST /device/{deviceId}/nudge {chatId} — wake a cold host to drain the
-    /// command queue.
     func nudge(deviceId: String, chatId: String) async {
-        guard let token = await currentToken() else { return }
-        var request = URLRequest(url: edgeURL.appending(path: "device/\(deviceId)/nudge"))
+        guard var request = authorized(peerURL.appending(path: "device/\(deviceId)/nudge"),
+                                       token: await currentToken()) else { return }
         request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["chatId": chatId])
         _ = try? await URLSession.shared.data(for: request)
+    }
+
+    private func authorized(_ url: URL, token: String?) -> URLRequest? {
+        guard let token else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return request
     }
 }

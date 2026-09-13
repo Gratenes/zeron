@@ -1,12 +1,9 @@
-// Registry merge core + client-side doc — the Swift mirror of
-// edge/src/registry-core.ts (pure op/row semantics) and
-// crates/doc/src/registry.rs (RegistryDoc: authoritative rows + pending
-// overlay). See docs/registry-sync.md.
+// Registry merge core + client-side doc, matching crates/doc/src/registry.rs:
+// authoritative rows plus the pending optimistic overlay. See docs/registry-sync.md.
 //
-// The registry stores CURRENT STATE ONLY: a row is a bag of fields, each
-// field carries the HLC of its last write, and a write applies iff its clock
-// beats the stored one. The shared conformance vectors live in
-// ZeronTests/RegistryCoreTests.swift — keep all three languages in sync.
+// The registry stores CURRENT STATE ONLY: a row is a bag of fields, each field
+// carries the HLC of its last write, and a write applies iff its clock beats the
+// stored one. Shared Swift/Rust conformance vectors must remain in sync.
 
 import Foundation
 
@@ -142,7 +139,7 @@ struct HlcClock: Codable, Hashable, Sendable {
     }
 }
 
-// MARK: - Rows and ops (wire-compatible with edge/src/registry-core.ts)
+// MARK: - Stable rows and operations
 
 struct RegistryRow: Hashable, Codable, Sendable {
     var kind: String

@@ -30,10 +30,10 @@ use zeron_rpc::methods;
 
 /// use-attachments.ts `MAX_ATTACHMENT_BYTES`.
 pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
-/// Base64 chars per `UploadChunk`, sized against the relay's hard ceiling:
-/// Cloudflare caps a WebSocket message at 1 MiB, and a chunk rides one relay
-/// frame (JSON envelope + uleb header add ~150 bytes) — 680 000 chars ≈
-/// 510 KB binary leaves ~35% headroom. Multiple of 4 so a slice of the
+/// Base64 chars per `UploadChunk`, sized against the application's 1 MiB
+/// relay-frame ceiling. A chunk rides one frame (JSON envelope + uleb header add
+/// ~150 bytes), so 680 000 chars ≈510 KB binary leaves ample headroom. Multiple
+/// of 4 so a slice of the
 /// whole-file base64 stays independently decodable. The old 60 000 (45 KB)
 /// made a 3 MB screenshot ~70 sequential round trips — each one a stall
 /// opportunity on a flaky link.
@@ -651,12 +651,12 @@ pub fn attachment_snapshot(device_id: &str, path: &str) -> AttachmentSnapshot {
             // resolves the rewritten ref instantly instead of blanking the
             // thumbnail into a skeleton while the bytes round-trip
             // (2026-08-19 "photo disappears after it finishes sending").
-            if let Some(image) = upload_alias_id8(path)
-                .and_then(|id8| match cache.map.get(&alias_key(device_id, &id8)) {
+            if let Some(image) = upload_alias_id8(path).and_then(|id8| {
+                match cache.map.get(&alias_key(device_id, &id8)) {
                     Some(CacheEntry::Loaded { image, .. }) => Some(image.clone()),
                     _ => None,
-                })
-            {
+                }
+            }) {
                 cache.insert_loaded(key(device_id, path), image.clone());
                 return AttachmentSnapshot::Loaded(image);
             }
@@ -671,9 +671,8 @@ pub fn attachment_snapshot(device_id: &str, path: &str) -> AttachmentSnapshot {
 fn upload_alias_id8(path: &str) -> Option<String> {
     let base = std::path::Path::new(path).file_name()?.to_str()?;
     let (id8, _) = base.split_at_checked(8)?;
-    (base.as_bytes().get(8) == Some(&b'-')
-        && id8.bytes().all(|b| b.is_ascii_alphanumeric()))
-    .then(|| id8.to_string())
+    (base.as_bytes().get(8) == Some(&b'-') && id8.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then(|| id8.to_string())
 }
 
 fn alias_key(device_id: &str, id8: &str) -> (String, String) {
@@ -941,8 +940,8 @@ mod tests {
 
     #[test]
     fn upload_chunk_fits_the_relay_frame_ceiling() {
-        // Cloudflare caps a WebSocket message at 1 MiB; the chunk rides one
-        // relay frame with a small JSON envelope + uleb header.
+        // The application bounds relay frames at 1 MiB; leave room for the
+        // small JSON envelope and uleb header.
         assert!(UPLOAD_CHUNK_B64_CHARS + 1_024 < 1_048_576);
         // A slice of the whole-file base64 must stay independently decodable.
         assert_eq!(UPLOAD_CHUNK_B64_CHARS % 4, 0);
@@ -955,7 +954,10 @@ mod tests {
         // Exact multiple: no trailing empty chunk.
         let exact = chunk_ranges(UPLOAD_CHUNK_B64_CHARS * 2);
         assert_eq!(exact.len(), 2);
-        assert_eq!(exact[1], (1, UPLOAD_CHUNK_B64_CHARS..UPLOAD_CHUNK_B64_CHARS * 2));
+        assert_eq!(
+            exact[1],
+            (1, UPLOAD_CHUNK_B64_CHARS..UPLOAD_CHUNK_B64_CHARS * 2)
+        );
         // Partial tail.
         let partial = chunk_ranges(UPLOAD_CHUNK_B64_CHARS + 7);
         assert_eq!(partial.len(), 2);

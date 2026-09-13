@@ -103,7 +103,6 @@ pub trait Harness: Send + Sync {
         self.models().await
     }
 
-
     /// Run an isolated title request. Drivers must opt in with title-specific
     /// instructions and restrictions; never fall back to an ordinary coding run.
     async fn run_title(

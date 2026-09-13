@@ -148,9 +148,8 @@ for (const referrer of ["not a URL", "about:blank", "file:///private/secret"]) {
 }
 
 for (const [id, placement] of Object.entries(placements)) {
-  test(`tracks ${placement} download clicks with the current release version`, () => {
+  test(`tracks ${placement} clicks to the current GitHub release`, () => {
     const { requests, links } = load();
-    links[id].href = "https://zeron.sh/releases/zeron-1.2.3-macos-arm64.dmg?private=secret#fragment";
     links[id].activate();
     assert.equal(requests.length, 2);
     const { payload } = requests[1];
@@ -158,18 +157,18 @@ for (const [id, placement] of Object.entries(placements)) {
     assert.equal(payload.properties.distinct_id, requests[0].payload.properties.distinct_id);
     assert.equal(payload.properties.$session_id, requests[0].payload.properties.$session_id);
     assert.equal(payload.properties.placement, placement);
-    assert.equal(payload.properties.version, "1.2.3");
+    assert.equal(payload.properties.version, "latest");
     assert.equal(payload.properties.platform, "macos");
     assert.equal(payload.properties.architecture, "arm64");
-    assert.doesNotMatch(requests[1].body, /private|secret|fragment/);
   });
 }
 
-test("tracks the pinned fallback download when release lookup has not completed", () => {
-  const { requests, links } = load();
-  links["hero-download"].activate();
-  assert.equal(requests.length, 2);
-  assert.match(requests[1].payload.properties.version, /^\d+\.\d+\.\d+$/);
+test("HTML release links need no version lookup or hardcoded asset version", () => {
+  assert.doesNotMatch(html, /zeron-\d+\.\d+\.\d+-macos-arm64\.dmg/);
+  assert.doesNotMatch(html, /fetch\([^)]*(manifest\.json|latest\.txt)/);
+  for (const id of Object.keys(placements)) {
+    assert.equal(load().links[id].href, "https://github.com/wasimysaid/Kratos/releases/latest");
+  }
 });
 
 test("counts middle clicks but ignores right clicks", () => {
@@ -179,7 +178,11 @@ test("counts middle clicks but ignores right clicks", () => {
   assert.equal(requests.length, 2);
 });
 
-for (const href of ["https://example.invalid/releases/zeron-1.2.3-macos-arm64.dmg", "https://zeron.sh/private", "invalid"]) {
+for (const href of [
+  "https://example.invalid/wasimysaid/Kratos/releases/latest",
+  "https://github.com/wasimysaid/Kratos/releases/download/v1.2.3/asset",
+  "invalid",
+]) {
   test(`does not report unexpected download targets: ${href}`, () => {
     const { requests, links } = load();
     links["hero-download"].href = href;

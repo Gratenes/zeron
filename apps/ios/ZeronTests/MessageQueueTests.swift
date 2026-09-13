@@ -44,10 +44,9 @@ final class MessageQueueTests: XCTestCase {
 
     private func store() -> SessionStore {
         SessionStore(chatId: "chat-1", config: AppConfig(
-            edgeURL: URL(string: "https://example.test")!,
-            mode: .dev, userId: "u1", orgId: "o1",
+            peerURL: URL(string: "https://example.test")!, profileId: "profile-test",
             deviceId: "ios-test", deviceName: "Dan’s iPhone",
-            devBearer: "cmt_dev_test"))
+            bearer: "cmt_dev_test"))
     }
 
     private func texts(_ store: SessionStore) -> [String] {

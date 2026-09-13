@@ -124,15 +124,16 @@ fn codex_login_honors_override_only_installation() {
     probe(dir.path(), Some(&fake), true);
 }
 
-/// The npm layout — a `codex.cmd` shim on PATH with the payload buried in
-/// `node_modules` — must log in through the same resolution the harness uses.
+/// npm exposes `codex.cmd` on Windows and `codex` on Unix. Login must
+/// use the same platform-native PATH shim as the harness.
 #[test]
-fn codex_login_runs_the_npm_cmd_shim() {
+fn codex_login_runs_the_npm_platform_shim() {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     // The shim plays both roles itself.
-    std::fs::copy(fake_codex(&bin), bin.join("codex.cmd")).unwrap();
+    let shim = if cfg!(windows) { "codex.cmd" } else { "codex" };
+    std::fs::copy(fake_codex(&bin), bin.join(shim)).unwrap();
     probe(&bin, None, true);
 }
 

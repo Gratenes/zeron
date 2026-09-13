@@ -1,5 +1,5 @@
-//! Generates a session-doc snapshot fixture for the cross-language compat check
-//! (`edge/scripts/compat-check.mjs`). Usage: `cargo run -p zeron-doc --example gen_fixture -- <out>`
+//! Generates a session-doc snapshot fixture for native/mobile compatibility checks.
+//! Usage: `cargo run -p zeron-doc --example gen_fixture -- <out>`
 
 use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,

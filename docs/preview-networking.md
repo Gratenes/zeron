@@ -43,23 +43,24 @@ checkout therefore changes the list without copying paths or entering ports.
 On macOS 14 and later, WebKit receives a per-domain HTTP CONNECT configuration
 for preview hostnames, avoiding older macOS DNS behavior without system changes.
 The CONNECT endpoint admits only known preview names at the proxy port, and its
-tunnels share bounded limits and account cancellation. Other website traffic
+tunnels share bounded limits and profile cancellation. Other website traffic
 retains normal routing.
 
 The loopback proxy validates the Host against its catalog, then opens an opaque
 service ID through a transport-independent multiplexer. Locally, framed streams
-travel over a socket pair. Remotely, the identical frames travel over one ordered,
-reliable WebRTC DataChannel. Remote metadata never authorizes an arbitrary TCP
-address: the hosting device resolves only its own live service IDs.
+travel over a socket pair. Remotely, the same bounded frames travel through the
+authenticated preview WebSocket on the durable peer; the peer stamps the source
+and routes only to a paired target device. The hosting engine resolves only its
+own current service IDs, so remote metadata never authorizes an arbitrary TCP
+address.
 
 Frames have a one-byte kind, a big-endian 32-bit stream ID, and a bounded payload.
 Kinds are OPEN, DATA, END, CANCEL, WS_OPEN, WS_DATA, WS_CLOSE, READY and CREDIT.
-Socket transport prefixes frames with a big-endian 32-bit length; DataChannel
-messages already provide framing. Peers allocate opposite stream-ID parity.
-DATA payloads are at most 8 KiB. Each stream has a 64 KiB receive window; connection
-queues and the SCTP send buffer are bounded. Up to 64 streams share a connection.
-END half-closes; CANCEL tears down both directions. Graceful shutdown drains the
-last buffered bytes, whereas dropping an unfinished request cancels promptly.
+Each device pair gets an independent multiplexer and deterministic stream-ID
+parity. DATA payloads are at most 8 KiB; each stream has a 64 KiB receive window;
+connection queues are bounded; and up to 64 streams share a connection. END
+half-closes, CANCEL tears down both directions, graceful shutdown drains buffered
+bytes, and dropping an unfinished request cancels promptly.
 
 Hyper streams request and response bodies. The proxy removes hop-by-hop headers,
 preserves Host and Origin together (including Next.js Server Actions), sets
@@ -67,39 +68,27 @@ X-Forwarded-Host, and rewrites absolute localhost redirects. Set-Cookie and othe
 end-to-end headers remain intact. WebSocket upgrades retain their byte stream,
 subprotocol and close handshake, allowing Vite HMR through the same URL.
 
-## Presence and P2P
+## Presence and authenticated relay
 
-The Worker authenticates the existing access token, verifies the organization
-claim, and derives a PreviewRoom name from the verified organization and user.
-Clients cannot select another user's room. The coordinator stamps device sender
-identity and accepts only bounded service catalogs and pairing SDP. Gathered ICE
-candidates are included in SDP, along with the DTLS fingerprint. Binary frames
-and arbitrary proxy protocol messages are rejected.
+Each paired engine authenticates to the durable peer with its profile-bound
+device identity. The peer accepts bounded service catalogs, stamps the source of
+opaque preview frames, and prevents clients from choosing another profile or
+forging a sender. Catalog presence has a heartbeat lease; disconnect and
+revocation remove advertised routes and active peer multiplexers.
 
-Presence has a heartbeat lease, hibernation-safe catalog storage and periodic
-credential refresh. Disconnects clear advertised routes and peer connections.
-Only the lexicographically lower device creates offers, avoiding simultaneous
-offer collisions. DataChannels are opened lazily when a preview is requested.
-DTLS authenticates the fingerprint exchanged through the authenticated signaling
-connection. Application requests, response bodies and WebSocket messages never
-pass through the Durable Object.
-
-The initial transport uses host candidates and public STUN, without a TURN
-service or a cloud byte-relay fallback. Networks that prohibit direct ICE
-connectivity return a bounded connection error. Deploy the Worker with its v4
-PreviewRoom migration to enable cross-device coordination; local previews work
-independently of edge availability. macOS and Linux currently provide discovery.
+Tailcat protects the private HTTP/WebSocket path to the peer. Zeron's application
+authorization, target assignment, frame bounds, flow control, and service-ID
+containment remain mandatory above that transport. A relay connection is opened
+lazily when a remote preview is requested. Local previews remain independent of
+peer availability. macOS and Linux currently provide process discovery.
 
 ## Validation
 
 `cargo test --locked -p zeron-preview` covers real process/cwd isolation, non-HTTP
 exclusion, live disappearance, persistent aliases, port changes, concurrent
-streams, slow readers, cancellation, large bodies, streaming HTTP headers and
-redirects, WebSocket traffic, and a real WebRTC pair in both directions.
-
-`npm --prefix edge test` includes real workerd tests for room isolation,
-organization authorization, stamped signaling, disconnect cleanup and binary
-traffic rejection. CI runs networking tests on Linux and macOS.
+streams, slow readers, cancellation, large bodies, streaming HTTP headers,
+redirects, WebSocket traffic, bounded peer envelopes, and authenticated catalog
+routing through a local Rust peer fixture.
 
 Build `cargo build -p zeron-ui --example preview-fixture --features browser-fixture`.
 Run the fixture with an output directory, an available display and `VITE_BINARY`
@@ -108,8 +97,3 @@ an isolated project, discovers them through daemon RPC and waits for a native
 click on Vite's Open button. It then verifies HMR, disappearance and a port-change
 restart while capturing the native UI. Screenshots/videos belong in PR user
 attachments, not the repository.
-
-The opt-in `coordinator` integration test connects two authenticated clients to a
-local Worker, advertises a service, pairs over SDP/ICE, then transfers a 4 MiB
-HTTP response through the remote hostname. Run it with
-`ZERON_PREVIEW_TEST_EDGE=http://127.0.0.1:27641 cargo test -p zeron-preview --test coordinator -- --ignored`.

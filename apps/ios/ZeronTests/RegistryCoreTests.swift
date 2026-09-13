@@ -1,7 +1,5 @@
-// Registry merge conformance vectors — a 1:1 port of
-// edge/src/registry-core.test.ts (same inputs, same expected rows). These are
-// the cross-language vectors shared with registry-core.ts (vitest) and
-// crates/doc/src/registry.rs (cargo test); change all three together.
+// Registry merge conformance vectors shared with crates/doc/src/registry.rs.
+// Swift and Rust use the same inputs and expected rows.
 
 import XCTest
 @testable import Zeron

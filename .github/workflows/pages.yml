@@ -1,0 +1,55 @@
+name: landing
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/landing/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test apps/landing/telemetry.test.mjs
+      - uses: actions/configure-pages@v5
+        id: pages
+      - name: Prepare static site for repository or custom-domain hosting
+        env:
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}
+        run: |
+          mkdir -p target/pages
+          cp -a apps/landing/public/. target/pages/
+          python3 - <<'PY'
+          import os, pathlib, re
+          base = os.environ.get('BASE_PATH', '').rstrip('/')
+          if base and not re.fullmatch(r'/[A-Za-z0-9_./-]+', base):
+              raise SystemExit('invalid Pages base path')
+          for file in pathlib.Path('target/pages').rglob('*.html'):
+              text = file.read_text()
+              text = re.sub(r'((?:src|href|content)=")/(?!/)', lambda m: m[1] + base + '/', text)
+              file.write_text(text)
+          pathlib.Path('target/pages/.nojekyll').touch()
+          PY
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/pages
+      - uses: actions/deploy-pages@v4
+        id: deployment

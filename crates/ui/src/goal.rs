@@ -26,7 +26,9 @@ fn details(goal: &GoalState) -> String {
         text.push_str("\n\n");
         text.push_str(reason);
     }
-    text.push_str("\n\n/goal show · /goal pause · /goal resume\n/goal edit <objective> · /goal clear");
+    text.push_str(
+        "\n\n/goal show · /goal pause · /goal resume\n/goal edit <objective> · /goal clear",
+    );
     text
 }
 
@@ -54,9 +56,7 @@ pub(crate) fn render(goal: &GoalState, theme: &Theme) -> Option<gpui::AnyElement
                     .text_color(theme.text_muted)
                     .child(SharedString::from(goal.objective.clone())),
             )
-            .tooltip(move |_, cx| {
-                cx.new(|_| GoalDetails(detail.clone())).into()
-            })
+            .tooltip(move |_, cx| cx.new(|_| GoalDetails(detail.clone())).into())
             .into_any_element(),
     )
 }
@@ -95,8 +95,10 @@ mod tests {
     #[test]
     fn only_public_pause_and_block_reasons_are_shown() {
         let mut goal = GoalState {
-            id: "goal".into(), objective: "Ship the fix".into(),
-            phase: GoalPhase::Paused, reason: Some("Waiting for your decision".into()),
+            id: "goal".into(),
+            objective: "Ship the fix".into(),
+            phase: GoalPhase::Paused,
+            reason: Some("Waiting for your decision".into()),
             completion: None,
         };
         assert!(details(&goal).contains("Ship the fix\n\nWaiting for your decision"));
@@ -108,11 +110,22 @@ mod tests {
 
     #[test]
     fn only_negotiated_controls_bypass_queue_and_start_and_resume_remain_prompts() {
-        for prompt in ["/goal", "/goal show", "/goal pause", "/goal clear", "/goal edit ship it"] {
+        for prompt in [
+            "/goal",
+            "/goal show",
+            "/goal pause",
+            "/goal clear",
+            "/goal edit ship it",
+        ] {
             assert!(is_control(true, prompt));
             assert!(!is_control(false, prompt));
         }
-        for prompt in ["/goal ship it", "/goal resume", "/goal resume continue", "/goalkeeper"] {
+        for prompt in [
+            "/goal ship it",
+            "/goal resume",
+            "/goal resume continue",
+            "/goalkeeper",
+        ] {
             assert!(!is_control(true, prompt));
         }
     }

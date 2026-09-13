@@ -43,8 +43,6 @@ struct RootView: View {
             switch model.phase {
             case .signedOut:
                 SignInView()
-            case .pickingOrg(let tokens, let orgs):
-                OrgPickerView(tokens: tokens, orgs: orgs)
             case .ready:
                 HomeView()
             }

@@ -2,11 +2,11 @@
 //! background checker + `ApplyUpdate`), the CLI (`zeron update`), and the UI
 //! (the sidebar update strip + macOS bundle swap).
 //!
-//! Release layout (see `.github/workflows/release.yml` and `edge/src/install.sh`):
-//! artifacts live in the `comet-native-releases` R2 bucket, served pre-auth at
-//! `{edge}/releases/*`. `manifest.json` carries the latest version plus a
-//! sha256 per artifact; `latest.txt` (version only) remains as the fallback for
-//! releases published before the manifest existed.
+//! Release layout (see `.github/workflows/release.yml` and `scripts/install.sh`):
+//! versioned artifacts and a checksum manifest are attached to each GitHub
+//! Release. The stable `releases/latest/download` URLs redirect to the newest
+//! non-prerelease release, so update checks do not depend on the application
+//! edge service.
 //!
 //! Install kinds and their update paths:
 //! - **Managed** (`~/.zeron/app/<ver>` + `current` symlink — the curl|sh
@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context as _, bail};
+use anyhow::{Context as _, bail, ensure};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -31,6 +31,9 @@ use tokio::sync::watch;
 #[cfg(windows)]
 pub mod windows;
 
+#[cfg(any(windows, test))]
+mod windows_archive;
+
 /// The version compiled into this binary (the workspace version).
 pub const fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -38,7 +41,7 @@ pub const fn current_version() -> &'static str {
 
 /// Background check cadence.
 const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
-/// Retry sooner after a failed check (offline boot, transient edge error).
+/// Retry sooner after a failed check (offline boot, transient release-host error).
 const CHECK_RETRY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 /// First check waits out engine boot (room joins, doc re-sync).
 const CHECK_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(20);
@@ -46,16 +49,19 @@ const CHECK_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(
 /// this often.
 const IDLE_RECHECK: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
+/// Stable feed for the newest public GitHub Release.
+pub const DEFAULT_RELEASES_URL: &str =
+    "https://github.com/wasimysaid/Kratos/releases/latest/download";
+
 // ---------------------------------------------------------------------------
 // Release metadata
 // ---------------------------------------------------------------------------
 
-/// `{edge}/releases/manifest.json` — written by the release workflow.
+/// `manifest.json` attached to every GitHub Release by the release workflow.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: String,
-    /// Artifact file name → metadata. Empty for pre-manifest releases resolved
-    /// via `latest.txt` — downloads then skip checksum verification (with a log).
+    /// Artifact file name → required SHA-256 metadata.
     #[serde(default)]
     pub files: BTreeMap<String, FileMeta>,
 }
@@ -114,8 +120,8 @@ pub fn mac_app_artifact(version: &str) -> String {
 }
 
 /// Strictly-newer dotted-numeric compare (`0.1.10` > `0.1.9` > `0.1`).
-/// Unparseable versions never count as newer — a garbage `latest.txt` must not
-/// trigger an update loop.
+/// Unparseable versions never count as newer — malformed release metadata must
+/// not trigger an update loop.
 pub fn version_newer(latest: &str, current: &str) -> bool {
     fn parts(v: &str) -> Option<Vec<u64>> {
         let nums: Vec<u64> = v
@@ -132,45 +138,42 @@ pub fn version_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-/// Fetch the newest release metadata: `manifest.json`, falling back to
-/// `latest.txt` (version only, no checksums) for pre-manifest releases.
+/// Fetch the newest GitHub Release metadata.
+///
+/// The `edge_url` argument remains temporarily for caller API compatibility but
+/// is deliberately not used to derive the release feed. Set
+/// `ZERON_RELEASES_URL` for an explicit mirror/test feed; Windows portable
+/// packages can also carry an HTTPS feed in `zeron-update.json`.
 pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
     let base = release_base(edge_url)?;
-    let client = http_client()?;
+    fetch_latest_from_base(&base).await
+}
+
+async fn fetch_latest_from_base(base: &str) -> anyhow::Result<Manifest> {
     let manifest_url = format!("{base}/manifest.json");
-    match client.get(&manifest_url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let manifest: Manifest = resp.json().await.context("parsing manifest.json")?;
-            if manifest.version.trim().is_empty() {
-                bail!("manifest.json has an empty version");
-            }
-            return Ok(manifest);
-        }
-        Ok(resp) => {
-            tracing::debug!(status = %resp.status(), "manifest.json unavailable; trying latest.txt")
-        }
-        Err(err) => tracing::debug!(error = %err, "manifest.json fetch failed; trying latest.txt"),
-    }
-    let latest_url = format!("{base}/latest.txt");
-    let version = client
-        .get(&latest_url)
+    let manifest: Manifest = http_client()?
+        .get(&manifest_url)
         .send()
         .await
-        .context("fetching latest.txt")?
+        .with_context(|| format!("fetching {manifest_url}"))?
         .error_for_status()
-        .context("fetching latest.txt")?
-        .text()
+        .with_context(|| format!("fetching {manifest_url}"))?
+        .json()
         .await
-        .context("reading latest.txt")?
-        .trim()
-        .to_string();
-    if version.is_empty() {
-        bail!("latest.txt is empty");
-    }
-    Ok(Manifest {
-        version,
-        files: BTreeMap::new(),
-    })
+        .context("parsing manifest.json")?;
+    ensure!(
+        valid_version(&manifest.version),
+        "manifest.json has an invalid version"
+    );
+    Ok(manifest)
+}
+
+fn valid_version(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let valid = parts
+        .by_ref()
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+    valid && version.matches('.').count() == 2
 }
 
 fn http_client() -> anyhow::Result<reqwest::Client> {
@@ -180,7 +183,7 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
         .context("building http client")
 }
 
-fn release_base(edge_url: &str) -> anyhow::Result<String> {
+fn release_base(_edge_url: &str) -> anyhow::Result<String> {
     if let Ok(url) = std::env::var("ZERON_RELEASES_URL")
         && !url.trim().is_empty()
     {
@@ -190,7 +193,7 @@ fn release_base(edge_url: &str) -> anyhow::Result<String> {
     if let Some(url) = windows::release_url()? {
         return Ok(url.trim_end_matches('/').to_owned());
     }
-    Ok(format!("{}/releases", edge_url.trim_end_matches('/')))
+    Ok(DEFAULT_RELEASES_URL.to_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -300,23 +303,39 @@ fn detect_install_from_for_os(exe: &Path, home: Option<&Path>, os: &str) -> Inst
 // Download + verify
 // ---------------------------------------------------------------------------
 
-/// Stream `{edge}/releases/<file>` to `dest`, verifying the manifest sha256 when
-/// present. Writes through a `.partial` sidecar so an interrupted download never
-/// leaves a plausible-looking artifact behind.
+/// Stream a GitHub Release asset to `dest`, requiring and verifying its
+/// manifest SHA-256. Writes through a `.partial` sidecar so an interrupted
+/// download never leaves a plausible-looking artifact behind.
 pub async fn download_release_file(
     edge_url: &str,
     manifest: &Manifest,
     file: &str,
     dest: &Path,
 ) -> anyhow::Result<()> {
-    let url = format!("{}/{file}", release_base(edge_url)?);
-    let expected = manifest.files.get(file).and_then(|m| m.sha256.as_deref());
-    if expected.is_none() {
-        tracing::warn!(
-            file,
-            "no checksum in release metadata; skipping verification"
-        );
-    }
+    let base = release_base(edge_url)?;
+    download_release_file_from_base(&base, manifest, file, dest).await
+}
+
+async fn download_release_file_from_base(
+    base: &str,
+    manifest: &Manifest,
+    file: &str,
+    dest: &Path,
+) -> anyhow::Result<()> {
+    ensure!(
+        Path::new(file).file_name().is_some_and(|name| name == file),
+        "invalid release asset name"
+    );
+    let expected = manifest
+        .files
+        .get(file)
+        .and_then(|meta| meta.sha256.as_deref())
+        .context("release asset requires a SHA-256 checksum")?;
+    ensure!(
+        expected.len() == 64 && expected.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid SHA-256 checksum for {file}"
+    );
+    let url = format!("{base}/{file}");
     let partial = dest.with_extension("partial");
     let resp = http_client()?
         .get(&url)
@@ -337,12 +356,10 @@ pub async fn download_release_file(
     }
     out.flush().await.ok();
     drop(out);
-    if let Some(expected) = expected {
-        let actual = format!("{:x}", hasher.finalize());
-        if !actual.eq_ignore_ascii_case(expected.trim()) {
-            tokio::fs::remove_file(&partial).await.ok();
-            bail!("checksum mismatch for {file}: expected {expected}, got {actual}");
-        }
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected) {
+        tokio::fs::remove_file(&partial).await.ok();
+        bail!("checksum mismatch for {file}: expected {expected}, got {actual}");
     }
     tokio::fs::rename(&partial, dest)
         .await
@@ -604,7 +621,7 @@ fn auto_update_enabled() -> bool {
 /// to its live-run and open-terminal registries. `None` = no gate.
 pub type QuiescentCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// Background release checker: polls `{edge}/releases` on a 6h cadence and
+/// Background release checker: polls the GitHub Release feed on a 6h cadence and
 /// publishes [`UpdateStatus`] over a watch channel (the `UpdateStatus` RPC
 /// stream). Managed installs with `ZERON_AUTO_UPDATE` set stage + apply + service
 /// restart on their own — but only in a quiet window: while `quiescent` reports
@@ -642,7 +659,7 @@ impl Updater {
     }
 
     /// Stop the check loop and wait for it to exit — a replaced runtime must
-    /// not keep polling `{edge}/releases` (or auto-applying) in the background.
+    /// not keep polling the release feed (or auto-applying) in the background.
     /// Idempotent, and callable from any clone.
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
@@ -866,6 +883,51 @@ mod tests {
             format!("zeron-0.2.0-{os}-{arch}.tar.gz")
         );
         assert!(mac_app_artifact("0.2.0").ends_with("-app.tar.gz"));
+    }
+
+    #[test]
+    fn default_feed_is_github_and_does_not_derive_from_edge() {
+        if std::env::var_os("ZERON_RELEASES_URL").is_none() {
+            assert_eq!(
+                release_base("https://legacy.example.invalid").unwrap(),
+                DEFAULT_RELEASES_URL
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn downloads_require_a_well_formed_checksum_before_network_io() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = "zeron-1.2.3-linux-x86_64.tar.gz";
+        let mut manifest = Manifest {
+            version: "1.2.3".into(),
+            files: BTreeMap::new(),
+        };
+        let error = download_release_file_from_base(
+            "http://127.0.0.1:1",
+            &manifest,
+            file,
+            &tmp.path().join(file),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("requires a SHA-256"));
+
+        manifest.files.insert(
+            file.into(),
+            FileMeta {
+                sha256: Some("not-a-digest".into()),
+            },
+        );
+        let error = download_release_file_from_base(
+            "http://127.0.0.1:1",
+            &manifest,
+            file,
+            &tmp.path().join(file),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("invalid SHA-256"));
     }
 
     #[cfg(windows)]

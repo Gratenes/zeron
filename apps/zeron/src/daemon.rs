@@ -1,11 +1,10 @@
 //! `zeron daemon …` — install/manage `zeron headless` as a background service:
 //! a systemd **user** unit on Linux (the VPS deployment target), a launchd
 //! LaunchAgent on macOS. The unit runs the current executable with the
-//! `ZERON_*` environment captured at install time, so
-//! `ZERON_EDGE_URL=… zeron daemon install` bakes that override in.
-//!
-//! Auth is decoupled: without a saved session the service remains up on the
-//! local-only profile. `zeron login` and a service restart opt into sync.
+//! selected environment captured at install time. Peer connectivity and trusted
+//! identity are loaded from the private installation profile, never environment
+//! bearer tokens. A fresh service stays local; `zeron peer init` or `zeron pair`
+//! followed by a service restart enables the paired profile.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,7 +12,7 @@ use std::process::Command;
 use anyhow::{Context, bail};
 
 const LAUNCHD_LABEL: &str = "sh.zeron.app";
-/// Same unit name the curl|sh installer (`edge/src/install.sh`) writes, so
+/// Same unit name the checksummed release installer (`scripts/install.sh`) writes, so
 /// `zeron daemon …` manages that installation rather than a competing copy.
 const SYSTEMD_UNIT: &str = "zeron.service";
 
@@ -23,13 +22,10 @@ const SYSTEMD_UNIT: &str = "zeron.service";
 const CAPTURED_ENV: &[&str] = &[
     "PATH",
     "ZERON_DATA_DIR",
-    "ZERON_EDGE_URL",
-    "ZERON_EDGE_TOKEN",
-    "ZERON_ORG_ID",
-    "ZERON_WORKOS_CLIENT_ID",
-    "ZERON_WORKOS_API_BASE",
+    "ZERON_TAILCAT_ADAPTER",
+    "ZERON_RELEASES_URL",
+    "ZERON_AUTO_UPDATE",
     "ZERON_IPC_PORT",
-    "ZERON_CALLBACK_PORT",
     "ZERON_HARNESS",
     "ZERON_DEVICE_NAME",
     "RUST_LOG",
@@ -70,7 +66,7 @@ pub fn install(data_dir: &Path) -> anyhow::Result<()> {
         bail!("zeron daemon is only supported on macOS (launchd) and Linux (systemd)");
     }
     println!(
-        "Without a saved account the engine stays local-only; sign-in and restart are optional for sync."
+        "Without a paired profile the engine stays local-only; initialize or pair a peer, then restart to enable sync."
     );
     println!(
         "Logs: {}",
@@ -383,13 +379,16 @@ mod tests {
             Path::new("/usr/local/bin/zeron"),
             &[
                 ("PATH".into(), "/usr/bin:/bin".into()),
-                ("ZERON_EDGE_URL".into(), "https://edge.example".into()),
+                (
+                    "ZERON_TAILCAT_ADAPTER".into(),
+                    "/opt/zeron/kratos-tailcat".into(),
+                ),
                 ("RUST_LOG".into(), "info,zeron=\"debug\"".into()),
             ],
         );
         assert!(unit.contains("ExecStart=/usr/local/bin/zeron headless\n"));
         assert!(unit.contains("Environment=\"PATH=/usr/bin:/bin\"\n"));
-        assert!(unit.contains("Environment=\"ZERON_EDGE_URL=https://edge.example\"\n"));
+        assert!(unit.contains("Environment=\"ZERON_TAILCAT_ADAPTER=/opt/zeron/kratos-tailcat\"\n"));
         // Inner quotes escaped so systemd re-parses the value verbatim.
         assert!(unit.contains("Environment=\"RUST_LOG=info,zeron=\\\"debug\\\"\"\n"));
         assert!(unit.contains("StartLimitIntervalSec=60\n"));
@@ -405,7 +404,7 @@ mod tests {
     fn curl_installer_always_starts_the_local_capable_service() {
         // Git for Windows can check out this source fixture with CRLF. These
         // assertions cover the installer directives, not checkout line endings.
-        let installer = include_str!("../../../edge/src/install.sh").replace("\r\n", "\n");
+        let installer = include_str!("../../../scripts/install.sh").replace("\r\n", "\n");
         assert!(!installer.contains("session.json"));
         assert!(installer.contains("StartLimitIntervalSec=60\n"));
         assert!(installer.contains("StartLimitBurst=5\n"));
@@ -438,13 +437,16 @@ mod tests {
     fn launchd_plist_shape() {
         let plist = render_launchd_plist(
             Path::new("/Users/x/zeron & co/zeron"),
-            &[("ZERON_EDGE_URL".into(), "https://e?a=1&b=2".into())],
+            &[(
+                "ZERON_TAILCAT_ADAPTER".into(),
+                "/Users/x/adapter?a=1&b=2".into(),
+            )],
             Path::new("/Users/x/.zeron/daemon.log"),
         );
         assert!(plist.contains("<key>Label</key><string>sh.zeron.app</string>"));
         // XML-escaped exe path and env value.
         assert!(plist.contains("<string>/Users/x/zeron &amp; co/zeron</string>"));
-        assert!(plist.contains("<string>https://e?a=1&amp;b=2</string>"));
+        assert!(plist.contains("<string>/Users/x/adapter?a=1&amp;b=2</string>"));
         assert!(plist.contains("<string>headless</string>"));
         assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
         assert!(

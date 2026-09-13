@@ -11,6 +11,9 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+
+				THIRD_PARTY_NOTICES.md,
+				licenses,
 			);
 			target = A1000000000000000000T001 /* Zeron */;
 		};
@@ -71,6 +74,11 @@
 		A1000000000000000000PR01 /* Zeron.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Zeron.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2000000000000000000PR01 /* ZeronTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3000000000000000000PR01 /* ZeronUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ZeronUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1000000000000000000PR02 /* KratosTailcat.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = ../../target/tailcat/KratosTailcat.xcframework; sourceTree = "<group>"; };
+
+		A1000000000000000000PR03 /* licenses */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Zeron/licenses; sourceTree = "<group>"; };
+		A1000000000000000000PR04 /* THIRD_PARTY_NOTICES.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = Zeron/THIRD_PARTY_NOTICES.md; sourceTree = "<group>"; };
+
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -80,6 +88,8 @@
 			files = (
 				A1000000000000000000B001 /* Loro in Frameworks */,
 				A1000000000000000000B002 /* Markdown in Frameworks */,
+
+				A1000000000000000000B003 /* KratosTailcat.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -88,12 +98,22 @@
 /* Begin PBXBuildFile section */
 		A1000000000000000000B001 /* Loro in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P002 /* Loro */; };
 		A1000000000000000000B002 /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000P004 /* Markdown */; };
+		A1000000000000000000B003 /* KratosTailcat.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1000000000000000000PR02 /* KratosTailcat.xcframework */; };
+
+		A1000000000000000000B004 /* licenses in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000PR03 /* licenses */; };
+		A1000000000000000000B005 /* THIRD_PARTY_NOTICES.md in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000PR04 /* THIRD_PARTY_NOTICES.md */; };
+
 /* End PBXBuildFile section */
 
 /* Begin PBXGroup section */
 		A1000000000000000000G000 = {
 			isa = PBXGroup;
 			children = (
+				A1000000000000000000PR02 /* KratosTailcat.xcframework */,
+
+				A1000000000000000000PR03 /* licenses */,
+				A1000000000000000000PR04 /* THIRD_PARTY_NOTICES.md */,
+
 				A1000000000000000000G001 /* Zeron */,
 				A2000000000000000000G001 /* ZeronTests */,
 				A3000000000000000000G001 /* ZeronUITests */,
@@ -225,6 +245,9 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+
+				A1000000000000000000B004 /* licenses in Resources */,
+				A1000000000000000000B005 /* THIRD_PARTY_NOTICES.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

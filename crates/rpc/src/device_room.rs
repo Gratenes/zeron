@@ -1,15 +1,13 @@
-//! Device-room relay transport (ARCHITECTURE §1, feature-inventory §3.7): the byte-frame
-//! codec spoken by the edge `DeviceRoom` DO, the **host relay** (this device serving its
-//! full RPC surface through the relay), and the **client link** (dialing another device's
-//! relay and speaking ordinary [`RpcClient`] RPC over it).
+//! Device-room relay transport (ARCHITECTURE §1): the byte-frame codec used by
+//! the durable peer, the **host relay** (this device serving its full RPC surface),
+//! and the **client link** (dialing another device's relay).
 //!
-//! Frame encoding (must stay byte-identical to `edge/src/device-room.ts`):
+//! Frame encoding is stable across native peers:
 //! `uleb128(header_len) ‖ UTF-8 JSON header ‖ payload`, header `{s, k, to?, from?}`.
-//! - client → DO: the DO stamps `from = connId` and forwards to the host socket;
-//! - host → DO: must carry `to = connId`; the DO strips routing keys and delivers;
-//! - relay control frames use kind [`RELAY_KIND`] with payload `{"error": code}` —
-//!   codes `host_offline`, `host_closed`, `client_gone`, `client_closed`;
-//! - nudge frames use kind [`NUDGE_KIND`] with payload `{"chatId": …}`.
+//! - client → relay: the relay stamps `from = connId` and forwards to the host;
+//! - host → relay: carries `to = connId`; routing keys are stripped on delivery;
+//! - control frames use [`RELAY_KIND`] with payload `{"error": code}`;
+//! - nudge frames use [`NUDGE_KIND`] with payload `{"chatId": …}`.
 //!
 //! The RPC path multiplexes NOTHING new: each distinct client `connId` becomes a virtual
 //! string-frame connection feeding the existing [`serve_connection`] seam, so every RPC
@@ -46,8 +44,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Text `"ping"` keepalive — answered by the DO's hibernation-safe auto-response
-/// pair (`edge/src/device-room.ts`) without waking it.
+/// Text `"ping"` keepalive, answered by the durable relay without involving
+/// application RPC handlers.
 ///
 /// 10s, not 30: a laptop's uplink (corporate proxy, VPN split-tunnel extension,
 /// consumer NAT) can reap an idle flow well inside a minute, and a keepalive
@@ -61,9 +59,8 @@ const PING_INTERVAL: Duration = Duration::from_secs(10);
 /// timeout or sleep/wake) — drop it and reconnect instead of waiting on a TCP
 /// write error. 25s tolerates one lost pong (pings at +10/+20) before ruling
 /// the socket dead; the old 40s left sends wedged for most of a minute after
-/// an unnoticed drop. Must stay well under the relay's own host-liveness
-/// window (`HOST_LIVENESS_MS`, edge/src/device-room.ts) so a host replaces
-/// its dead socket before the relay gives up on the device.
+/// an unnoticed drop. It remains below the relay host-liveness window so a host
+/// replaces its dead socket before the relay gives up on the device.
 const SILENCE_LEASE: Duration = Duration::from_secs(25);
 /// App-level end-to-end liveness for the CLIENT link. The transport lease
 /// above proves only the client↔edge leg — the DO's auto-pong answers from
@@ -287,11 +284,10 @@ impl HostRelayConfig {
     }
 }
 
-/// The host end of the relay: one outbound WebSocket to our own DeviceRoom DO, serving
-/// `service` to every client conn through virtual string-frame connections. Immortal
-/// supervisor: quiet while signed out, reconnects with backoff when the socket drops
-/// (including the 4409 "superseded by new host connection" close — the newest host wins,
-/// so the superseded process backs off and retries, mirroring zeron's DeviceRoomHost).
+/// The host end of the relay: one outbound WebSocket to the durable peer, serving
+/// `service` to every client through virtual string-frame connections. The
+/// supervisor waits while signed out and reconnects with backoff after socket
+/// drops, including replacement by a newer host connection.
 pub struct HostRelay {
     task: tokio::task::JoinHandle<()>,
 }
@@ -1074,7 +1070,7 @@ impl LinkCache {
 }
 
 // ---------------------------------------------------------------------------
-// Codec tests — vectors ported from edge/src/device-frame.test.ts
+// Stable codec vectors
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

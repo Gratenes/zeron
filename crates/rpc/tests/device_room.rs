@@ -1,11 +1,8 @@
-//! HostRelay + ClientLink end-to-end over an in-memory fake device room.
+//! HostRelay + ClientLink end-to-end over an in-memory durable relay.
 //!
-//! The fake implements the `DeviceRoom` DO's relay semantics (edge/src/device-room.ts):
-//! route client frames to the single host socket with `from` stamped; route host frames
-//! by `to` (bounce `client_gone` when the target left); host supersede (a new host join
-//! closes the predecessor); `client_closed` on client disconnect; `host_closed` broadcast
-//! on host disconnect; `host_offline` bounce when a client sends with no host; nudge
-//! frames delivered to the host.
+//! The fake implements native peer routing semantics: client frames reach the
+//! single host with `from` stamped; host frames route by `to`; host replacement,
+//! disconnect errors, offline errors, and nudges are all exercised.
 
 // tungstenite's `accept_hdr_async` callback signature fixes the Err type as a full
 // `Response` — its size is not ours to shrink.
@@ -687,49 +684,6 @@ async fn nudges_reach_the_host_callback() {
         .expect("nudge delivered")
         .expect("channel open");
     assert_eq!(got, "chat-42");
-}
-
-/// Live-edge variant: run the same host+client path through a real DeviceRoom DO.
-/// `ZERON_EDGE_WS=http://127.0.0.1:26640 cargo test -p zeron-rpc -- --ignored live_edge`
-/// (dev-mode edge; ZERON_EDGE_TOKEN defaults to a fixed dev user id).
-#[tokio::test]
-#[ignore = "needs a running edge (set ZERON_EDGE_WS)"]
-async fn live_edge_relay_round_trip() {
-    let Ok(edge_url) = std::env::var("ZERON_EDGE_WS") else {
-        panic!("set ZERON_EDGE_WS to the edge base URL (e.g. http://127.0.0.1:26640)");
-    };
-    let token = std::env::var("ZERON_EDGE_TOKEN").unwrap_or_else(|_| "relay-live-test".into());
-    let device_id = format!("relay-live-{}", uuid::Uuid::new_v4());
-
-    let service = TestService::new("live-host");
-    let mut config = HostRelayConfig::new(
-        edge_url.clone(),
-        device_id.clone(),
-        Arc::new(StaticToken(token.clone())),
-    );
-    config.retry = Duration::from_millis(500);
-    let _host = HostRelay::spawn(config, service, noop_nudge());
-
-    let mut cache_config = LinkCacheConfig::new(edge_url, Arc::new(StaticToken(token)));
-    cache_config.probe_timeout = Duration::from_secs(5);
-    let links = LinkCache::new(cache_config);
-
-    // The host claims the room asynchronously; retry the dial until it answers.
-    let client = loop {
-        match links.client(&device_id).await {
-            Ok(client) => break client,
-            Err(err) => {
-                eprintln!("dial retry: {err}");
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-        }
-    };
-    let echoed = client
-        .call("Echo", serde_json::json!({ "live": true }))
-        .await
-        .expect("echo");
-    assert_eq!(echoed["host"], "live-host");
-    assert_eq!(echoed["params"]["live"], true);
 }
 
 #[tokio::test(flavor = "multi_thread")]

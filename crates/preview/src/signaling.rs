@@ -1,8 +1,10 @@
-//! The coordinator receives presence, catalogs and SDP only. Reconnects obtain
-//! fresh credentials and clear the previous connection's remote routes/peers.
+//! Authenticated catalog and application transport over the Tailcat-carried
+//! durable peer WebSocket. The public configuration shape is retained for the
+//! engine: `edge_url` is now the loopback HTTP base exposed by its Tailcat
+//! adapter and connected securely to the durable peer.
 use crate::{
     catalog::Catalog,
-    peer::{OutgoingSignal, Peers, Signal},
+    peer::{OutgoingFrame, Peers, decode_envelope, encode_envelope},
 };
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -11,15 +13,19 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tokio_util::sync::CancellationToken;
 use zeron_proto::PreviewService;
+
 #[async_trait::async_trait]
 pub trait TokenSource: Send + Sync {
     async fn token(&self) -> Option<String>;
 }
+
+/// Connection details for the authenticated application peer.
 pub struct Config {
     pub edge_url: String,
     pub org_id: String,
     pub tokens: Arc<dyn TokenSource>,
 }
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum Incoming {
@@ -30,36 +36,40 @@ enum Incoming {
     Gone {
         device: String,
     },
-    Signal {
-        from: String,
-        signal: Signal,
-    },
 }
+
 pub async fn run(
     config: Config,
     catalog: Catalog,
     peers: Peers,
-    mut outgoing: mpsc::Receiver<OutgoingSignal>,
+    mut outgoing: mpsc::Receiver<OutgoingFrame>,
     stop: CancellationToken,
 ) {
     loop {
         let connected = connect(&config, &catalog, &peers, &mut outgoing);
-        tokio::select! { _ = stop.cancelled() => break, result = connected => {
-            if let Err(error) = result { tracing::debug!(%error, "preview coordinator disconnected"); }
-        } }
+        tokio::select! {
+            _ = stop.cancelled() => break,
+            result = connected => if let Err(error) = result {
+                tracing::debug!(%error, "preview peer disconnected");
+            },
+        }
         catalog.clear_remote();
         peers.clear().await;
-        while outgoing.try_recv().is_ok() {} // signaling from the old lease is stale
-        tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
+        while outgoing.try_recv().is_ok() {} // frames from the old lease are stale
+        tokio::select! {
+            _ = stop.cancelled() => break,
+            _ = tokio::time::sleep(Duration::from_secs(3)) => {},
+        }
     }
     catalog.clear_remote();
     peers.clear().await;
 }
+
 async fn connect(
     config: &Config,
     catalog: &Catalog,
     peers: &Peers,
-    outgoing: &mut mpsc::Receiver<OutgoingSignal>,
+    outgoing: &mut mpsc::Receiver<OutgoingFrame>,
 ) -> anyhow::Result<()> {
     let token = config
         .tokens
@@ -69,7 +79,7 @@ async fn connect(
     let mut url = reqwest::Url::parse(&config.edge_url)?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
     url.set_scheme(scheme)
-        .map_err(|_| anyhow::anyhow!("invalid preview coordinator URL"))?;
+        .map_err(|_| anyhow::anyhow!("invalid preview peer URL"))?;
     url.set_path(&format!("/preview/{}/ws", config.org_id));
     url.query_pairs_mut()
         .clear()
@@ -79,8 +89,10 @@ async fn connect(
         .headers_mut()
         .insert("authorization", format!("Bearer {token}").parse()?);
     let mut websocket_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
-    websocket_config.max_message_size = Some(1024 * 1024);
-    websocket_config.max_frame_size = Some(1024 * 1024);
+    websocket_config.max_message_size = Some(16 * 1024);
+    websocket_config.max_frame_size = Some(16 * 1024);
+    websocket_config.write_buffer_size = 32 * 1024;
+    websocket_config.max_write_buffer_size = 128 * 1024;
     let (socket, _) = tokio::time::timeout(
         Duration::from_secs(10),
         tokio_tungstenite::connect_async_with_config(request, Some(websocket_config), false),
@@ -91,48 +103,52 @@ async fn connect(
     let mut advertised = catalog.local_services();
     write
         .send(Message::Text(
-            serde_json::json!({"type":"catalog", "services":advertised}).to_string(),
+            serde_json::json!({"type":"catalog", "services":advertised})
+                .to_string()
+                .into(),
         ))
         .await?;
     let mut ping = tokio::time::interval(Duration::from_secs(10));
     let mut last_message = tokio::time::Instant::now();
-    // SDP gathering must not block the socket heartbeat or other devices.
-    let mut negotiations = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             _ = ping.tick() => {
-                anyhow::ensure!(last_message.elapsed() < Duration::from_secs(40), "preview coordinator lease expired");
+                anyhow::ensure!(last_message.elapsed() < Duration::from_secs(40), "preview peer lease expired");
                 write.send(Message::Text("ping".into())).await?;
             }
-            _ = changes.changed() => {
+            result = changes.changed() => {
+                result?;
                 let next = catalog.local_services();
-                if next != advertised { write.send(Message::Text(serde_json::json!({"type":"catalog", "services":next}).to_string())).await?; advertised = next; }
+                if next != advertised {
+                    write.send(Message::Text(serde_json::json!({"type":"catalog", "services":next}).to_string().into())).await?;
+                    advertised = next;
+                }
             }
-            Some(message) = outgoing.recv() => {
-                write.send(Message::Text(serde_json::json!({"type":"signal", "to":message.to, "signal":message.signal}).to_string())).await?;
+            Some(frame) = outgoing.recv() => {
+                write.send(Message::Binary(encode_envelope(&frame.to, &frame.bytes)?.into())).await?;
             }
-            Some(_) = negotiations.join_next(), if !negotiations.is_empty() => {}
             message = read.next() => {
-                let message = message.ok_or_else(|| anyhow::anyhow!("preview coordinator closed"))??;
+                let message = message.ok_or_else(|| anyhow::anyhow!("preview peer closed"))??;
                 last_message = tokio::time::Instant::now();
                 match message {
                     Message::Text(text) if text == "pong" => {},
                     Message::Text(text) => {
-                        anyhow::ensure!(text.len() <= 1024*1024, "oversized preview coordinator message");
+                        anyhow::ensure!(text.len() <= 1024 * 1024, "oversized preview catalog message");
                         match serde_json::from_str::<Incoming>(&text)? {
                             Incoming::Catalog { device, services } => catalog.set_remote(&device, services)?,
-                            Incoming::Gone { device } => { catalog.remove_remote(&device); peers.remove(&device).await; }
-                            Incoming::Signal { from, signal } => {
-                                anyhow::ensure!(negotiations.len() < 16, "too many concurrent preview negotiations");
-                                let peers = peers.clone();
-                                negotiations.spawn(async move { if let Err(error) = peers.signal(&from, signal).await { tracing::debug!(%error, "preview negotiation failed"); } });
+                            Incoming::Gone { device } => {
+                                catalog.remove_remote(&device);
+                                peers.remove(&device).await;
                             }
                         }
                     }
+                    Message::Binary(bytes) => {
+                        let (from, payload) = decode_envelope(&bytes)?;
+                        peers.receive(from, payload.to_vec()).await?;
+                    }
                     Message::Ping(bytes) => write.send(Message::Pong(bytes)).await?,
-                    Message::Close(_) => anyhow::bail!("preview coordinator closed"),
-                    Message::Binary(_) => anyhow::bail!("application traffic is not allowed on preview signaling"),
-                    _ => {}
+                    Message::Close(_) => anyhow::bail!("preview peer closed"),
+                    _ => {},
                 }
             }
         }

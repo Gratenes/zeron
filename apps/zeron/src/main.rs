@@ -1,8 +1,10 @@
 //! zeron — headed by default; `zeron headless` runs the engine alone. Both start
-//! local-only without credentials. `zeron login` and `zeron logout` select the
+//! local-only without credentials. Pairing and `zeron logout` select the
 //! profile used by the next engine start without mutating a live runtime.
 
 mod auth_cli;
+
+mod backup_cli;
 mod daemon;
 mod paths;
 mod update_cli;
@@ -30,8 +32,16 @@ struct Cli {
 enum Command {
     /// Run the engine without a UI (local-only unless a saved session enables sync).
     Headless,
-    /// Sign in and enable sync on the next engine start.
-    Login,
+    /// Pair using an invitation from stdin or a private file (never a command-line secret).
+    Pair {
+        #[arg(long)]
+        code_file: Option<std::path::PathBuf>,
+    },
+    /// Initialize or manage this installation's durable sync peer.
+    Peer {
+        #[command(subcommand)]
+        command: PeerCommand,
+    },
     /// Remove the saved session and return to local-only on the next start.
     Logout,
     /// Show workspace mode, optional auth, and engine status.
@@ -53,6 +63,48 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum PeerCommand {
+    /// Create a durable peer. Keep it running for offline device catch-up.
+    Init {
+        #[arg(long, default_value = "")]
+        name: String,
+        /// Use an owned DERP map instead of the rate-limited public relay service.
+        #[arg(long)]
+        derp_map: Option<String>,
+    },
+    /// Export a short-lived one-use invitation to stdout or a new private file.
+    Invite {
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// List profile-bound trusted devices.
+    Devices,
+    /// Revoke a trusted device and close its active connections.
+    Revoke { device_id: String },
+    /// Create and export a complete private hosted-peer backup generation.
+    Backup {
+        /// Secure directory to create or use; receives <generation UUID>/.
+        #[arg(long)]
+        output_dir: std::path::PathBuf,
+    },
+    /// Restore one generation into a new, absent data directory.
+    Restore {
+        /// Complete generation directory containing manifest.json.
+        #[arg(long)]
+        generation: std::path::PathBuf,
+        /// New data directory to create; existing paths are never merged.
+        #[arg(long)]
+        destination: std::path::PathBuf,
+        /// Accept rollback of trusted-device and revocation state to backup time.
+        #[arg(long)]
+        acknowledge_trust_rollback: bool,
+    },
+
+    /// Show peer/profile state without printing secret addresses or credentials.
+    Status,
+}
+
+#[derive(Subcommand)]
 enum DaemonCommand {
     /// Install, enable, and start the service (captures ZERON_* env).
     Install,
@@ -68,36 +120,6 @@ enum DaemonCommand {
     Status,
 }
 
-/// Production edge (Cloudflare Worker + Durable Objects on the zeron.sh zone).
-/// `ZERON_EDGE_URL` overrides (local dev / self-hosting).
-const DEFAULT_EDGE_URL: &str = "https://edge.zeron.sh";
-
-/// Production WorkOS AuthKit client id — public knowledge (it appears in every
-/// authorize URL), so baking it in is safe. Overridden by `ZERON_WORKOS_CLIENT_ID`;
-/// set it to the empty string — or set a dev bearer via `ZERON_EDGE_TOKEN` — to
-/// force dev-mode auth instead.
-const DEFAULT_WORKOS_CLIENT_ID: &str = "client_01KWD0EAKZKD50YCQJNYSRE4BY";
-
-fn edge_url_from_env() -> String {
-    std::env::var("ZERON_EDGE_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_EDGE_URL.into())
-}
-
-/// WorkOS client id resolution: explicit env wins (empty string = dev mode);
-/// otherwise a `ZERON_EDGE_TOKEN` dev bearer keeps dev mode (smoke tests,
-/// local wrangler); otherwise the baked production client id makes optional
-/// sync available while a bare start remains local-only.
-fn workos_client_id_from_env(edge_token: &Option<String>) -> Option<String> {
-    match std::env::var("ZERON_WORKOS_CLIENT_ID") {
-        Ok(v) if v.trim().is_empty() => None,
-        Ok(v) => Some(v),
-        Err(_) if edge_token.is_some() => None,
-        Err(_) => Some(DEFAULT_WORKOS_CLIENT_ID.into()),
-    }
-}
-
 /// mimalloc, macOS only: libmalloc never returns the streaming churn's
 /// high-water pages, so transient allocation became permanent RSS
 /// (docs/memory-plan.md §1). Pinned to mimalloc v2 in the workspace manifest —
@@ -110,6 +132,8 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    reject_removed_commands(&cli)?;
     #[cfg(windows)]
     if cli.command.is_none() {
         detach_desktop_console();
@@ -185,9 +209,38 @@ fn main() -> anyhow::Result<()> {
                 engine.run().await
             })
         }
-        Some(Command::Login) => {
+        Some(Command::Pair { code_file }) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(auth_cli::login(engine_config_from_env()))
+            runtime.block_on(auth_cli::pair(
+                engine_config_from_env(),
+                code_file.as_deref(),
+            ))
+        }
+        Some(Command::Peer { command }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let config = engine_config_from_env();
+            runtime.block_on(async move {
+                match command {
+                    PeerCommand::Init { name, derp_map } => {
+                        auth_cli::initialize(config, name, derp_map).await
+                    }
+                    PeerCommand::Invite { output } => {
+                        auth_cli::invite(config, output.as_deref()).await
+                    }
+                    PeerCommand::Devices => auth_cli::devices(config).await,
+                    PeerCommand::Revoke { device_id } => auth_cli::revoke(config, device_id).await,
+                    PeerCommand::Backup { output_dir } => {
+                        backup_cli::backup(&config, &output_dir)?;
+                        Ok(())
+                    }
+                    PeerCommand::Restore {
+                        generation,
+                        destination,
+                        acknowledge_trust_rollback,
+                    } => backup_cli::restore(&generation, &destination, acknowledge_trust_rollback),
+                    PeerCommand::Status => auth_cli::status(config).await,
+                }
+            })
         }
         Some(Command::Logout) => {
             let runtime = tokio::runtime::Runtime::new()?;
@@ -203,7 +256,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Command::Update { check }) => {
             let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(update_cli::update(&edge_url_from_env(), check))
+            runtime.block_on(update_cli::update("", check))
         }
         Some(Command::Daemon { command }) => match command {
             DaemonCommand::Install => daemon::install(&engine_config_from_env().data_dir),
@@ -214,7 +267,6 @@ fn main() -> anyhow::Result<()> {
             DaemonCommand::Status => daemon::status(),
         },
         None => {
-            let edge_token = std::env::var("ZERON_EDGE_TOKEN").ok();
             // Headed: the UI probes ZERON_IPC_PORT and connects to a running
             // daemon, or embeds the engine in-process (ARCHITECTURE §1).
             zeron_ui::run_app(zeron_ui::UiConfig {
@@ -223,15 +275,29 @@ fn main() -> anyhow::Result<()> {
                     .ok()
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(27654),
-                edge_url: edge_url_from_env(),
-                workos_client_id: workos_client_id_from_env(&edge_token),
-                edge_token,
-                org_id: std::env::var("ZERON_ORG_ID").ok(),
                 default_harness: zeron_ui::HarnessId::ClaudeCode,
                 initial_url: cli.open_url,
             });
             Ok(())
         }
+    }
+}
+
+fn reject_removed_commands(cli: &Cli) -> anyhow::Result<()> {
+    if cli.command.is_none() && cli.open_url.as_deref() == Some("migrate") {
+        anyhow::bail!("unrecognized subcommand 'migrate'");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod removed_command_tests {
+    use super::*;
+
+    #[test]
+    fn migrate_is_rejected_after_cli_removal() {
+        let cli = Cli::try_parse_from(["zeron", "migrate"]).expect("positional parser");
+        assert!(reject_removed_commands(&cli).is_err());
     }
 }
 
@@ -249,27 +315,16 @@ fn detach_desktop_console() {
     }
 }
 
-/// The env-resolved engine configuration shared by `headless`, `login`,
-/// `logout`, and `status` — one resolution so the CLI auth commands always
-/// operate on the exact session the daemon will load.
+/// One local configuration for UI, daemon, and pairing. Connectivity and profile
+/// selection come exclusively from the installation's saved trusted-peer state.
 fn engine_config_from_env() -> zeron_engine::EngineConfig {
-    // Dev-mode bearer (no WorkOS): an explicit token enables sync.
-    let edge_token = std::env::var("ZERON_EDGE_TOKEN").ok();
     zeron_engine::EngineConfig {
         data_dir: paths::data_dir(),
-        edge_url: edge_url_from_env(),
         ipc_port: std::env::var("ZERON_IPC_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(27654),
         default_harness: harness_from_env(),
-        // WorkOS mode: the signed-in session's org wins; ZERON_ORG_ID (dev
-        // default "dev-org") scopes the workspace room otherwise.
-        org_id: std::env::var("ZERON_ORG_ID").ok(),
-        // Real auth against production by default; see
-        // `workos_client_id_from_env` for the dev-mode escape hatches.
-        workos_client_id: workos_client_id_from_env(&edge_token),
-        edge_token,
     }
 }
 

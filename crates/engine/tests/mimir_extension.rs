@@ -433,7 +433,6 @@ async fn extension_absent_goal_control_stays_in_the_visible_turn_boundary_queue(
     core.shutdown().await;
 }
 
-
 #[tokio::test]
 async fn negotiated_capability_survives_a_same_run_steered_boundary() {
     let dir = tempfile::tempdir().unwrap();
@@ -446,16 +445,24 @@ async fn negotiated_capability_survives_a_same_run_steered_boundary() {
         .dispatch(CHAT, HarnessId::Mimir, request(dir.path(), "start"), None)
         .await
         .unwrap();
-    wait(|| core.sessions.session_status(CHAT).is_some_and(|s| s.goal_control)).await;
+    wait(|| {
+        core.sessions
+            .session_status(CHAT)
+            .is_some_and(|s| s.goal_control)
+    })
+    .await;
 
     core.sessions
         .steer(CHAT, "ordinary follow-up", Some("ordinary".into()))
         .await
         .unwrap();
     wait(|| {
-        core.sessions.subscribe(CHAT, 0).unwrap().0.iter().any(
-            |event| matches!(event.event, AgentEvent::Steered { .. }),
-        )
+        core.sessions
+            .subscribe(CHAT, 0)
+            .unwrap()
+            .0
+            .iter()
+            .any(|event| matches!(event.event, AgentEvent::Steered { .. }))
     })
     .await;
     assert!(core.sessions.session_status(CHAT).unwrap().goal_control);
@@ -471,12 +478,27 @@ async fn negotiated_capability_survives_a_same_run_steered_boundary() {
         )
         .unwrap();
     wait(|| {
-        core.doc_host.open(CHAT).unwrap().doc().read_commands().unwrap().iter().any(
-            |entry| entry.id == command && entry.status == zeron_doc::SessionCommandStatus::Applied,
-        )
+        core.doc_host
+            .open(CHAT)
+            .unwrap()
+            .doc()
+            .read_commands()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry.id == command && entry.status == zeron_doc::SessionCommandStatus::Applied
+            })
     })
     .await;
-    assert!(core.doc_host.open(CHAT).unwrap().doc().read_queue().unwrap().is_empty());
+    assert!(
+        core.doc_host
+            .open(CHAT)
+            .unwrap()
+            .doc()
+            .read_queue()
+            .unwrap()
+            .is_empty()
+    );
     core.shutdown().await;
 }
 
@@ -493,14 +515,24 @@ async fn authoritative_retirement_clears_capability_before_an_extension_absent_r
         .dispatch(CHAT, HarnessId::Mimir, request(dir.path(), "first"), None)
         .await
         .unwrap();
-    wait(|| core.sessions.session_status(CHAT).is_some_and(|s| s.goal_control)).await;
+    wait(|| {
+        core.sessions
+            .session_status(CHAT)
+            .is_some_and(|s| s.goal_control)
+    })
+    .await;
 
     core.sessions.interrupt(CHAT).await.unwrap();
     wait(|| {
-        core.sessions.session_status(CHAT).is_some_and(|s| !s.goal_control)
-            && core.workspace.read_sessions().unwrap().iter().any(
-                |session| session.chat_id == CHAT && !session.goal_control,
-            )
+        core.sessions
+            .session_status(CHAT)
+            .is_some_and(|s| !s.goal_control)
+            && core
+                .workspace
+                .read_sessions()
+                .unwrap()
+                .iter()
+                .any(|session| session.chat_id == CHAT && !session.goal_control)
     })
     .await;
 
@@ -531,9 +563,7 @@ async fn active_goal_controls_bypass_queue_without_success_or_extra_model_lease(
     wait(|| {
         core.sessions
             .session_status(CHAT)
-            .is_some_and(|s| {
-                s.goal_control && s.goal.is_some_and(|g| g.phase == GoalPhase::Active)
-            })
+            .is_some_and(|s| s.goal_control && s.goal.is_some_and(|g| g.phase == GoalPhase::Active))
             && child_ref(&core).is_some()
     })
     .await;

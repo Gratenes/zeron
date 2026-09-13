@@ -1,5 +1,5 @@
 //! zeron-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
-//! transports, plus the device-room relay transport ({s,k,to,from} frames — [`device_room`]).
+//! transports, plus targeted peer links (`{s,k,to,from}` frames — [`device_room`]).
 //!
 //! Framing: ndjson envelopes, one JSON object per WebSocket text message (or per line on
 //! byte transports), matching the shape of zeron's Effect RPC without the Effect runtime:
@@ -43,12 +43,9 @@ pub mod methods {
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
-    /// Peer-to-peer delivery fallback: the SENDER's engine forwards a queued
-    /// command entry (client-minted id and all) straight over the device-room
-    /// link when its chat2 rows can't reach the edge but the host's peer link
-    /// is alive. The host claims the id in its processed ledger before
-    /// executing, so the doc row arriving later dedupes to a no-op —
-    /// exactly-once by construction. Params `{chatId, entry}`.
+    /// Peer-to-peer delivery fallback: the sender forwards a queued command
+    /// entry directly when durable rows are delayed but the host link is alive.
+    /// The host claims the id before execution, so a later row is a no-op.
     pub const RELAY_COMMAND: &str = "RelayCommand";
     /// User-driven delivery retry for a chat with unadopted queued sends:
     /// fresh chat2 socket, host nudge, drain pass, and a new delivery escort
@@ -86,9 +83,8 @@ pub mod methods {
     /// counters for the workspace room and every open chat doc. No params;
     /// IPC-only.
     pub const SYNC_STATUS: &str = "SyncStatus";
-    /// Pushed edge-connectivity posture (`zeron_proto::Connectivity`):
-    /// current value first, then every change — the connection pill /
-    /// composer-honesty / queued-badge feed. No params; IPC-only.
+    /// Pushed peer-connectivity posture for the connection pill, composer
+    /// honesty, and queued-send badges. IPC-only.
     pub const WATCH_CONNECTIVITY: &str = "WatchConnectivity";
     /// In-flight queued-attachment transfers (`zeron_proto::TransferProgress`
     /// list): current set first, then a fresh snapshot per landed chunk —
@@ -116,18 +112,14 @@ pub mod methods {
     /// engine behind its windows would leave that process unusable.
     pub const STOP_ENGINE: &str = "StopEngine";
     pub const AUTH_STATUS: &str = "AuthStatus";
-    // AuthRpc mutations (feature-inventory §2 AuthRpc; IPC-only).
-    pub const SIGN_IN: &str = "SignIn";
-    pub const SIGN_IN_HEADLESS: &str = "SignInHeadless";
-    pub const COMPLETE_SIGN_IN: &str = "CompleteSignIn";
+    // Trusted-device pairing and peer management are strictly IPC-only.
+    pub const PEER_INITIALIZE: &str = "PeerInitialize";
+    pub const PEER_PAIR: &str = "PeerPair";
+    pub const PEER_INVITE: &str = "PeerInvite";
+    pub const PEER_DEVICES: &str = "PeerDevices";
+    pub const PEER_REVOKE: &str = "PeerRevoke";
+    pub const PEER_STATUS: &str = "PeerStatus";
     pub const SIGN_OUT: &str = "SignOut";
-    pub const LIST_ORGS: &str = "ListOrgs";
-    pub const CREATE_ORG: &str = "CreateOrg";
-    pub const SELECT_ORG: &str = "SelectOrg";
-    /// One-time local→synced profile import: what's importable (unary).
-    pub const LOCAL_IMPORT_STATUS: &str = "LocalImportStatus";
-    /// One-time local→synced profile import: run it (stream of progress items).
-    pub const IMPORT_LOCAL_WORKSPACE: &str = "ImportLocalWorkspace";
     // Repos / worktrees / folders (ControlRpc, relay-forwardable).
     pub const LIST_REPOS: &str = "ListRepos";
     pub const ADD_REPO: &str = "AddRepo";
@@ -183,8 +175,8 @@ pub mod methods {
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";
     pub const READ_ATTACHMENT_CHUNK: &str = "ReadAttachmentChunk";
-    /// Lazy full-tool-output fetch from the R2 sidecar by doc-resident ref
-    /// (chat2-sync A3). Edge-direct from any device — never relay-forwarded.
+    /// Lazy full-tool-output fetch from peer sidecar storage by doc-resident ref.
+    /// The peer authorizes the active profile; this is never relay-forwarded.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";
     // Updates (ControlRpc, relay-forwardable — a device reports/applies its own
     // binary's update). Stream: current UpdateStatus, then every change.

@@ -48,20 +48,21 @@ final class WorkspaceStore {
     /// When the registry room (re)joined — the dial-gate warm-up clock
     /// restarts on every rejoin.
     @ObservationIgnored private var registryJoinedAt: Int64?
-    private let config: AppConfig
+    private var config: AppConfig
+
+    var profileId: String { config.profileId }
+    var deviceId: String { config.deviceId }
 
     init(config: AppConfig) {
         self.config = config
         self.doc = RegistryDoc(deviceId: config.deviceId)
+        hydrateFromDisk()
     }
 
-    func start() {
-        guard client == nil else { return }
-        // Local-first: hydrate from the on-device blob before joining — the
-        // sidebar renders immediately and the hello backfills from our
-        // cursor. First run after the update: no blob → cursor null → the
-        // server's full state (the engines already seeded everything).
-        let blobURL = DocDisk.registryURL(orgId: config.orgId, userId: config.userId)
+    /// Disk projection is intentionally independent from transport startup so
+    /// a restored profile can render its workspace before Tailcat/auth exist.
+    private func hydrateFromDisk() {
+        let blobURL = DocDisk.registryURL(orgId: config.profileId, userId: config.profileId)
         if let data = try? Data(contentsOf: blobURL),
            let loaded = try? RegistryDoc.from(data: data, deviceId: config.deviceId) {
             doc = loaded
@@ -70,6 +71,16 @@ final class WorkspaceStore {
         saver = RegistrySaver(url: blobURL) { [weak self] in
             try? self?.doc.toData()
         }
+    }
+
+    func attachNetwork(config: AppConfig) {
+        precondition(config.profileId == self.config.profileId && config.deviceId == self.config.deviceId)
+        self.config = config
+        start()
+    }
+
+    func start() {
+        guard client == nil else { return }
 
         let delegate = RegistryClient.Delegate(
             helloCursor: { [weak self] in self?.doc.helloCursor ?? nil },

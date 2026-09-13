@@ -27,13 +27,26 @@ else
   BIN="$ROOT/target/debug/zeron"
 fi
 
+GO="${GO:-go}"
+GO="$GO" python3 "$ROOT/connectivity/tailcat/licenses/generate.py" --check
+GO="$GO" "$ROOT/scripts/build-tailcat.sh" native
+TAILCAT_BIN="$ROOT/target/tailcat/kratos-tailcat"
+
 rm -rf "$STAGE" "$TARBALL"
 mkdir -p "$STAGE"
 install -m 755 "$BIN" "$STAGE/zeron"
+
+install -m 644 "$ROOT/LICENSE" "$STAGE/LICENSE"
+install -m 644 "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/THIRD_PARTY_NOTICES.md"
+
+install -m 755 "$TAILCAT_BIN" "$STAGE/kratos-tailcat"
 install -m 644 "$ROOT/dist/zeron.desktop" "$STAGE/zeron.desktop"
 install -m 644 "$ROOT/dist/zeron.png" "$STAGE/zeron.png"
 mkdir -p "$STAGE/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
+
+mkdir -p "$STAGE/licenses/tailcat"
+cp -R "$ROOT/connectivity/tailcat/licenses/bundle/." "$STAGE/licenses/tailcat/"
 
 cat >"$STAGE/install.sh" <<'INSTALL'
 #!/usr/bin/env bash
@@ -41,8 +54,15 @@ cat >"$STAGE/install.sh" <<'INSTALL'
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install -Dm755 "$HERE/zeron" "$HOME/.local/bin/zeron"
+
+install -Dm755 "$HERE/kratos-tailcat" "$HOME/.local/bin/kratos-tailcat"
 install -Dm644 "$HERE/zeron.desktop" "$HOME/.local/share/applications/zeron.desktop"
 install -Dm644 "$HERE/zeron.png" "$HOME/.local/share/icons/hicolor/1024x1024/apps/zeron.png"
+
+install -Dm644 "$HERE/LICENSE" "$HOME/.local/share/doc/zeron/LICENSE"
+install -Dm644 "$HERE/THIRD_PARTY_NOTICES.md" "$HOME/.local/share/doc/zeron/THIRD_PARTY_NOTICES.md"
+install -d "$HOME/.local/share/doc/zeron/licenses"
+cp -R "$HERE/licenses/." "$HOME/.local/share/doc/zeron/licenses/"
 command -v update-desktop-database >/dev/null 2>&1 \
   && update-desktop-database "$HOME/.local/share/applications" || true
 echo "Installed. Make sure ~/.local/bin is on your PATH."

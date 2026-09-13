@@ -33,6 +33,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: connectivity/tailcat/go.sum
+      - name: Build pinned Tailcat XCFramework
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260908204917-8b95e45f8d3e
+          GOMOBILE="$(go env GOPATH)/bin/gomobile" scripts/build-tailcat.sh xcframework
+          test -d target/tailcat/KratosTailcat.xcframework
+
       - name: Prepare App Store Connect credentials and build number
         shell: bash
         run: |
@@ -89,10 +101,12 @@ jobs:
           latest_build="$(jq -r '[.data[].attributes.version | select(test("^[0-9]+$")) | tonumber] | max // 0' "$builds")"
           build_number="$((latest_build + 1))"
 
-          echo "AC_KEY_PATH=$key_path" >> "$GITHUB_ENV"
-          echo "AC_TOKEN_PATH=$token_path" >> "$GITHUB_ENV"
-          echo "ASC_APP_ID=$app_id" >> "$GITHUB_ENV"
-          echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
+          {
+            echo "AC_KEY_PATH=$key_path"
+            echo "AC_TOKEN_PATH=$token_path"
+            echo "ASC_APP_ID=$app_id"
+            echo "BUILD_NUMBER=$build_number"
+          } >> "$GITHUB_ENV"
           echo "Preparing $AUDIENCE TestFlight build $build_number from $GITHUB_SHA."
 
       - name: Xcode version
@@ -162,6 +176,8 @@ jobs:
           token="$(cat "$AC_TOKEN_PATH")"
           builds="$RUNNER_TEMP/processing-builds.json"
           for attempt in $(seq 1 40); do
+
+            echo "Processing poll $attempt/40"
             curl --globoff --fail-with-body --silent --show-error \
               -H "Authorization: Bearer $token" \
               -H 'Content-Type: application/json' \

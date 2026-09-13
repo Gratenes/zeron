@@ -18,8 +18,8 @@ final class DemoDataset {
     private var streamTask: Task<Void, Never>?
 
     private static let dummyConfig = AppConfig(
-        edgeURL: URL(string: "http://localhost:8787")!, mode: .dev,
-        userId: "demo", orgId: "demo", deviceId: "ios-demo", deviceName: "iPhone")
+        peerURL: URL(string: "http://localhost:8787")!, profileId: "demo",
+        deviceId: "ios-demo", deviceName: "iPhone")
 
     init(devices: [DeviceRow], spaces: [Space], chats: [Chat], sessions: [String: SessionRow],
          changeRequests: [String: ChangeRequestSummary] = [:]) {
@@ -65,9 +65,9 @@ final class DemoDataset {
                  config: codex, lastMessagePreview: "Done — failed children stay quiet.",
                  lastMessageAt: now - 900_000, createdAt: now - 86_400_000,
                  spaceId: zeron.id, lastSeenAt: now - 3_600_000),
-            Chat(id: "chat-deploy", deviceId: "dev-vps", title: "Wrangler deploy hygiene",
+            Chat(id: "chat-deploy", deviceId: "dev-vps", title: "Durable peer backup drill",
                  archived: false, cwd: edge.path, branch: nil, checkoutId: nil,
-                 config: claude, lastMessagePreview: "Hibernation-safe flush timer",
+                 config: claude, lastMessagePreview: "Verified checkpoint generation",
                  lastMessageAt: now - 86_400_000, createdAt: now - 86_400_000 * 2,
                  spaceId: edge.id, lastSeenAt: now - 86_400_000),
             // Archived — populate the shelf under the active list.
@@ -284,10 +284,10 @@ final class DemoDataset {
         case "chat-deploy":
             return [
                 MessageEntry(id: "m1", role: .user, parts: [
-                    .text(id: "t0", text: "Audit the wrangler config for hibernation hygiene."),
+                    .text(id: "t0", text: "Verify the durable peer backup and restore drill."),
                 ], createdAt: now - 86_500_000, deviceId: "ios-demo", status: .complete, continuationOf: nil),
                 MessageEntry(id: "m2", role: .assistant, parts: [
-                    .text(id: "t0", text: "Flush timer now only arms while dirty; ping/pong uses the auto-response path so the DO never wakes for keepalives."),
+                    .text(id: "t0", text: "Backup verification passed; checkpoints, registry rows, and attachment custody reopened from the generation."),
                 ], createdAt: now - 86_400_000, deviceId: "dev-vps", status: .complete, continuationOf: nil),
             ]
         default:

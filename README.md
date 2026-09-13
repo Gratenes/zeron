@@ -1,49 +1,62 @@
 # Zeron
 
-Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Mimir) locally by default, with optional multi-device sync.
+Control coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, and Mimir) locally by default, with optional private multi-device sync.
 
 *English | [简体中文](README.zh-CN.md)*
 
 ![Zeron driving a Claude Code session with a live branch diff sidebar](apps/landing/public/assets/app-screenshot.jpg)
 
-Every device runs a small engine that stores sessions on that device. A new installation starts in local-only mode without an account or a network connection.
+Every device runs a small engine and keeps a local cache. A new installation starts offline and local-only: no account, hosted backend, or provider credential is required.
 
-## Install and run locally (Linux)
+## Install
+
+Linux:
 
 ```bash
-curl -fsSL https://zeron.sh/install.sh | sh
+curl -fsSL https://github.com/wasimysaid/Kratos/releases/latest/download/install.sh | sh
 zeron status
 ```
 
-The installer starts the daemon immediately and keeps it running across reboots. No sign-in or sync configuration is required.
+The installer verifies the GitHub Release manifest and checksum, installs the engine plus its managed Tailcat adapter, and starts a user service when systemd is available.
 
-Mimir connects natively through `mimir acp`. Install and configure the `mimir` CLI on the run device; Zeron detects it in Settings → Agents and offers it in the existing harness picker.
+Mimir connects through `mimir acp`. Install the `mimir` CLI on the device that runs the agent; Zeron discovers it in Settings → Agents. The desktop sidebar browser also needs the [Linux browser runtime](docs/reference/linux-browser.md).
 
-The desktop sidebar browser also needs the [Linux browser runtime](docs/reference/linux-browser.md).
-
-Day-to-day:
+Useful commands:
 
 ```bash
-zeron status      # local/synced mode and engine status
-zeron update      # update to the latest release
+zeron status
+zeron update
 zeron daemon start|stop|restart|status
 ```
 
+On macOS, download the DMG from the [latest GitHub Release](https://github.com/wasimysaid/Kratos/releases/latest). On Windows, download the portable ZIP, keep `zeron-update.json` beside `zeron.exe`, and see the [source-build notes](docs/reference/windows-development.md).
+
 ## Optional multi-device sync
 
-Sign in only when you want to open your account's synced workspace. Authentication changes the profile selected by the next engine start, so stop the daemon before changing it:
+Tailcat provides private connectivity; Zeron's durable peer provides authenticated sync and storage. To support catch-up when laptops are not online together, initialize the peer on an always-on machine such as a VPS:
 
 ```bash
 zeron daemon stop
-zeron login
+zeron peer init --name home-peer
+zeron daemon start
+zeron peer invite --output invite.txt
+```
+
+Transfer `invite.txt` privately. On another stopped installation:
+
+```bash
+zeron daemon stop
+zeron pair --code-file invite.txt
 zeron daemon start
 ```
 
-You can then start an agent on one synced device and follow or drive it from another. An always-on machine such as a VPS can keep those agents working after you close your laptop.
+Invitations are short-lived and one-use. Pairing uses persistent device keys and proof of possession; list or revoke trusted devices with `zeron peer devices` and `zeron peer revoke <device-id>`. Keep pairing codes and Tailcat addresses private.
 
-Devices signed in to the same synced account are trusted with remote workspace access. A device controlling a workspace on another device can list, read, and write its files; enabling `Show ignored files` also makes gitignored files such as `.env` available remotely. `.git` is always excluded. Only sign in devices you trust with the full contents of your workspaces.
+Packaged releases include the adapter. Source builds can run `scripts/build-tailcat.sh native` and set `ZERON_TAILCAT_ADAPTER` to the resulting binary. Public DERP relays are rate-limited and have no SLA; operators needing durable relay service should initialize with an owned HTTPS DERP map using `--derp-map`.
 
-Signing in does not upload, move, or import existing local sessions. Local sessions and their attachments remain under the local profile and reappear when you return to local-only mode:
+Paired devices are trusted with the remotely permitted workspace surface. A controlling device can list, read, and write files on the owning device; enabling ignored-file visibility can expose files such as `.env`. `.git` remains excluded.
+
+Sync starts fresh: creating a peer creates a new paired profile; joining an existing peer loads that peer's data. There is no "Bring my work" option, local-session import, or old cloud-account migration. Existing local and historical files are left untouched. Desktop setup switches runtimes in-app; headless users restart the engine. Return to local-only mode with:
 
 ```bash
 zeron daemon stop
@@ -51,14 +64,6 @@ zeron logout
 zeron daemon start
 ```
 
-`zeron login` and `zeron logout` refuse to modify credentials while an engine owns the data directory. The desktop app follows the same next-restart profile boundary.
-
-On macOS: use the desktop release, or build `zeron` from source and run `zeron daemon install` to install the launchd service.
-
-On Windows: extract the portable release ZIP and run `zeron.exe`. Keep `zeron-update.json` beside it for in-app updates. See the [development notes](docs/reference/windows-development.md) for source builds.
-
----
-
-Developing or curious how it works? [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/zeronsh/zeron) or check out [ARCHITECTURE.md](ARCHITECTURE.md).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the runtime and storage model and [docs/peer-backup.md](docs/peer-backup.md) for backup/restore of the new peer.
 
 Licensed under the [MIT License](LICENSE).

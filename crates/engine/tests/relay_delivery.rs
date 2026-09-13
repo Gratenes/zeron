@@ -205,7 +205,7 @@ async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
 
     // Engine B hosts its device room on the fake relay.
     let core_b = assemble(&dirs.path().join("b"), "device-b");
-    let _host = core_b.start_host_relay(&relay_url);
+    let _host = core_b.start_host_relay(&relay_url, Arc::new(StaticToken("test-user".into())));
 
     // Engine A dials peers through the same relay — and has NO edge, so its
     // chat2 rows can never flush (the rows-dark half of the incident shape).

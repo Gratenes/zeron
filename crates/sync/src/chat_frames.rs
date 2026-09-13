@@ -1,8 +1,7 @@
-//! chat2 wire frames — Rust twin of `edge/src/chat-frames.ts` (the DO's
-//! codec). Binary WS frames: `[type u8][headerLen u32 LE][header JSON][payload]`.
+//! Stable chat wire frames shared by clients and the durable Rust peer.
+//! Binary WebSocket frames are `[type u8][headerLen u32 LE][header JSON][payload]`.
 //! Headers are tiny JSON; payloads are opaque bytes (Loro updates, checkpoint
-//! frontiers, presence ephemera). Cross-language contract — the layout tests
-//! here pin the same vectors as the TS suite; change both together.
+//! frontiers, presence ephemera). Layout tests pin the protocol vectors.
 
 use serde::{Deserialize, Serialize};
 

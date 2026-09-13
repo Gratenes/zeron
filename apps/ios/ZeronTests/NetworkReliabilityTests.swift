@@ -65,7 +65,7 @@ final class NetworkReliabilityTests: XCTestCase {
         // The binary slice boundary is % 3 == 0, so per-slice base64
         // concatenates to the whole file's encoding.
         XCTAssertEqual((uploadChunkB64Chars / 4 * 3) % 3, 0)
-        // Envelope headroom under Cloudflare's 1 MiB WS message cap.
+        // Envelope headroom under the application's 1 MiB relay-frame ceiling.
         XCTAssertLessThan(uploadChunkB64Chars + 1_024, 1_048_576)
     }
 
@@ -106,9 +106,9 @@ final class NetworkReliabilityTests: XCTestCase {
 
     @MainActor
     func testRetryReissuesADeadSendAttemptExactlyOnce() throws {
-        let config = AppConfig(edgeURL: URL(string: "http://localhost:1")!, mode: .dev,
-                               userId: "u", orgId: "o", deviceId: "phone",
-                               deviceName: "phone", tokens: nil, devBearer: "u@o")
+        let config = AppConfig(peerURL: URL(string: "http://localhost:1")!,
+                               profileId: "profile-test", deviceId: "phone",
+                               deviceName: "phone")
         let store = SessionStore(chatId: "c-reissue", config: config)
         let commands = store.doc.getList(id: "commands")
         let dead = try commands.pushContainer(child: LoroMap())

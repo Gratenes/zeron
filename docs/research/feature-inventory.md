@@ -1,19 +1,18 @@
 # Zeron — Complete Feature Inventory (parity checklist for the native rewrite)
 
-Source: exploration of ~/github/zeron on 2026-07-19. Rewrite keeps ONLY the Loro path; token-usage
-display EXCLUDED. File paths refer to the reference repo.
+Source: exploration of the original application on 2026-07-19, amended after the
+Tailcat/Rust-peer replacement. The inventory preserves unrelated feature detail;
+provider-specific backend prescriptions are superseded by `ARCHITECTURE.md`.
 
 ## 0. Architecture orientation
-- Backend = engine, UI = viewport. Headless backend runs agents, owns auth, hosts terminals,
-  computes diffs, syncs. Desktop is a thin viewport over localhost WebSocket "IPC" (UiRpc).
-- Two transports, one contract: UI<->backend = IPC (UiRpc); backend<->backend = device-room relay
-  DO on the edge (ControlRpc). WebRTC mesh is GONE (replaced by relay).
-- KEEP (Loro/DO): transcripts = per-chat Loro docs via session-room DO; commands
-  (run/steer/interrupt/respondInput) = durable doc entries executed by the chat's host.
-- DROP: messages sync over Postgres logical replication, device-addressed run RPCs,
-  WatchMessages, WebRTC + signaling.
-- NOTE: chats/sessions/devices/checkout-diffs entity sync is STILL Postgres-based in zeron — the rewrite
-  must re-home it (decision: per-org workspace Loro doc, see ARCHITECTURE.md).
+- Backend = engine, UI = viewport. The headless engine runs agents, hosts device-owned
+  resources, and can run the durable sync/storage peer. Desktop remains a thin viewport
+  over localhost WebSocket IPC.
+- Two transports, one contract: UI↔engine uses local IPC; engine↔engine uses the stable
+  relay RPC protocol over the application-managed Tailcat adapter.
+- Loro transcripts and durable command/queue entries remain the data model. The Rust
+  peer persists chat logs/checkpoints and the conflict-resolved profile registry.
+- Postgres entity sync, WebRTC signaling, WorkOS, and the Cloudflare backend are retired.
 
 ## 1. Desktop app
 ### 1.1 Window shell
@@ -148,8 +147,9 @@ display EXCLUDED. File paths refer to the reference repo.
 - Mutate: CreateChat, SetChatConfig, SetChatArchived, RenameChat, RenameDevice, DeleteChat,
   MarkChatSeen
 ### AuthRpc (IPC-only)
-- AuthStatus -> stream (SignedOut|NeedsOrganization{user}|SignedIn{user,orgId?})
-- SignIn->{url}; SignInHeadless->{url}; CompleteSignIn{code}; SignOut; ListOrgs; CreateOrg; SelectOrg
+- AuthStatus streams local or paired profile state.
+- IPC-only operations initialize a peer, redeem or issue one-use invitations, list or
+  revoke trusted devices, inspect peer status, and disconnect this installation.
 ### Wire types
 - AgentEvent: SessionStarted, TextDelta, ReasoningDelta, ToolCall, ToolResult, Usage(kept as event,
   not displayed), Error, InputRequested, InputResolved, Steered, Done
@@ -159,31 +159,29 @@ display EXCLUDED. File paths refer to the reference repo.
   FolderListing/CheckoutDiff, AgentAccount/AgentUsage, AuthState
 
 ## 3. Backend engine
-- 3.1 Lifecycle: single-instance lock on data dir; login-shell PATH; crash shield (drain+exit);
-  parent-PID watchdog; heartbeat 15s; device registration; stale-session recovery; headless
-  sign-in prompt on TTY; doc command executor (host-only) run/steer(->new-turn fallback)/
-  interrupt/respondInput.
+- 3.1 Lifecycle: single-instance lock on the profile data directory, device identity and
+  presence, stale-session recovery, daemon supervision, and a host-only command executor
+  for run/steer/interrupt/respondInput. Pairing state changes take effect on restart.
 - 3.2 Sessions engine: per-session pub/sub; Subscribe = journal replay (resumable seq) then live;
   persistent steerable sessions (idle reaper, STALL_MS=10min watchdog, steering mailbox delivered
   at step/turn boundary); run-journal on disk (auto-resume after crash); withDoc hooks at every
   transcript boundary; DocSegmentWriter streams folded parts at STREAM_COMMIT_MS; recovery stamps
   aborted.
-- 3.3 Session-docs host: docs.sqlite (snapshots + processed-command ledger); per-chat handle joins
-  wss /session/{chatId}/ws (loro protocol + ephemeral); writes user/assistant entries; drains
-  durable commands (processed-id idempotence, mark-BEFORE-execute); publishes diff sidecar;
-  presence; warm-opens recent chats (14d, cap 30); cold via device-room nudge; L2 tail GET.
+- 3.3 Session-docs host: SQLite snapshots and processed-command ledger; per-chat handles
+  join the durable Rust peer, write transcript entries, drain durable commands with
+  mark-before-execute idempotence, publish sidecars and presence, and wake cold hosts
+  through durable nudges.
 - 3.4 Terminals: pty; bounded 1MB replay; owner re-checked; live shells survive detach; exited
   buffers 30min TTL; max 32; SubscribeTerminal replays then tails.
-- 3.5 Repos/diffs: list/add/clone/create; branches; worktrees ~/.zeron/worktrees/<repo>/<name>;
-  checkoutIdentity; CheckoutDiffSync: fs watchers + 2min repair, git diff (name-status + numstat +
-  patch incl untracked), 3MiB cap, sha256; publishes DiffSidecar to chat DOs; GitMetadataSync
-  watches HEAD -> chat.branch; folder listing in disposable worker w/ 6s timeout.
-- 3.7 Auth: WorkOS auth-code + loopback callback; headless paste-code; refresh persisted; org
-  gate; dev mode bearer. Uploads: chunked staging -> durable file. Agent accounts: claude-swap
-  (Keychain "Claude Code-credentials" / ~/.claude/.credentials.json + ~/.claude.json; Codex
-  $CODEX_HOME/auth.json); detect live, swap to activate, plan labels, usage probes, OAuth flows.
-  Device-room host: one wss to device DO; serves full ControlRpc via virtual sockets over
-  {s,k,to,from} frames; nudges. Peers: dials other devices' relay DOs, link caching.
+- 3.5 Repos/diffs: list/add/clone/create; branches; worktrees; checkout identity;
+  CheckoutDiffSync watchers plus repair, bounded patches including untracked files, and
+  diff sidecars persisted by the peer. GitMetadataSync watches HEAD; folder listing runs
+  in a disposable local worker with a timeout.
+- 3.7 Pairing uses persistent Ed25519 device keys, one-use invitations,
+  proof-of-possession challenges, profile-bound tokens, and revocation. Uploads use
+  resumable chunk staging, targeted host delivery, and profile-scoped peer custody.
+  Agent-account credential switching and provider OAuth remain independent. The device
+  relay preserves targeted RPC, nudges, host replacement, and link caching.
 
 ## 4. Harness
 - HarnessShape: id, name, supportsSteering, steeringMode (step-boundary|turn-boundary),
@@ -218,25 +216,23 @@ display EXCLUDED. File paths refer to the reference repo.
 - Constants: MSG_INLINE_MAX 256KB, RETAIN_DAYS 30, COMPACT_LOG_BYTES 8MB, SOFT_CEILING 25MB,
   STREAM_COMMIT_MS 120, DO_FLUSH_MS 5000, LRU 80MB, TAIL 64, TERMINAL_OUTPUT_BATCH_MS 12.
 
-## 6. Edge (Cloudflare Worker + DOs — stays TypeScript)
-- Worker routes: /health; /session/:chatId/ws (loro room); /tail/:chatId; /stats/:chatId;
-  /diff/:chatId GET/POST; /snapshot/:chatId; /append/:chatId; /seed/:chatId;
-  /device/:deviceId/ws?role=host|client&connId=; /device/:id/sidecar/:name; /device/:id/status;
-  /device/:id/nudge; /attachments/:sha256 PUT/GET/HEAD (content-addressed R2 att/{user}/{sha},
-  32MB, server-side hash verify).
-- Auth: WorkOS JWKS at edge; DOs see only Worker-stamped identity; ownership claim-on-first-join.
-- SessionRoom DO: hibernatable WS, updates log (5s flush), snapshot blob, lazy tail, diff blob,
-  %EPH presence; two-level compaction (log-fold @8MB lossless; history-trim shallow snapshot at
-  daily frontier checkpoints >= RETAIN_DAYS); daily alarm -> checkpoint + trim + R2
-  backup/{chatId}/latest.loro; VV backfill on join; fragment reassembly; stale-peer import ->
-  InvalidUpdate ack -> app re-submit; blobs chunked over DO SQL.
-- DeviceRoom DO: byte-pipe frames uleb128 len ‖ JSON {s,k,to?,from?} ‖ payload; one live host
-  socket; relay control frames; durable nudges (replayed on host join, dedup, cap 256); sidecar
-  slots (repos snapshot); /status /nudge.
+## 6. Durable sync/storage peer
+- Tailcat supplies private connectivity through the packaged and supervised adapter; it
+  does not provide application authorization or durable storage.
+- The Rust peer authenticates paired device keys and profile-bound tokens on every route.
+  Revocation closes active sync, RPC, preview, and blob access.
+- SQLite persists chat update logs, checkpoints, registry rows, command/queue replay
+  state, sidecars, attachment custody, and consistent backup generations. Clients retain
+  outboxes and cursors for reconnect, offline catch-up, and idempotent replay.
+- Stable chat, registry, and device-relay framing is shared by desktop, headless, and iOS
+  clients. Remote RPC is explicitly allowlisted and remains separate from local IPC.
 
-## 7. Server -> folded into edge for native
-- Keep: WorkOS code exchange/refresh, org list/create (move to edge Worker routes).
-- Drop: entity push/query, Postgres, signaling, Fly deploy of separate server.
+## 7. Deployment boundary
+- Keep an owner-controlled peer running when devices require catch-up without overlapping
+  availability. Public DERP has rate and availability limits; an owned DERP map is
+  supported where reliable relay service is required.
+- WorkOS, Cloudflare Worker/Durable Objects/R2, Postgres entity sync, and the signaling
+  server are removed from the production architecture.
 
 ## 8. EXCLUDED (token usage display)
 - WatchUsage RPC, UsageStats/UsageDay, backend usage aggregation, profile heatmap/hero/stats,

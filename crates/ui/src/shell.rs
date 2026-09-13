@@ -50,8 +50,7 @@ use crate::settings::{
     jump_hints_visible, modifier_send_hint_visible, platform_combo,
 };
 use crate::state::{
-    AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
-    format_time_ago, org_name_valid, parse_orgs, sort_memberships,
+    AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, format_time_ago,
 };
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
@@ -812,45 +811,21 @@ enum UpdateFlow {
     Failed(SharedString),
 }
 
-/// Account lifecycle owned by this process. Sign-in on a local workspace
-/// flows through the in-place switch wizard (offer → switch → import → done);
-/// `RestartPending` survives only as the fallback when the in-place swap
-/// fails and a full quit is the safe way out.
+/// Account lifecycle owned by this process. Pairing on a local workspace flows
+/// through an in-place switch offer; `RestartPending` is the fallback when the
+/// runtime cannot be replaced safely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SyncFlow {
     Idle,
     Enabling,
     Canceling,
-    /// Signed in on a local runtime: the wizard's choice step (bring local
-    /// work / start fresh / later). `notice_open: false` = postponed, badge
-    /// in the account menu.
+    /// Pairing succeeded on a local runtime. The user can switch to the paired
+    /// profile now or postpone the fresh profile handoff.
     SwitchOffer {
         notice_open: bool,
     },
-    /// Stopping the local runtime and bootstrapping the synced one in-place.
-    Switching {
-        import: bool,
-    },
-    /// The one-time import stream is running on the new synced runtime.
-    Importing {
-        done: usize,
-        total: usize,
-    },
-    /// Import finished; the success step stays until dismissed.
-    ImportDone {
-        imported: usize,
-        skipped: usize,
-    },
-    /// The import stream reported errors or died early. Explicit retry step —
-    /// structural idempotence makes re-running safe (only missing rows copy).
-    /// Details ride `runtime_change_error`. `notice_open: false` = postponed:
-    /// the dialog is hidden but the failure stays pending, reachable through
-    /// the account menu — dismissal must never discard the only retry
-    /// entry point (under Synced scope the menu otherwise offers just
-    /// Sign out, and the local rows would be unreachable).
-    ImportFailed {
-        notice_open: bool,
-    },
+    /// Stopping the local runtime and bootstrapping the paired profile in-place.
+    Switching,
     RestartPending {
         notice_open: bool,
     },
@@ -860,32 +835,21 @@ enum SyncFlow {
 }
 
 impl SyncFlow {
-    /// States the in-place switch driver owns end-to-end — auth/scope edges
-    /// must not reset them while the runtime is being replaced under the UI.
+    /// State owned by the in-place runtime replacement driver.
     fn is_switch_lifecycle(self) -> bool {
-        matches!(
-            self,
-            SyncFlow::Switching { .. }
-                | SyncFlow::Importing { .. }
-                | SyncFlow::ImportDone { .. }
-                | SyncFlow::ImportFailed { .. }
-        )
+        matches!(self, SyncFlow::Switching)
     }
 
     fn has_visible_overlay(self) -> bool {
         match self {
             SyncFlow::Idle
             | SyncFlow::SwitchOffer { notice_open: false }
-            | SyncFlow::ImportFailed { notice_open: false }
             | SyncFlow::RestartPending { notice_open: false }
             | SyncFlow::SignedOutRestartRequired => false,
             SyncFlow::Enabling
             | SyncFlow::Canceling
             | SyncFlow::SwitchOffer { notice_open: true }
-            | SyncFlow::Switching { .. }
-            | SyncFlow::Importing { .. }
-            | SyncFlow::ImportDone { .. }
-            | SyncFlow::ImportFailed { notice_open: true }
+            | SyncFlow::Switching
             | SyncFlow::RestartPending { notice_open: true }
             | SyncFlow::SignOutConfirm
             | SyncFlow::SigningOut => true,
@@ -994,69 +958,22 @@ async fn stop_synced_runtime(
     }
 }
 
-/// What an import-summary stream item means for the wizard: `Ok((imported,
-/// skipped))` only when the engine reported zero errors; otherwise the
-/// user-facing failure message. Pure so the partial-failure path is testable.
-fn import_summary_outcome(item: &serde_json::Value) -> Result<(usize, usize), String> {
-    let count = |key: &str| item.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-    let errors: Vec<&str> = item
-        .get("errors")
-        .and_then(|e| e.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
-    if errors.is_empty() {
-        return Ok((count("importedChats"), count("skippedChats")));
-    }
-    let first = errors.first().copied().unwrap_or("unknown error");
-    Err(if errors.len() == 1 {
-        format!("{} imported, 1 failure: {first}", count("importedChats"))
-    } else {
-        format!(
-            "{} imported, {} failures — first: {first}",
-            count("importedChats"),
-            errors.len()
-        )
-    })
-}
-
-/// The offer step's description of what a switch would bring along, or `None`
-/// when the local profile holds nothing importable. Spaces count as work:
-/// a projects-only profile must get the import choice too.
-fn local_work_phrase(chats: usize, spaces: usize) -> Option<String> {
-    let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
-    match (chats, spaces) {
-        (0, 0) => None,
-        (c, 0) => Some(format!("the {}", plural(c, "session"))),
-        (0, s) => Some(format!("the {}", plural(s, "project"))),
-        (c, s) => Some(format!(
-            "the {} and {}",
-            plural(c, "session"),
-            plural(s, "project")
-        )),
-    }
-}
-
 fn account_menu_action(scope: Option<WorkspaceScope>, flow: SyncFlow) -> Option<AccountMenuAction> {
     match scope {
         Some(WorkspaceScope::Local) => match flow {
             SyncFlow::Idle => Some(AccountMenuAction::EnableSync),
-            SyncFlow::Enabling | SyncFlow::Canceling => Some(AccountMenuAction::SyncInProgress),
+            SyncFlow::Enabling | SyncFlow::Canceling | SyncFlow::Switching => {
+                Some(AccountMenuAction::SyncInProgress)
+            }
             SyncFlow::SwitchOffer { .. } | SyncFlow::RestartPending { .. } => {
                 Some(AccountMenuAction::RestartPending)
             }
-            SyncFlow::ImportFailed { .. } => Some(AccountMenuAction::RestartPending),
-            SyncFlow::Switching { .. }
-            | SyncFlow::Importing { .. }
-            | SyncFlow::ImportDone { .. } => Some(AccountMenuAction::SyncInProgress),
             SyncFlow::SignOutConfirm
             | SyncFlow::SigningOut
             | SyncFlow::SignedOutRestartRequired => None,
         },
         Some(WorkspaceScope::Synced) => match flow {
             SyncFlow::SignedOutRestartRequired => None,
-            // A pending import failure must stay reachable: this is the only
-            // surface that can reopen the retry dialog on a synced runtime.
-            SyncFlow::ImportFailed { .. } => Some(AccountMenuAction::RestartPending),
             _ if flow.is_switch_lifecycle() => Some(AccountMenuAction::SyncInProgress),
             _ => Some(AccountMenuAction::SignOut),
         },
@@ -1103,14 +1020,43 @@ fn sync_flow_after_auth(
     }
 }
 
-/// The "Create your workspace" gate (feature-inventory §1.2 OrgGate).
-struct OrgGateUi {
+fn fresh_switch_offer_body(email: Option<&str>) -> String {
+    let destination = match email.filter(|email| !email.trim().is_empty()) {
+        Some(email) => format!("the synced profile paired as {email}"),
+        None => "the paired synced profile".to_owned(),
+    };
+    format!(
+        "Switch to {destination} now? Your existing local workspace stays on this device and is not copied. Existing data from that peer will load after the switch."
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PairingChoice {
+    Choose,
+    Create,
+    Join,
+}
+
+fn pairing_activation_key(key: &str) -> bool {
+    matches!(key.to_ascii_lowercase().as_str(), "enter" | "space")
+}
+
+/// Ephemeral pairing form state. Invitation text exists only in the input and
+/// is sent directly to the engine; it is never copied into UI settings.
+struct PairingGateUi {
     name_input: Entity<ComposerInput>,
-    orgs: Loadable<Vec<OrgRow>>,
+    code_input: Entity<ComposerInput>,
+
+    create_choice_focus: FocusHandle,
+    join_choice_focus: FocusHandle,
+
+    create_back_focus: FocusHandle,
+    join_back_focus: FocusHandle,
+    choice: PairingChoice,
     submitting: bool,
     error: Option<SharedString>,
     task: Option<Task<()>>,
-    _events: Subscription,
+    _events: Vec<Subscription>,
 }
 
 /// One right-pane subagent tab: the doc it shows, its strip title, and the
@@ -1295,16 +1241,12 @@ pub struct Shell {
     /// How this binary was installed — decides the strip's click behavior.
     /// Cached: `detect_install` stats `current_exe` and this renders per frame.
     install: zeron_update::InstallKind,
-    org: Option<OrgGateUi>,
+    pairing: Option<PairingGateUi>,
     sync_flow: SyncFlow,
     mutate_task: Option<Task<()>>,
     auth_task: Option<Task<()>>,
     runtime_change_task: Option<Task<()>>,
     runtime_change_error: Option<SharedString>,
-    /// The one-time local→synced import stream (switch wizard progress step).
-    import_task: Option<Task<()>>,
-    /// Title of the chat the import stream is copying right now.
-    import_current: Option<SharedString>,
     /// Kept for the failed-gate "Retry" action.
     boot: EngineBootConfig,
     data_dir: PathBuf,
@@ -1612,14 +1554,12 @@ impl Shell {
             update_task: None,
             update_dismissed: None,
             install: zeron_update::detect_install(),
-            org: None,
+            pairing: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
             auth_task: None,
             runtime_change_task: None,
             runtime_change_error: None,
-            import_task: None,
-            import_current: None,
             boot,
             data_dir,
             settings,
@@ -1680,7 +1620,7 @@ impl Shell {
                 self.sync_flow,
                 SyncFlow::RestartPending { .. } | SyncFlow::SwitchOffer { .. }
             ) {
-                self.org = None;
+                self.pairing = None;
             }
         }
         // The in-place local→synced switch: once the replacement runtime is
@@ -3649,7 +3589,7 @@ impl Shell {
                     Ok(()) => {
                         shell.sync_flow = SyncFlow::Idle;
                         shell.runtime_change_error = None;
-                        shell.org = None;
+                        shell.pairing = None;
                         shell.route = Route::Chat;
                         shell.space_boot_applied = false;
                         state.update(cx, |state, cx| state.prepare_runtime_replacement(cx));
@@ -3673,17 +3613,20 @@ impl Shell {
             return;
         };
         let pending_auth = self.auth_task.take();
-        let pending_org = self.org.as_mut().and_then(|org| org.task.take());
+        let pending_pairing = self
+            .pairing
+            .as_mut()
+            .and_then(|pairing| pairing.task.take());
         if local {
             self.sync_flow = SyncFlow::Canceling;
         }
         self.auth_task = Some(cx.spawn(async move |this, cx| {
-            // Do not race SignOut against an exchange or organization write
-            // that can still persist a session after credentials were cleared.
+            // Do not race SignOut against an in-flight pairing mutation that
+            // could still persist a peer session after credentials were cleared.
             if let Some(task) = pending_auth {
                 task.await;
             }
-            if let Some(task) = pending_org {
+            if let Some(task) = pending_pairing {
                 task.await;
             }
             let result = engine
@@ -3693,7 +3636,7 @@ impl Shell {
             this.update(cx, |shell, cx| {
                 match result {
                     Ok(_) => {
-                        shell.org = None;
+                        shell.pairing = None;
                         if local {
                             shell.sync_flow = SyncFlow::Idle;
                         }
@@ -3703,7 +3646,7 @@ impl Shell {
                             shell.sync_flow = SyncFlow::Enabling;
                         }
                         shell.sidebar_notice =
-                            Some(format!("Could not cancel sign-in: {err}").into());
+                            Some(format!("Could not cancel pairing: {err}").into());
                     }
                 }
                 cx.notify();
@@ -3721,9 +3664,6 @@ impl Shell {
             SyncFlow::SwitchOffer { .. } => {
                 self.sync_flow = SyncFlow::SwitchOffer { notice_open: false };
             }
-            SyncFlow::ImportFailed { .. } => {
-                self.sync_flow = SyncFlow::ImportFailed { notice_open: false };
-            }
             _ => return,
         }
         cx.notify();
@@ -3738,20 +3678,14 @@ impl Shell {
             SyncFlow::SwitchOffer { .. } => {
                 self.sync_flow = SyncFlow::SwitchOffer { notice_open: true };
             }
-            SyncFlow::ImportFailed { .. } => {
-                self.sync_flow = SyncFlow::ImportFailed { notice_open: true };
-            }
             _ => return,
         }
         cx.notify();
     }
 
-    /// The wizard's choice step chose a path: stop the local runtime, boot the
-    /// synced one in-place (mirror of the sign-out transition), then let
-    /// [`Self::drive_sync_switch`] run the import once the runtime is ready.
-    /// Failure falls back to the quit-and-reopen dialog — the local profile is
-    /// untouched, so the old path is always a safe exit.
-    fn start_synced_switch(&mut self, import: bool, cx: &mut Context<Self>) {
+    /// Stop the local runtime and boot the paired profile in-place. The local
+    /// profile remains untouched and is not copied into the paired profile.
+    fn start_synced_switch(&mut self, cx: &mut Context<Self>) {
         if self.runtime_change_task.is_some() {
             return;
         }
@@ -3761,9 +3695,8 @@ impl Shell {
             cx.notify();
             return;
         };
-        self.sync_flow = SyncFlow::Switching { import };
+        self.sync_flow = SyncFlow::Switching;
         self.runtime_change_error = None;
-        self.import_current = None;
         let ipc_port = self.boot.ipc_port;
         let data_dir = self.data_dir.clone();
         let transition = Tokio::spawn(cx, async move {
@@ -3780,10 +3713,9 @@ impl Shell {
                 shell.runtime_change_task = None;
                 match result {
                     Ok(()) => {
-                        // Keep `Switching { import }`: the state observer sees
-                        // the replacement runtime reach Ready and advances the
-                        // wizard from there.
-                        shell.org = None;
+                        // Keep `Switching`: the state observer sees the replacement
+                        // runtime reach Ready and advances the wizard from there.
+                        shell.pairing = None;
                         shell.route = Route::Chat;
                         shell.space_boot_applied = false;
                         state.update(cx, |state, cx| state.prepare_runtime_replacement(cx));
@@ -3801,16 +3733,11 @@ impl Shell {
         cx.notify();
     }
 
-    /// Advance the in-place switch when the replacement runtime lands: Ready +
-    /// Synced starts the import stream (or finishes immediately when the user
-    /// chose a fresh start); a runtime that comes back non-synced fell out of
-    /// the swap — surface the quit fallback rather than pretend.
+    /// Finish the fresh profile handoff when the replacement runtime is ready.
+    /// A runtime that comes back non-synced falls back to the restart dialog.
     fn drive_sync_switch(&mut self, cx: &mut Context<Self>) {
-        let SyncFlow::Switching { import } = self.sync_flow else {
+        if self.sync_flow != SyncFlow::Switching || self.runtime_change_task.is_some() {
             return;
-        };
-        if self.runtime_change_task.is_some() {
-            return; // still stopping the local runtime
         }
         let (ready, scope) = {
             let state = self.state.read(cx);
@@ -3829,12 +3756,8 @@ impl Shell {
         }
         match scope {
             Some(WorkspaceScope::Synced) => {
-                if import {
-                    self.spawn_local_import(cx);
-                } else {
-                    self.sync_flow = SyncFlow::Idle;
-                    cx.notify();
-                }
+                self.sync_flow = SyncFlow::Idle;
+                cx.notify();
             }
             Some(_) => {
                 self.sync_flow = SyncFlow::RestartPending { notice_open: true };
@@ -3844,109 +3767,6 @@ impl Shell {
             }
             None => {}
         }
-    }
-
-    /// Subscribe to the engine's one-time import stream and mirror its
-    /// progress into the wizard.
-    fn spawn_local_import(&mut self, cx: &mut Context<Self>) {
-        if self.import_task.is_some() {
-            return;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            self.sync_flow = SyncFlow::RestartPending { notice_open: true };
-            self.runtime_change_error = Some("Engine not connected".into());
-            cx.notify();
-            return;
-        };
-        self.sync_flow = SyncFlow::Importing { done: 0, total: 0 };
-        self.runtime_change_error = None;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
-        let stream = Tokio::spawn(cx, async move {
-            let mut items = engine
-                .client()
-                .subscribe(methods::IMPORT_LOCAL_WORKSPACE, serde_json::json!({}))
-                .await
-                .map_err(|error| error.to_string())?;
-            while let Some(item) = items.recv().await {
-                let _ = tx.send(item);
-            }
-            Ok::<(), String>(())
-        });
-        self.import_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let item = rx.recv().await;
-                let ended = item.is_none();
-                this.update(cx, |shell, cx| {
-                    if let Some(item) = &item {
-                        shell.apply_import_event(item, cx);
-                    }
-                    if ended {
-                        shell.import_task = None;
-                        shell.import_current = None;
-                        // A stream that died before its summary is a failure —
-                        // offer the in-place retry (idempotent).
-                        if matches!(shell.sync_flow, SyncFlow::Importing { .. }) {
-                            shell.sync_flow = SyncFlow::ImportFailed { notice_open: true };
-                            shell.runtime_change_error =
-                                Some("The import stream ended before it finished.".into());
-                        }
-                        cx.notify();
-                    }
-                })
-                .ok();
-                if ended {
-                    break;
-                }
-            }
-            if let Ok(Err(error)) = stream.await {
-                this.update(cx, |shell, cx| {
-                    shell.import_task = None;
-                    if matches!(shell.sync_flow, SyncFlow::Importing { .. }) {
-                        shell.sync_flow = SyncFlow::ImportFailed { notice_open: true };
-                        shell.runtime_change_error = Some(error.into());
-                        cx.notify();
-                    }
-                })
-                .ok();
-            }
-        }));
-        cx.notify();
-    }
-
-    fn apply_import_event(&mut self, item: &serde_json::Value, cx: &mut Context<Self>) {
-        match item.get("kind").and_then(|k| k.as_str()) {
-            Some("start") => {
-                let total = item.get("chats").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                self.sync_flow = SyncFlow::Importing { done: 0, total };
-            }
-            Some("chat") => {
-                let index = item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let total = item.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                self.import_current = item
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .map(|t| SharedString::from(t.to_string()));
-                self.sync_flow = SyncFlow::Importing { done: index, total };
-            }
-            Some("summary") => {
-                self.import_current = None;
-                // A summary with errors is a FAILED import, however normally
-                // the stream ended — never present a partial migration as
-                // complete (the engine keeps collecting per-item failures
-                // precisely so this can be surfaced).
-                match import_summary_outcome(item) {
-                    Ok((imported, skipped)) => {
-                        self.sync_flow = SyncFlow::ImportDone { imported, skipped };
-                    }
-                    Err(message) => {
-                        self.sync_flow = SyncFlow::ImportFailed { notice_open: true };
-                        self.runtime_change_error = Some(message.into());
-                    }
-                }
-            }
-            _ => return,
-        }
-        cx.notify();
     }
 
     fn quit_for_runtime_change(&mut self, cx: &mut Context<Self>) {
@@ -4003,151 +3823,124 @@ impl Shell {
         cx.notify();
     }
 
-    fn start_sign_in(&mut self, cx: &mut Context<Self>) {
-        let scope = self.state.read(cx).workspace_scope;
-        if scope == Some(WorkspaceScope::Development) {
+    fn start_pairing(&mut self, cx: &mut Context<Self>) {
+        if self.state.read(cx).workspace_scope == Some(WorkspaceScope::Development) {
             return;
         }
         self.close_user_menu(cx);
-        if scope == Some(WorkspaceScope::Local) {
-            self.sync_flow = SyncFlow::Enabling;
-        }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.auth_task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::SIGN_IN, serde_json::json!({}))
-                .await;
-            this.update(cx, |shell, cx| match result {
-                Ok(value) => {
-                    if let Some(url) = value.get("url").and_then(|u| u.as_str()) {
-                        cx.open_url(url);
-                    }
-                    cx.notify();
-                }
-                Err(err) => {
-                    if scope == Some(WorkspaceScope::Local) && shell.sync_flow == SyncFlow::Enabling
-                    {
-                        shell.sync_flow = SyncFlow::Idle;
-                    }
-                    shell.sidebar_notice = Some(format!("Sign in failed: {err}").into());
-                    cx.notify();
-                }
-            })
-            .ok();
-        }));
+        self.sync_flow = SyncFlow::Enabling;
+        self.ensure_pairing_ui(cx);
         cx.notify();
     }
 
-    // ---- org gate ----
-
-    fn ensure_org_ui(&mut self, cx: &mut Context<Self>) {
-        if self.org.is_some() {
+    fn ensure_pairing_ui(&mut self, cx: &mut Context<Self>) {
+        if self.pairing.is_some() {
             return;
         }
         let name_input = cx.new(|cx| {
-            ComposerInput::new("Workspace name", cx).with_accessibility_role(gpui::Role::TextInput)
+            ComposerInput::new("Device name", cx)
+                .with_single_line()
+                .with_accessibility_role(gpui::Role::TextInput)
         });
-        let events = cx.subscribe(&name_input, |this: &mut Shell, _, event, cx| {
+        name_input.update(cx, |input, cx| input.set_text("This device", cx));
+        let code_input = cx.new(|cx| {
+            ComposerInput::new("One-time kratos-pair invitation code", cx)
+                .with_single_line()
+                .with_accessibility_role(gpui::Role::TextInput)
+        });
+        let name_events = cx.subscribe(&name_input, |this: &mut Shell, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
-                this.create_org(cx);
+                this.submit_peer_initialize(cx);
             }
         });
-        self.org = Some(OrgGateUi {
+        let code_events = cx.subscribe(&code_input, |this: &mut Shell, _, event, cx| {
+            if matches!(event, ComposerInputEvent::Submitted) {
+                this.submit_peer_pair(cx);
+            }
+        });
+        self.pairing = Some(PairingGateUi {
             name_input,
-            orgs: Loadable::Idle,
+            code_input,
+
+            create_choice_focus: cx.focus_handle(),
+            join_choice_focus: cx.focus_handle(),
+
+            create_back_focus: cx.focus_handle(),
+            join_back_focus: cx.focus_handle(),
+            choice: PairingChoice::Choose,
             submitting: false,
             error: None,
             task: None,
-            _events: events,
+            _events: vec![name_events, code_events],
         });
-        self.load_orgs(cx);
     }
 
-    fn load_orgs(&mut self, cx: &mut Context<Self>) {
+    fn submit_peer_initialize(&mut self, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let Some(org) = self.org.as_mut() else { return };
-        org.orgs = Loadable::Loading;
-        org.task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::LIST_ORGS, serde_json::json!({}))
-                .await;
-            this.update(cx, |shell, cx| {
-                if let Some(org) = shell.org.as_mut() {
-                    org.orgs = match result {
-                        Ok(value) => Loadable::Ready(sort_memberships(parse_orgs(&value))),
-                        Err(err) => Loadable::Error(err.to_string()),
-                    };
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    fn create_org(&mut self, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
+        let Some(pairing) = self.pairing.as_mut() else {
             return;
         };
-        let Some(org) = self.org.as_mut() else { return };
-        if org.submitting {
+        if pairing.submitting {
             return;
         }
-        let name = org.name_input.read(cx).text().trim().to_string();
-        if !org_name_valid(&name) {
-            org.error = Some("Enter a workspace name".into());
-            cx.notify();
-            return;
-        }
-        org.submitting = true;
-        org.error = None;
-        org.task = Some(cx.spawn(async move |this, cx| {
-            let result = engine
-                .client()
-                .call(methods::CREATE_ORG, serde_json::json!({ "name": name }))
-                .await;
-            this.update(cx, |shell, cx| {
-                if let Some(org) = shell.org.as_mut() {
-                    org.submitting = false;
-                    if let Err(err) = result {
-                        org.error = Some(format!("{err}").into());
-                    }
-                    // Success: the AuthStatus stream flips to SignedIn and the
-                    // gate falls away on its own.
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    fn select_org(&mut self, organization_id: String, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        let Some(org) = self.org.as_mut() else { return };
-        org.submitting = true;
-        org.error = None;
-        org.task = Some(cx.spawn(async move |this, cx| {
+        let name = pairing.name_input.read(cx).text().trim().to_owned();
+        pairing.submitting = true;
+        pairing.error = None;
+        pairing.task = Some(cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call(
-                    methods::SELECT_ORG,
-                    serde_json::json!({ "organizationId": organization_id }),
+                    methods::PEER_INITIALIZE,
+                    serde_json::json!({ "name": name }),
                 )
                 .await;
             this.update(cx, |shell, cx| {
-                if let Some(org) = shell.org.as_mut() {
-                    org.submitting = false;
-                    if let Err(err) = result {
-                        org.error = Some(format!("{err}").into());
+                if let Some(pairing) = shell.pairing.as_mut() {
+                    pairing.submitting = false;
+                    if let Err(error) = result {
+                        pairing.error = Some(format!("Could not create peer: {error}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn submit_peer_pair(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let Some(pairing) = self.pairing.as_mut() else {
+            return;
+        };
+        if pairing.submitting {
+            return;
+        }
+        let code = match crate::pairing::pairing_code_for_rpc(pairing.code_input.read(cx).text()) {
+            Ok(code) => code,
+            Err(message) => {
+                pairing.error = Some(message.into());
+                cx.notify();
+                return;
+            }
+        };
+        pairing.submitting = true;
+        pairing.error = None;
+        pairing.task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::PEER_PAIR, serde_json::json!({ "code": code }))
+                .await;
+            this.update(cx, |shell, cx| {
+                if let Some(pairing) = shell.pairing.as_mut() {
+                    pairing.submitting = false;
+                    // Redemption is the remote peer's explicit trust grant.
+                    if let Err(error) = result {
+                        pairing.error = Some(format!("Pairing was not granted: {error}").into());
                     }
                 }
                 cx.notify();
@@ -5489,13 +5282,15 @@ impl Shell {
     /// Fetch the manifest and stage the new Zeron desktop bundle under the data dir
     /// (tokio — reqwest); the strip flips to "restart to apply" when done.
     fn begin_update_download(&mut self, cx: &mut Context<Self>) {
-        let edge_url = self.boot.edge_url.clone();
+        let releases_url = zeron_update::DEFAULT_RELEASES_URL.to_string();
         let data_dir = self.data_dir.clone();
         let install = self.install.clone();
         self.update_flow = UpdateFlow::Downloading;
         let download = Tokio::spawn(cx, async move {
-            let manifest = zeron_update::fetch_latest(&edge_url).await?;
-            install.stage_desktop(&edge_url, &manifest, &data_dir).await
+            let manifest = zeron_update::fetch_latest(&releases_url).await?;
+            install
+                .stage_desktop(&releases_url, &manifest, &data_dir)
+                .await
         });
         self.update_task = Some(cx.spawn(async move |this, cx| {
             let outcome = match download.await {
@@ -5666,7 +5461,7 @@ impl Shell {
                         AccountMenuAction::EnableSync => {
                             popover::menu_row(theme, false, "user-menu-enable-sync")
                                 .id("user-menu-enable-sync")
-                                .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
+                                .on_click(cx.listener(|this, _, _, cx| this.start_pairing(cx)))
                                 .child(
                                     icon(icons::GLOBAL)
                                         .size(px(16.0))
@@ -5743,10 +5538,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
-        let needs_org = matches!(
-            self.state.read(cx).auth.as_ref(),
-            Some(AuthState::NeedsOrganization { .. })
-        );
         let remote_engine = self
             .state
             .read(cx)
@@ -5760,54 +5551,16 @@ impl Shell {
             "Quit Zeron"
         };
 
-        if self.sync_flow == SyncFlow::Enabling && needs_org {
-            return Some(self.render_org_gate(cx));
+        if self.sync_flow == SyncFlow::Enabling {
+            return Some(self.render_pairing_gate(cx));
         }
 
         let signed_in_email: Option<SharedString> = match self.state.read(cx).auth.as_ref() {
             Some(AuthState::SignedIn { user, .. }) => Some(SharedString::from(user.email.clone())),
             _ => None,
         };
-        // Spaces count as local work too: a projects-only profile must get
-        // the import choice, not a bare "Switch now".
-        let (local_chats, local_spaces) = {
-            let state = self.state.read(cx);
-            (state.chats.len(), state.spaces.len())
-        };
-        let work_phrase = local_work_phrase(local_chats, local_spaces);
-
         let card = match self.sync_flow {
-            SyncFlow::Enabling => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Enable sync"))
-                .child(
-                    div().mt(px(6.0)).child(popover::dialog_body(
-                        &theme,
-                        "Finish signing in in your browser. Zeron will keep using this local workspace until you quit and reopen.",
-                    )),
-                )
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Cancel", "sync-enable-cancel")
-                                .id("sync-enable-cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.cancel_auth_setup(cx)
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Open browser again")
-                                .id("sync-enable-open-browser")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_sign_in(cx)
-                                })),
-                        ),
-                )
-                .into_any_element(),
+            SyncFlow::Enabling => unreachable!("pairing overlay returned above"),
             SyncFlow::Canceling => popover::dialog_card(&theme)
                 .child(popover::dialog_title(&theme, "Canceling sync setup…"))
                 .child(
@@ -5819,143 +5572,10 @@ impl Shell {
                 .into_any_element(),
             // ── in-place switch wizard ────────────────────────────────────
             SyncFlow::SwitchOffer { notice_open: true } => {
-                let has_local_work = work_phrase.is_some();
-                let body: SharedString = match (&signed_in_email, &work_phrase) {
-                    (Some(email), Some(phrase)) => format!(
-                        "You're signed in as {email}. Bring {phrase} from this device into your synced workspace, or start it fresh."
-                    )
-                    .into(),
-                    (Some(email), None) => format!(
-                        "You're signed in as {email}. Zeron can switch to your synced workspace now."
-                    )
-                    .into(),
-                    (None, Some(phrase)) => format!(
-                        "Bring {phrase} from this device into your synced workspace, or start it fresh."
-                    )
-                    .into(),
-                    (None, None) => "Zeron can switch to your synced workspace now.".into(),
-                };
-                let mut actions = div()
-                    .mt(px(16.0))
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap(px(8.0))
-                    .child(
-                        popover::btn_ghost(&theme, "Later", "sync-switch-later")
-                            .id("sync-switch-later")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.postpone_sync_restart(cx)
-                            })),
-                    );
-                if has_local_work {
-                    actions = actions
-                        .child(
-                            popover::btn_ghost(&theme, "Start fresh", "sync-switch-fresh")
-                                .id("sync-switch-fresh")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_synced_switch(false, cx)
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Bring my work")
-                                .id("sync-switch-import")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.start_synced_switch(true, cx)
-                                })),
-                        );
-                } else {
-                    actions = actions.child(
-                        popover::btn_primary(&theme, "Switch now")
-                            .id("sync-switch-now")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_synced_switch(false, cx)
-                            })),
-                    );
-                }
+                let body: SharedString =
+                    fresh_switch_offer_body(signed_in_email.as_deref()).into();
                 popover::dialog_card(&theme)
                     .child(popover::dialog_title(&theme, "Sync is ready"))
-                    .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
-                    .child(actions)
-                    .into_any_element()
-            }
-            SyncFlow::Switching { import } => popover::dialog_card(&theme)
-                .child(popover::dialog_title(
-                    &theme,
-                    "Switching to your synced workspace…",
-                ))
-                .child(div().mt(px(6.0)).child(popover::dialog_body(
-                    &theme,
-                    if import {
-                        "Handing the engine over to your account. Your local sessions come along next."
-                    } else {
-                        "Handing the engine over to your account."
-                    },
-                )))
-                .into_any_element(),
-            SyncFlow::Importing { done, total } => {
-                let fraction = if total == 0 {
-                    0.0
-                } else {
-                    (done as f32 / total as f32).clamp(0.0, 1.0)
-                };
-                let label: SharedString = if total == 0 {
-                    "Looking for local sessions…".into()
-                } else {
-                    format!("Importing session {} of {total}", (done + 1).min(total)).into()
-                };
-                let mut card = popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "Bringing your work over"))
-                    .child(
-                        div()
-                            .mt(px(6.0))
-                            .child(popover::dialog_body(&theme, label)),
-                    );
-                if let Some(current) = self.import_current.clone() {
-                    card = card.child(
-                        div()
-                            .mt(px(4.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.text_muted)
-                            .overflow_hidden()
-                            .child(current),
-                    );
-                }
-                card.child(
-                    // Determinate progress: a hairline track with an accent fill.
-                    div()
-                        .mt(px(14.0))
-                        .h(px(4.0))
-                        .w_full()
-                        .rounded(px(2.0))
-                        .bg(theme.border)
-                        .child(
-                            div()
-                                .h_full()
-                                .rounded(px(2.0))
-                                .bg(theme.accent_strong)
-                                .w(gpui::relative(fraction.max(0.04))),
-                        ),
-                )
-                .into_any_element()
-            }
-            SyncFlow::ImportDone { imported, skipped } => {
-                let body: SharedString = match (imported, skipped) {
-                    (0, 0) => "Your synced workspace is ready.".into(),
-                    (n, 0) => format!(
-                        "{n} session{} moved into your synced workspace.",
-                        if n == 1 { "" } else { "s" },
-                    )
-                    .into(),
-                    (n, s) => format!(
-                        "{n} session{} imported, {s} already present.",
-                        if n == 1 { "" } else { "s" },
-                    )
-                    .into(),
-                };
-                popover::dialog_card(&theme)
-                    .child(popover::dialog_title(&theme, "You're all set"))
                     .child(div().mt(px(6.0)).child(popover::dialog_body(&theme, body)))
                     .child(
                         div()
@@ -5963,55 +5583,33 @@ impl Shell {
                             .flex()
                             .flex_row()
                             .justify_end()
+                            .gap(px(8.0))
                             .child(
-                                popover::btn_primary(&theme, "Continue")
-                                    .id("sync-switch-done")
+                                popover::btn_ghost(&theme, "Later", "sync-switch-later")
+                                    .id("sync-switch-later")
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.sync_flow = SyncFlow::Idle;
-                                        cx.notify();
+                                        this.postpone_sync_restart(cx)
+                                    })),
+                            )
+                            .child(
+                                popover::btn_primary(&theme, "Switch now")
+                                    .id("sync-switch-now")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.start_synced_switch(cx)
                                     })),
                             ),
                     )
                     .into_any_element()
             }
-            SyncFlow::ImportFailed { notice_open: true } => popover::dialog_card(&theme)
-                .child(popover::dialog_title(&theme, "Import didn't finish"))
+            SyncFlow::Switching => popover::dialog_card(&theme)
+                .child(popover::dialog_title(
+                    &theme,
+                    "Switching to your synced workspace…",
+                ))
                 .child(div().mt(px(6.0)).child(popover::dialog_body(
                     &theme,
-                    "Anything already imported is kept; retrying only copies what's missing.",
+                    "Handing the engine over to the paired profile. Your local workspace stays unchanged on this device.",
                 )))
-                .when_some(self.runtime_change_error.clone(), |card, error| {
-                    card.child(
-                        div()
-                            .mt(px(10.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .line_height(px(17.0))
-                            .text_color(theme.danger)
-                            .child(error),
-                    )
-                })
-                .child(
-                    div()
-                        .mt(px(16.0))
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap(px(8.0))
-                        .child(
-                            popover::btn_ghost(&theme, "Later", "import-failed-dismiss")
-                                .id("import-failed-dismiss")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.postpone_sync_restart(cx)
-                                })),
-                        )
-                        .child(
-                            popover::btn_primary(&theme, "Retry import")
-                                .id("import-failed-retry")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.spawn_local_import(cx)
-                                })),
-                        ),
-                )
                 .into_any_element(),
             SyncFlow::RestartPending { notice_open: true } => popover::dialog_card(&theme)
                 .child(popover::dialog_title(
@@ -6107,7 +5705,6 @@ impl Shell {
                 .into_any_element(),
             SyncFlow::Idle
             | SyncFlow::SwitchOffer { notice_open: false }
-            | SyncFlow::ImportFailed { notice_open: false }
             | SyncFlow::RestartPending { notice_open: false }
             | SyncFlow::SignedOutRestartRequired => return None,
         };
@@ -7020,7 +6617,8 @@ impl Shell {
         };
         let indicator = state.indicator_for(&chat_id, now);
         let strip = strip.children(
-            state.session_for(&chat_id)
+            state
+                .session_for(&chat_id)
                 .and_then(|session| session.goal.as_ref())
                 .and_then(|goal| crate::goal::render(goal, &theme)),
         );
@@ -7908,331 +7506,189 @@ impl Shell {
     }
 
     fn render_gate_card(&mut self, phase: &GatePhase, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        let content: AnyElement = match phase {
-            // Backend unreachable: quiet centered copy (zeron Gate `Failed`),
-            // plus a Retry affordance (the native engine doesn't self-redial).
-            GatePhase::Failed(error) => div()
+        if let GatePhase::Failed(error) = phase {
+            let theme = Theme::of(cx).clone();
+            return div()
+                .size_full()
+                .bg(theme.bg)
                 .flex()
-                .flex_col()
                 .items_center()
-                .gap(px(Theme::SPACE_MD))
+                .justify_center()
                 .child(
                     div()
-                        .text_size(crate::typography::ui_rems(14.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(error.clone())),
-                )
-                .child(
-                    div()
-                        .id("retry-engine")
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(theme.border)
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .text_color(theme.text)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.glass_hover()))
-                        .on_click(cx.listener(|this, _, _, cx| this.retry_engine(cx)))
-                        .child(SharedString::from("Retry")),
-                )
-                .into_any_element(),
-            // Login card (zeron App.tsx Gate): centered card on the grid —
-            // logo, "Log in to Zeron", copy, full-width white Log in button.
-            _ => div()
-                .w(px(360.0))
-                .px(px(32.0))
-                .py(px(40.0))
-                .rounded(px(12.0))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.surface_card)
-                .shadow_lg()
-                .flex()
-                .flex_col()
-                .items_center()
-                .text_center()
-                .child(
-                    icon(icons::ZERON_LOGO)
-                        .w(px(31.4))
-                        .h(px(36.0))
-                        .text_color(theme.text),
-                )
-                .child(
-                    div()
-                        .mt(px(24.0))
-                        .text_size(crate::typography::ui_rems(18.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .child(SharedString::from("Log in to Zeron")),
-                )
-                .child(
-                    div()
-                        .mt(px(6.0))
-                        .mb(px(24.0))
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .line_height(px(19.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from(
-                            "This opens your browser to finish logging in — you'll come right back.",
-                        )),
-                )
-                .child(
-                    div()
-                        .id("sign-in")
-                        .w_full()
-                        .h(px(36.0))
                         .flex()
+                        .flex_col()
                         .items_center()
-                        .justify_center()
-                        .rounded(px(6.0))
-                        .bg(theme.text)
-                        .text_size(crate::typography::ui_rems(14.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.on_solid)
-                        .cursor_pointer()
-                        .hover(|s| s.opacity(0.9))
-                        .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
-                        .child(SharedString::from("Log in")),
+                        .gap(px(Theme::SPACE_MD))
+                        .child(
+                            div()
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(error.clone())),
+                        )
+                        .child(
+                            popover::btn_primary(&theme, "Retry")
+                                .id("retry-engine")
+                                .on_click(cx.listener(|this, _, _, cx| this.retry_engine(cx))),
+                        ),
                 )
-                .into_any_element(),
-        };
-        div()
-            .size_full()
-            .relative()
-            .bg(theme.bg)
-            .child(grid_backdrop(&theme))
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    // Keyed per phase (zeron App.tsx `<div key={phase}
-                    // className="animate-in">`): every gate swap replays the
-                    // 0.5s entrance instead of mutating one animated element.
-                    .child(motion::fade_in(
-                        match phase {
-                            GatePhase::SignIn => "gate-card-signin",
-                            _ => "gate-card-failed",
-                        },
-                        div().child(content),
-                    )),
-            )
-            .into_any_element()
+                .into_any_element();
+        }
+        self.render_pairing_gate(cx)
     }
 
-    /// Organization onboarding used by the synced gate and, for a local
-    /// runtime, only after the user explicitly starts the sync opt-in.
-    fn render_org_gate(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        self.ensure_org_ui(cx);
+    /// Fresh peer onboarding. Both choices stay inside local IPC: creating a
+    /// peer starts this device as the durable always-on authority; joining
+    /// sends the opaque invitation to the engine for verification/redemption.
+    fn back_to_pairing_choice(
+        &mut self,
+        origin: PairingChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pairing) = self.pairing.as_mut() else {
+            return;
+        };
+        pairing.choice = PairingChoice::Choose;
+        pairing.error = None;
+        let focus = match origin {
+            PairingChoice::Create => pairing.create_choice_focus.clone(),
+            PairingChoice::Join => pairing.join_choice_focus.clone(),
+            PairingChoice::Choose => return,
+        };
+        window.defer(cx, move |window, cx| focus.focus(window, cx));
+        cx.notify();
+    }
+
+    fn render_pairing_gate(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.ensure_pairing_ui(cx);
         let theme = Theme::of(cx).clone();
         let local_setup = self.state.read(cx).workspace_scope == Some(WorkspaceScope::Local);
-        let Some(org) = self.org.as_ref() else {
+        let Some(pairing) = self.pairing.as_ref() else {
             return Empty.into_any_element();
         };
-        let submitting = org.submitting;
-        let error = org.error.clone();
-        let name_input = org.name_input.clone();
-        let orgs = org.orgs.clone();
+        let choice = pairing.choice;
+        let submitting = pairing.submitting;
+        let error = pairing.error.clone();
+        let name_input = pairing.name_input.clone();
+        let code_input = pairing.code_input.clone();
 
-        let email: Option<SharedString> = self
-            .state
-            .read(cx)
-            .auth_user()
-            .map(|u| u.email.clone().into());
+        let body = match choice {
+            PairingChoice::Choose => div()
+                .flex().flex_col().gap(px(10.0))
+                .child(
+                    div().id("pair-create-choice").p(px(14.0)).rounded(px(8.0))
+                        .border_1().border_color(theme.border).cursor_pointer()
+                        .role(gpui::Role::Button)
+                        .aria_label("Create sync peer on this device")
+                        .tab_index(0)
 
-        let memberships: AnyElement =
-            match &orgs {
-                Loadable::Idle | Loadable::Loading => div()
-                    .mt(px(24.0))
-                    .child(popover::skeleton_rows(
-                        "org-skeleton",
-                        &theme,
-                        2,
-                        cx.entity_id(),
-                        cx,
-                    ))
-                    .into_any_element(),
-                Loadable::Error(message) => div()
-                    .mt(px(24.0))
-                    .child(
-                        popover::error_row(&theme, message).child(
-                            div()
-                                .id("orgs-retry")
-                                .px(px(Theme::SPACE_SM))
-                                .py(px(3.0))
-                                .rounded(px(Theme::CONTROL_RADIUS))
-                                .border_1()
-                                .border_color(theme.border)
-                                .text_color(theme.text)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.glass_hover()))
-                                .on_click(cx.listener(|this, _, _, cx| this.load_orgs(cx)))
-                                .child(SharedString::from("Retry")),
-                        ),
-                    )
-                    .into_any_element(),
-                Loadable::Ready(rows) if rows.is_empty() => Empty.into_any_element(),
-                Loadable::Ready(rows) => div()
-                    .mt(px(24.0))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .pb(px(8.0))
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.text_muted.opacity(0.6))
-                            .child(SharedString::from(
-                                "Or continue in a workspace you belong to",
-                            )),
-                    )
-                    .child(div().flex().flex_col().gap(px(4.0)).children(
-                        rows.iter().enumerate().map(|(ix, row)| {
-                            let org_id = row.organization_id.clone();
-                            div()
-                                .id(("org-row", ix))
-                                .px(px(12.0))
-                                .py(px(8.0))
-                                .rounded(px(8.0))
-                                .border_1()
-                                .border_color(theme.border)
-                                .bg(theme.bg)
-                                .text_size(crate::typography::ui_rems(13.0))
-                                .text_color(theme.text)
-                                .when(submitting, |el| el.opacity(0.5))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(crate::theme::wash(0.11)))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.select_org(org_id.clone(), cx);
-                                }))
-                                .child(SharedString::from(row.name.clone()))
-                        }),
-                    ))
-                    .into_any_element(),
-            };
-
-        // zeron App.tsx OrgGate: w-400 card on the grid — logo, headline,
-        // explainer (+ signed-in email), name form with a white Create button,
-        // then existing memberships and the account escape hatch.
-        let blurb: SharedString = match email {
-            Some(email) => format!(
-                "Zeron is organized around workspaces — create one for yourself or your team. Signed in as {email}."
-            )
-            .into(),
-            None => {
-                "Zeron is organized around workspaces — create one for yourself or your team."
-                    .into()
-            }
-        };
-        let card = div()
-            .w(px(400.0))
-            .px(px(32.0))
-            .py(px(36.0))
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_card)
-            .shadow_lg()
-            .flex()
-            .flex_col()
-            .child(
-                icon(icons::ZERON_LOGO)
-                    .w(px(24.4))
-                    .h(px(28.0))
-                    .text_color(theme.text),
-            )
-            .child(
-                div()
-                    .mt(px(20.0))
-                    .text_size(crate::typography::ui_rems(18.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(SharedString::from("Create your workspace")),
-            )
-            .child(
-                div()
-                    .mt(px(6.0))
-                    .mb(px(24.0))
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .line_height(px(19.0))
-                    .text_color(theme.text_muted)
-                    .child(blurb),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h(px(36.0))
-                            .flex()
-                            .items_center()
-                            .px(px(12.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.bg)
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .child(name_input),
-                    )
-                    .child(
-                        div()
-                            .id("create-org")
-                            .h(px(36.0))
-                            .px(px(16.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(6.0))
-                            .bg(theme.text)
-                            .text_size(crate::typography::ui_rems(14.0))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.on_solid)
-                            .when(submitting, |el| el.opacity(0.5))
-                            .cursor_pointer()
-                            .hover(|s| s.opacity(0.9))
-                            .on_click(cx.listener(|this, _, _, cx| this.create_org(cx)))
-                            .child(SharedString::from(if submitting {
-                                "Creating…"
-                            } else {
-                                "Create"
-                            })),
-                    ),
-            )
-            .child(memberships)
-            .when_some(error, |el, message| {
-                el.child(
-                    div()
-                        .mt(px(16.0))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .line_height(px(17.0))
-                        .text_color(theme.danger_muted.opacity(0.9)) // red-300
-                        .child(message),
+                        .track_focus(&pairing.create_choice_focus)
+                        .hover(|el| el.bg(theme.glass_hover()))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let focus = this.pairing.as_ref().map(|pairing| pairing.name_input.focus_handle(cx));
+                            if let Some(pairing) = this.pairing.as_mut() { pairing.choice = PairingChoice::Create; }
+                            if let Some(focus) = focus { window.defer(cx, move |window, cx| focus.focus(window, cx)); }
+                            cx.notify();
+                        }))
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                            if pairing_activation_key(&event.keystroke.key) {
+                                cx.stop_propagation();
+                                let focus = this.pairing.as_ref().map(|pairing| pairing.name_input.focus_handle(cx));
+                                if let Some(pairing) = this.pairing.as_mut() { pairing.choice = PairingChoice::Create; }
+                                if let Some(focus) = focus { window.defer(cx, move |window, cx| focus.focus(window, cx)); }
+                                cx.notify();
+                            }
+                        }))
+                        .child(div().font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text).child("Create sync peer on this device"))
+                        .child(div().mt(px(4.0)).text_size(crate::typography::ui_rems(12.0)).line_height(px(17.0)).text_color(theme.text_muted)
+                            .child("This device stores the durable sync history and must stay running whenever other devices need to connect or catch up.")),
                 )
-            })
-            .child(
-                div().mt(px(24.0)).flex().flex_row().child(
-                    div()
-                        .id("org-signout")
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted.opacity(0.6))
-                        .cursor_pointer()
-                        .hover(|s| s.text_color(theme.text))
-                        .on_click(cx.listener(|this, _, _, cx| this.cancel_auth_setup(cx)))
-                        .child(SharedString::from(if local_setup {
-                            "Cancel sync setup"
-                        } else {
-                            "Use a different account"
-                        })),
-                ),
-            );
+                .child(
+                    div().id("pair-existing-choice").p(px(14.0)).rounded(px(8.0))
+                        .border_1().border_color(theme.border).cursor_pointer()
+                        .role(gpui::Role::Button)
+                        .aria_label("Pair with existing peer")
+                        .tab_index(0)
+
+                        .track_focus(&pairing.join_choice_focus)
+                        .hover(|el| el.bg(theme.glass_hover()))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let focus = this.pairing.as_ref().map(|pairing| pairing.code_input.focus_handle(cx));
+                            if let Some(pairing) = this.pairing.as_mut() { pairing.choice = PairingChoice::Join; }
+                            if let Some(focus) = focus { window.defer(cx, move |window, cx| focus.focus(window, cx)); }
+                            cx.notify();
+                        }))
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                            if pairing_activation_key(&event.keystroke.key) {
+                                cx.stop_propagation();
+                                let focus = this.pairing.as_ref().map(|pairing| pairing.code_input.focus_handle(cx));
+                                if let Some(pairing) = this.pairing.as_mut() { pairing.choice = PairingChoice::Join; }
+                                if let Some(focus) = focus { window.defer(cx, move |window, cx| focus.focus(window, cx)); }
+                                cx.notify();
+                            }
+                        }))
+                        .child(div().font_weight(gpui::FontWeight::MEDIUM).text_color(theme.text).child("Pair with existing peer"))
+                        .child(div().mt(px(4.0)).text_size(crate::typography::ui_rems(12.0)).line_height(px(17.0)).text_color(theme.text_muted)
+                            .child("Paste a one-time invitation created on a trusted device. The remote peer must explicitly grant this device access.")),
+                )
+                .into_any_element(),
+            PairingChoice::Create => div().flex().flex_col()
+                .child(div().text_size(crate::typography::ui_rems(12.0)).line_height(px(17.0)).text_color(theme.text_muted)
+                    .child("Name this device, then create the durable peer. Keep it online for reliable cross-device sync and offline catch-up."))
+                .child(div().mt(px(14.0)).h(px(38.0)).px(px(12.0)).flex().items_center().rounded(px(8.0)).border_1().border_color(theme.border).bg(theme.bg).child(name_input))
+                .child(div().mt(px(16.0)).flex().justify_end().gap(px(8.0))
+                    .child(popover::btn_ghost(&theme, "Back", "pair-create-back").id("pair-create-back")
+                        .role(gpui::Role::Button).aria_label("Back to pairing choices").tab_index(0)
+
+                        .track_focus(&pairing.create_back_focus)
+                        .on_click(cx.listener(|this, _, window, cx| this.back_to_pairing_choice(PairingChoice::Create, window, cx)))
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                            if pairing_activation_key(&event.keystroke.key) {
+                                cx.stop_propagation();
+                                this.back_to_pairing_choice(PairingChoice::Create, window, cx);
+                            }
+                        })))
+                    .child(popover::btn_primary(&theme, if submitting { "Creating…" } else { "Create peer" }).id("pair-create-submit").on_click(cx.listener(|this, _, _, cx| this.submit_peer_initialize(cx)))))
+                .into_any_element(),
+            PairingChoice::Join => div().flex().flex_col()
+                .child(div().text_size(crate::typography::ui_rems(12.0)).line_height(px(17.0)).text_color(theme.text_muted)
+                    .child("Invitation codes are secret and single-use. They are sent only to your local engine and are never saved in UI settings."))
+                .child(div().mt(px(14.0)).h(px(38.0)).px(px(12.0)).flex().items_center().rounded(px(8.0)).border_1().border_color(theme.border).bg(theme.bg).child(code_input))
+                .child(div().mt(px(8.0)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted.opacity(0.75))
+                    .child("Pairing completes only after the existing peer verifies the invitation and grants this device trust."))
+                .child(div().mt(px(16.0)).flex().justify_end().gap(px(8.0))
+                    .child(popover::btn_ghost(&theme, "Back", "pair-join-back").id("pair-join-back")
+                        .role(gpui::Role::Button).aria_label("Back to pairing choices").tab_index(0)
+
+                        .track_focus(&pairing.join_back_focus)
+                        .on_click(cx.listener(|this, _, window, cx| this.back_to_pairing_choice(PairingChoice::Join, window, cx)))
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                            if pairing_activation_key(&event.keystroke.key) {
+                                cx.stop_propagation();
+                                this.back_to_pairing_choice(PairingChoice::Join, window, cx);
+                            }
+                        })))
+                    .child(popover::btn_primary(&theme, if submitting { "Pairing…" } else { "Grant and pair" }).id("pair-join-submit").on_click(cx.listener(|this, _, _, cx| this.submit_peer_pair(cx)))))
+                .into_any_element(),
+        };
+
+        let card = div().w(px(440.0)).p(px(32.0)).rounded(px(12.0)).border_1()
+            .border_color(theme.border).bg(theme.surface_card).shadow_lg().flex().flex_col()
+            .child(icon(icons::ZERON_LOGO).w(px(24.4)).h(px(28.0)).text_color(theme.text))
+            .child(div().mt(px(18.0)).text_size(crate::typography::ui_rems(18.0)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(theme.text).child("Connect your devices"))
+            .child(div().mt(px(6.0)).mb(px(20.0)).text_size(crate::typography::ui_rems(13.0)).line_height(px(19.0)).text_color(theme.text_muted)
+                .child("Private sync uses a Tailcat peer you control—no browser login or organization account."))
+            .child(body)
+            .when_some(error, |el, message| el.child(div().mt(px(14.0)).text_size(crate::typography::ui_rems(12.0)).text_color(theme.danger_muted).child(message)))
+            .when(local_setup, |el| el.child(div().id("pairing-keep-local").mt(px(18.0)).text_size(crate::typography::ui_rems(12.0)).text_color(theme.text_muted).cursor_pointer()
+                .role(gpui::Role::Button).aria_label("Keep using this local workspace").tab_index(0)
+                .on_click(cx.listener(|this, _, _, cx| this.cancel_auth_setup(cx)))
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                    if pairing_activation_key(&event.keystroke.key) {
+                        cx.stop_propagation();
+                        this.cancel_auth_setup(cx);
+                    }
+                })).child("Keep using this local workspace")));
 
         div()
             .absolute()
@@ -8247,9 +7703,116 @@ impl Shell {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(motion::fade_in("org-gate-card", card)),
+                    .child(motion::fade_in("pairing-gate-card", card)),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod pairing_accessibility_tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+
+    struct PairingHost {
+        shell: Entity<Shell>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Render for PairingHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.shell
+                .update(cx, |shell, cx| shell.render_pairing_gate(cx))
+        }
+    }
+
+    #[test]
+    fn pairing_cards_activate_from_enter_or_space_only() {
+        assert!(pairing_activation_key("enter"));
+        assert!(pairing_activation_key("space"));
+        assert!(pairing_activation_key("Enter"));
+        assert!(!pairing_activation_key("tab"));
+    }
+
+    #[gpui::test]
+    fn keyboard_enters_create_and_back_returns_focus_to_its_choice(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state
+            });
+            let shell = cx.new(|cx| {
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.ensure_pairing_ui(cx);
+                shell
+            });
+            PairingHost { shell, _dir: dir }
+        });
+
+        cx.run_until_parked();
+
+        window
+            .update(cx, |host, window, cx| {
+                let focus = host
+                    .shell
+                    .read(cx)
+                    .pairing
+                    .as_ref()
+                    .unwrap()
+                    .create_choice_focus
+                    .clone();
+                focus.focus(window, cx);
+            })
+            .unwrap();
+        cx.simulate_keystrokes(window.into(), "enter");
+        cx.run_until_parked();
+        window
+            .update(cx, |host, window, cx| {
+                let shell = host.shell.read(cx);
+                let pairing = shell.pairing.as_ref().unwrap();
+                assert_eq!(pairing.choice, PairingChoice::Create);
+                assert!(pairing.name_input.focus_handle(cx).is_focused(window));
+            })
+            .unwrap();
+
+        window
+            .update(cx, |host, window, cx| {
+                let focus = host
+                    .shell
+                    .read(cx)
+                    .pairing
+                    .as_ref()
+                    .unwrap()
+                    .create_back_focus
+                    .clone();
+                focus.focus(window, cx);
+            })
+            .unwrap();
+        cx.simulate_keystrokes(window.into(), "enter");
+        cx.run_until_parked();
+        window
+            .update(cx, |host, window, cx| {
+                let shell = host.shell.read(cx);
+                let pairing = shell.pairing.as_ref().unwrap();
+                assert_eq!(pairing.choice, PairingChoice::Choose);
+                assert!(pairing.create_choice_focus.is_focused(window));
+            })
+            .unwrap();
     }
 }
 
@@ -9037,7 +8600,7 @@ impl Render for Shell {
             }
             GatePhase::Loading => root, // splash overlay covers boot
             GatePhase::OrgGate => {
-                let card = self.render_org_gate(cx);
+                let card = self.render_pairing_gate(cx);
                 root.child(card)
             }
             phase @ (GatePhase::Failed(_) | GatePhase::SignIn) => {
@@ -9241,7 +8804,7 @@ mod tests {
         assert!(!SyncFlow::Idle.has_visible_overlay());
         assert!(!SyncFlow::SwitchOffer { notice_open: false }.has_visible_overlay());
         assert!(SyncFlow::SwitchOffer { notice_open: true }.has_visible_overlay());
-        assert!(SyncFlow::Importing { done: 1, total: 3 }.has_visible_overlay());
+        assert!(SyncFlow::Switching.has_visible_overlay());
         assert!(SyncFlow::SignOutConfirm.has_visible_overlay());
     }
 
@@ -9311,45 +8874,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signed_out_synced_runtime_stops_and_reboots_local() {
+    async fn legacy_provider_session_does_not_enter_the_paired_runtime() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("session.json"),
-            r#"{"refreshToken":"still-valid","user":{"id":"user_1","email":"u@example.com"},"orgId":"org_1"}"#,
+            r#"{"refreshToken":"legacy","user":{"id":"user_1","email":"u@example.com"}}"#,
         )
         .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        let boot = EngineBootConfig {
+
+        let handle = crate::state::EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: Some("client_test".into()),
             default_harness: zeron_proto::HarnessId::Mock,
-        };
-        let synced = crate::state::EngineHandle::bootstrap(boot.clone())
-            .await
-            .expect("saved session opens its synced profile");
-        assert_eq!(synced.engine_info().workspace_scope, WorkspaceScope::Synced);
-
-        synced
+        })
+        .await
+        .unwrap();
+        assert_eq!(handle.engine_info().workspace_scope, WorkspaceScope::Local);
+        let status = handle
             .client()
-            .call(methods::SIGN_OUT, serde_json::json!({}))
+            .call(methods::PEER_STATUS, serde_json::json!({}))
             .await
-            .expect("sign out clears credentials");
-        stop_synced_runtime(synced, port, dir.path())
-            .await
-            .expect("synced runtime drains and releases ownership");
-
-        assert!(!dir.path().join("session.json").exists());
-        let local = crate::state::EngineHandle::bootstrap(boot)
-            .await
-            .expect("same process can continue locally");
-        assert_eq!(local.engine_info().workspace_scope, WorkspaceScope::Local);
-        local.shutdown().await;
+            .unwrap();
+        assert_eq!(
+            status.get("signedIn").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        handle.shutdown().await;
     }
 
     #[cfg(unix)]
@@ -9406,14 +8959,14 @@ mod tests {
     }
 
     #[test]
-    fn local_sign_in_offers_the_in_place_switch() {
+    fn local_pairing_offers_the_in_place_switch() {
         let signed_in = AuthState::SignedIn {
             user: zeron_proto::UserProfile {
                 id: "user-1".into(),
-                email: "user@example.com".into(),
+                email: "peer@local".into(),
                 name: None,
             },
-            org_id: Some("org-1".into()),
+            org_id: None,
         };
 
         assert_eq!(
@@ -9472,92 +9025,37 @@ mod tests {
     }
 
     #[test]
-    fn import_summary_errors_are_a_failure_not_a_success() {
-        // Clean summary → done with counts.
-        let clean = serde_json::json!({
-            "kind": "summary", "importedChats": 2, "skippedChats": 1, "errors": []
-        });
-        assert_eq!(import_summary_outcome(&clean), Ok((2, 1)));
-
-        // Any error means the wizard must NOT say "all set" — partial
-        // migrations surface as an explicit failure with the first cause.
-        let partial = serde_json::json!({
-            "kind": "summary", "importedChats": 1, "skippedChats": 0,
-            "errors": ["chat c2: journal copy failed"]
-        });
-        let message = import_summary_outcome(&partial).expect_err("errors must fail");
-        assert!(message.contains("journal copy failed"), "{message}");
-        assert!(message.contains("1 imported"), "{message}");
-
-        let many = serde_json::json!({
-            "kind": "summary", "importedChats": 0, "skippedChats": 0,
-            "errors": ["a", "b", "c"]
-        });
-        let message = import_summary_outcome(&many).expect_err("errors must fail");
-        assert!(message.contains("3 failures"), "{message}");
-
-        // A summary missing the errors field entirely (older engine) is
-        // treated as clean rather than failing every import.
-        let legacy = serde_json::json!({ "kind": "summary", "importedChats": 4 });
-        assert_eq!(import_summary_outcome(&legacy), Ok((4, 0)));
-    }
-
-    #[test]
-    fn spaces_only_local_work_still_gets_the_import_offer() {
-        assert_eq!(local_work_phrase(0, 0), None, "nothing to bring");
-        assert_eq!(local_work_phrase(2, 0).as_deref(), Some("the 2 sessions"));
+    fn fresh_switch_has_no_import_lifecycle_or_synced_retry_state() {
+        assert!(SyncFlow::Switching.is_switch_lifecycle());
         assert_eq!(
-            local_work_phrase(0, 1).as_deref(),
-            Some("the 1 project"),
-            "a projects-only profile must be offered the import, not a bare switch"
+            account_menu_action(Some(WorkspaceScope::Local), SyncFlow::Switching),
+            Some(AccountMenuAction::SyncInProgress)
         );
-        assert_eq!(
-            local_work_phrase(1, 2).as_deref(),
-            Some("the 1 session and 2 projects")
-        );
-    }
-
-    #[test]
-    fn dismissed_import_failure_stays_reachable_on_a_synced_runtime() {
-        let signed_in = AuthState::SignedIn {
-            user: zeron_proto::UserProfile {
-                id: "user-1".into(),
-                email: "user@example.com".into(),
-                name: None,
-            },
-            org_id: Some("org-1".into()),
-        };
-
-        // "Later" postpones the failure notice; it must not evaporate.
-        let dismissed = SyncFlow::ImportFailed { notice_open: false };
-        assert_eq!(
-            sync_flow_after_auth(dismissed, Some(WorkspaceScope::Synced), Some(&signed_in)),
-            dismissed,
-            "a postponed import failure survives auth/scope updates"
-        );
-
-        // …and the account menu on the SYNCED runtime still exposes the
-        // re-entry point. This is the whole point: after the switch there is
-        // no local runtime left to re-derive an offer from, so this menu row
-        // is the only path back to the retry dialog.
-        assert_eq!(
-            account_menu_action(Some(WorkspaceScope::Synced), dismissed),
-            Some(AccountMenuAction::RestartPending),
-            "retry must remain reachable after dismissal"
-        );
-        assert_eq!(
-            account_menu_action(
-                Some(WorkspaceScope::Synced),
-                SyncFlow::ImportFailed { notice_open: true },
-            ),
-            Some(AccountMenuAction::RestartPending)
-        );
-
-        // Resolving the failure restores the normal synced menu.
         assert_eq!(
             account_menu_action(Some(WorkspaceScope::Synced), SyncFlow::Idle),
             Some(AccountMenuAction::SignOut)
         );
+    }
+
+    #[test]
+    fn existing_local_work_is_not_offered_for_import_or_mutated() {
+        let local_work = vec!["local session", "local project"];
+        let before = local_work.clone();
+        let body = fresh_switch_offer_body(Some("peer@example.com"));
+
+        assert!(body.contains("stays on this device and is not copied"));
+        assert!(body.contains("Existing data from that peer will load after the switch"));
+        assert!(!fresh_switch_offer_body(Some("")).contains("paired as"));
+        assert!(!body.contains("Bring my work"));
+        assert!(!body.contains("Start fresh"));
+        assert_eq!(
+            local_work, before,
+            "building the fresh switch offer is read-only"
+        );
+
+        let source = include_str!("shell.rs");
+        assert!(!source.contains(&["IMPORT", "_LOCAL_WORKSPACE"].concat()));
+        assert!(!source.contains(&["spawn_local", "_import"].concat()));
     }
 
     #[test]
@@ -9570,16 +9068,7 @@ mod tests {
             },
             org_id: Some("org-1".into()),
         };
-        for flow in [
-            SyncFlow::Switching { import: true },
-            SyncFlow::Importing { done: 1, total: 3 },
-            SyncFlow::ImportDone {
-                imported: 3,
-                skipped: 0,
-            },
-            SyncFlow::ImportFailed { notice_open: true },
-            SyncFlow::ImportFailed { notice_open: false },
-        ] {
+        for flow in [SyncFlow::Switching] {
             // Local (before the stop), detached (mid-replacement), and synced
             // (replacement runtime up): the driver owns these states — auth
             // and scope edges must never reset them.
@@ -10016,10 +9505,6 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
                     default_harness: zeron_proto::HarnessId::Mock,
                 },
                 cx,
@@ -10087,10 +9572,6 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
                     default_harness: zeron_proto::HarnessId::Mock,
                 },
                 cx,
@@ -10172,10 +9653,6 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
                     default_harness: zeron_proto::HarnessId::Mock,
                 },
                 cx,
@@ -10250,10 +9727,6 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
                     default_harness: zeron_proto::HarnessId::Mock,
                 },
                 cx,
@@ -10313,10 +9786,6 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
                     default_harness: zeron_proto::HarnessId::Mock,
                 },
                 cx,
@@ -10391,10 +9860,6 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
                     default_harness: zeron_proto::HarnessId::Mock,
                 },
                 cx,
@@ -10453,10 +9918,6 @@ mod exit_regressions {
                 EngineBootConfig {
                     data_dir: dir.path().into(),
                     ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
                     default_harness: zeron_proto::HarnessId::Mock,
                 },
                 cx,
@@ -10611,10 +10072,6 @@ mod right_tab_mouse_regressions {
                     EngineBootConfig {
                         data_dir: dir.path().into(),
                         ipc_port: 0,
-                        edge_url: "http://127.0.0.1:1".into(),
-                        edge_token: None,
-                        org_id: None,
-                        workos_client_id: None,
                         default_harness: zeron_proto::HarnessId::Mock,
                     },
                     cx,

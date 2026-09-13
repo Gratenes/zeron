@@ -64,11 +64,13 @@
       if (event.defaultPrevented) return;
       let url;
       try { url = new URL(link.href); } catch { return; }
-      const release = url.pathname.match(/^\/releases\/zeron-(\d+\.\d+\.\d+)-macos-arm64\.dmg$/);
-      if (url.origin !== "https://zeron.sh" || !release) return;
+      if (
+        url.origin !== "https://github.com" ||
+        url.pathname !== "/wasimysaid/Kratos/releases/latest"
+      ) return;
       capture("download_clicked", {
         placement,
-        version: release[1],
+        version: "latest",
         platform: "macos",
         architecture: "arm64",
       });

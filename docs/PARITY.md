@@ -10,7 +10,7 @@ not built yet).
 | Item | Status | Notes |
 | --- | --- | --- |
 | 1.1 Window shell | partial | gpui window, always-dark theme, external links via OS browser. Deferred: frameless-inset/traffic-light chrome (macOS packaging not executed), single-instance lock, dev-vs-packaged port split (env vars instead). |
-| 1.2 App phases | done | Gate / OrgGate ("Create your workspace" + memberships) / app with crossfade; boot splash with fade-out cap (`ui/src/shell.rs`). |
+| 1.2 App phases | done | Local-ready / pairing-required / app phases with crossfade; boot splash with fade-out cap (`ui/src/shell.rs`). |
 | 1.3 Shell layout | done | Collapsible drag-resizable sidebar (208–400), right Changes pane (360–760, 52% cap), header variants, widths persisted to `ui-settings.json`. |
 | 1.4 Keyboard shortcuts | done | Customizable keymap, click-to-record with conflict detection, per-row reset, rows grouped into Panels / Sessions / Jump cards (`ui/src/settings/shortcuts.rs`); persisted with UI settings. Session stepping is Ctrl+Tab / Ctrl+Shift+Tab over the sidebar list (rebindable) rather than the original's Shift+Up/Down. Thread jumps are Mod+1–9 over the same list with hold-modifier key-cap hints (t3code `THREAD_JUMP_KEYBINDING_COMMANDS`), and Mod+Shift+A archives the open session. |
 | 1.5 Routes | partial | Native navigation instead of URL routes; devices / agents / shortcuts / archived settings pages exist. Profile page (heatmap) is an §8 exclusion. |
@@ -30,25 +30,25 @@ not built yet).
 | ListHarnesses / ListModels | done | Relay-forwardable. |
 | Run/Subscribe/Interrupt/Steer/RespondInput RPCs | done (changed shape) | Deliberate redesign: these ride the durable doc command queue (`QueueCommand {run|steer|interrupt|respondInput}`) instead of device-addressed RPCs — same capability, offline-tolerant. |
 | Repos/folders/worktrees RPCs | done | All eight methods, relay-forwardable. |
-| Uploads / ReadAttachmentChunk | done | Chunked staging → durable file; path-jailed reads; attachments live only on the host device. |
+| Uploads / ReadAttachmentChunk | done | Chunked staging with persisted progress, path-jailed reads, targeted host delivery, and profile-scoped peer custody for offline recovery. |
 | Terminals RPCs | done | Open/Subscribe/Write/Resize/Close, forwardable. |
 | Agent-account RPCs | done | Full login/activate/forget/poll surface, forwardable. |
 | LocalDevice | done | `{deviceId}`; IPC-only (never forwarded). |
 | DataRpc watches + QueueCommand | done | — |
 | Mutate ops | partial | createChat/renameChat/setChatArchived/deleteChat/renameDevice done; markChatSeen accepted as a no-op (unseen markers UI-local); `SetChatConfig` exists on the doc layer but is not yet exposed as a Mutate op. |
-| AuthRpc | done | AuthStatus emits the canonical proto shape (`{"state": "signedIn", …}`); SignIn/SignInHeadless/CompleteSignIn/SignOut/ListOrgs/CreateOrg/SelectOrg. |
+| AuthRpc | done | IPC-only `AuthStatus`, peer initialization/pairing/invitations, trusted-device list/revoke/status, and disconnect. Pairing state becomes active only after engine restart. |
 | Wire types | done | `zeron-proto`: AgentEvent, ToolCall kinds, models/options, entities, AuthState. |
 
 ## §3 Backend engine
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| 3.1 Lifecycle | partial | Device registration, presence heartbeat (ephemeral, 15s), stale-session recovery, host-only doc executor with steer→new-turn fallback, single-instance data-dir lock. CLI auth decoupled from the daemon: `zeron login`/`logout`/`status` work on the persisted session and exit; headless TTY sign-in remains, and off-TTY (systemd/launchd) headless fails fast with "run `zeron login` first"; `zeron daemon install/start/stop/restart/status/uninstall` manages launchd / systemd `--user` units (install-time PATH captured into the unit for harness CLIs). Gaps: login-shell PATH capture for the headed app, crash shield, parent-PID watchdog. |
+| 3.1 Lifecycle | partial | Profile-scoped device registration, ephemeral presence, stale-session recovery, host-only doc executor with steer→new-turn fallback, and single-instance data-dir lock. `zeron peer init` / `zeron pair` update saved trust while the engine is stopped; daemon install/start/stop/restart/status/uninstall manages launchd or systemd user units. Gaps: login-shell PATH capture for the headed app, crash shield, parent-PID watchdog. |
 | 3.2 Sessions engine | partial | Run journal on disk with crash recovery (aborted stamps), steering mailbox at step boundaries, doc hooks at boundaries, streamed part folding at STREAM_COMMIT_MS. Gaps: idle reaper + 10-min stall watchdog for persistent harness sessions. |
-| 3.3 Session-docs host | done | docs.sqlite snapshots + processed-command ledger, mark-BEFORE-execute, room join per open chat, diff sidecar publish, cold-chat delivery both directions (nudge POST on queue for remote-hosted chats + warm-open on nudge receipt). Gap (minor): no boot-time warm-open of recent chats (14d/30) — cold chats rely on nudges. |
+| 3.3 Session-docs host | done | SQLite snapshots + processed-command ledger, mark-before-execute, durable peer join per open chat, diff sidecar publish, and cold-chat command delivery through durable nudges. Gap (minor): no boot-time warm-open of recent chats (14d/30). |
 | 3.4 Terminals | done | PTYs, 1MB bounded replay + `afterSeq` resume, 32 max, exited 30-min TTL, live shells survive detach. |
 | 3.5 Repos/diffs | done | list/add/clone/create, branches, worktrees, checkout identity; CheckoutDiffSync (fs watchers + repair pass, name-status+numstat+patch incl. untracked, 3MiB cap, sha256, sidecar publish); chat.branch upkeep from HEAD watch; folder listing with timeout. |
-| 3.7 Auth / uploads / accounts / device-room | done | WorkOS code+loopback and paste-code flows, refresh persistence (0600), org gate, dev mode; chunked uploads; claude/codex credential swap with usage probes and OAuth flows; host relay (virtual sockets over `{s,k,to,from}` frames) + peer link cache. |
+| 3.7 Pairing / uploads / accounts / device relay | done | One-use invitations, persistent Ed25519 device keys, proof-of-possession authentication, profile-bound tokens, revocation, chunked resumable uploads with peer custody, agent credential switching/usage probes/OAuth, virtual relay sockets, and peer link caching. |
 
 ## §4 Harness
 
@@ -73,21 +73,21 @@ not built yet).
 | Render-parts privacy policy | done | WriteFile content / Edit bodies / etc. stripped; full inputs only in the host journal. |
 | Sidecars (tail, diff) + constants | done | — |
 
-## §6 Edge
+## §6 Durable peer
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| Worker routes | done | health, session ws/tail/stats/diff/snapshot/append, workspace rooms, device ws/sidecar/status/nudge. |
-| Auth at edge | done | WorkOS JWKS verify; dev mode `user@org` bearers; DOs see Worker-stamped identity; claim-on-first-join ownership. |
-| SessionRoom DO | done | Hibernatable WS, update log + snapshot, lazy tail, two-level compaction, daily alarm checkpoint/trim/R2 backup, VV backfill, fragment reassembly. |
-| DeviceRoom DO | done | Byte-pipe frames, single host socket + supersede, relay control frames, durable nudges (replay on join, cap), sidecar slots. |
+| Connectivity | done | The packaged, supervised Tailcat adapter supplies private paths; direct UDP is opportunistic and DERP relay operation is supported. |
+| Application authorization | done | One-use pairing invitations, device-key proof of possession, profile-bound tokens, route authorization, and immediate revocation. A Tailcat address alone grants no access. |
+| Durable sync/storage | done | SQLite-backed chat update logs, checkpoints, registry rows, presence, sidecars, attachment custody, replay dedupe, offline catch-up, and consistent backups. |
+| Device relay | done | Stable byte frames, one current host connection, targeted RPC, durable nudges, host replacement, and explicit local-IPC versus remote-RPC permissions. |
 
-## §7 Server → edge
+## §7 Deployment boundary
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| WorkOS exchange/refresh, org list/create at edge | done | `/auth/*` routes; API key stays edge-side. |
-| Postgres/signaling dropped | done | Nothing depends on them. |
+| Always-on operation | done | Run the Rust peer on an owner-controlled always-on installation when devices must catch up without overlapping online. Tailcat is connectivity, not the application database. |
+| Hosted application backend | dropped | No WorkOS, Cloudflare Worker, Durable Object, R2, Postgres, or signaling service is required by production. |
 
 ## §8 Exclusions
 
@@ -97,9 +97,10 @@ not built yet).
 
 ## Deferred (cross-cutting)
 
-- **Mobile app** — out of scope for the native rewrite so far.
-- **E2EE** — transport is TLS + WorkOS bearers; end-to-end encryption of doc
-  contents not designed.
+- **Mobile platform execution** — iOS native bridge and storage code are present; App Store/device validation remains platform-gated.
+- **Content encryption beyond transport** — Tailcat/WireGuard encrypts traffic between
+  nodes and application authentication authorizes every peer route. Data is not
+  additionally encrypted from the owner-operated durable peer or its local storage.
 - **macOS packaging execution** — config + steps in `dist/` only (needs a Mac).
 - **Engine hardening**: single-instance lock, parent-PID watchdog, crash
   shield, idle reaper / stall watchdog, boot warm-open of recent chats.
@@ -107,5 +108,5 @@ not built yet).
 ## Summary
 
 Table rows above: **40 done · 6 partial**, plus the cross-cutting deferrals
-(mobile, E2EE, macOS packaging execution, engine hardening) — the last
+(mobile platform execution, content encryption beyond transport, macOS packaging execution, engine hardening) — the last
 overlaps the named gaps in the partial rows.

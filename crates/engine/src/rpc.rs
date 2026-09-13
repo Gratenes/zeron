@@ -15,9 +15,8 @@
 //! - `EngineInfo` → `{deviceId, workspaceScope}` — this runtime's fixed identity
 //!   and data boundary (never forwarded)
 //! - `LocalDevice` → `{deviceId}` — legacy engine identity (never forwarded)
-//! - AuthRpc (feature-inventory §2): `AuthStatus` (stream), `SignIn`/`SignInHeadless` →
-//!   `{url}`, `CompleteSignIn {code}`, `SignOut`, `ListOrgs`, `CreateOrg {name}`,
-//!   `SelectOrg {organizationId}`
+//! - AuthRpc: `AuthStatus` plus IPC-only peer initialization, pairing, invitation,
+//!   device listing/revocation/status, and sign-out.
 //! - Repos (§3.5): `ListRepos`, `AddRepo {path}`, `CloneRepo {url}`,
 //!   `CreateRepo {name}`, `ListBranches {repoPath}` (default branch first),
 //!   `ListFolders {path?}`, `CreateWorktree {repoPath, branch}`, `DeleteWorktree
@@ -481,7 +480,6 @@ pub struct EngineRpc {
     auth: Option<Auth>,
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<zeron_update::Updater>,
-    local_import: Option<crate::local_import::LocalImporter>,
     engine_info: EngineInfo,
 }
 
@@ -522,7 +520,6 @@ impl EngineRpc {
             auth: None,
             links: None,
             updater: None,
-            local_import: None,
             engine_info,
         }
     }
@@ -550,12 +547,6 @@ impl EngineRpc {
         self
     }
 
-    /// Attach the local→synced profile importer (synced runtimes only).
-    pub fn with_local_import(mut self, importer: crate::local_import::LocalImporter) -> Self {
-        self.local_import = Some(importer);
-        self
-    }
-
     fn auth(&self) -> Result<&Auth, RpcError> {
         self.auth
             .as_ref()
@@ -566,12 +557,6 @@ impl EngineRpc {
         self.updater
             .as_ref()
             .ok_or_else(|| RpcError::Failed("updates unavailable".into()))
-    }
-
-    fn local_importer(&self) -> Result<&crate::local_import::LocalImporter, RpcError> {
-        self.local_import
-            .as_ref()
-            .ok_or_else(|| RpcError::Failed("local import requires a synced workspace".into()))
     }
 
     /// Resolve a mention-search root from synced workspace rows. A client may
@@ -989,6 +974,45 @@ fn forwardable(method: &str) -> bool {
     )
 }
 
+/// The remotely permitted surface is explicit and independent of routing.
+/// Merely omitting `targetDeviceId` must never expose IPC-only operations.
+pub struct RemoteEngineRpc(pub std::sync::Arc<EngineRpc>);
+
+fn remotely_permitted(method: &str) -> bool {
+    forwardable(method)
+        || matches!(
+            method,
+            methods::RELAY_COMMAND
+                | methods::MUTATE
+                | methods::WATCH_CHATS
+                | methods::WATCH_DEVICES
+                | methods::WATCH_SESSIONS
+                | methods::WATCH_SPACES
+        )
+}
+
+#[async_trait]
+impl RpcService for RemoteEngineRpc {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if !remotely_permitted(method) {
+            return Err(RpcError::Failed(
+                "method is available only over local IPC".into(),
+            ));
+        }
+        // A peer cannot use this engine as a confused deputy to route elsewhere.
+        if params
+            .get("targetDeviceId")
+            .and_then(|v| v.as_str())
+            .is_some_and(|target| target != self.0.doc_host.device_id())
+        {
+            return Err(RpcError::BadParams(
+                "remote target does not name this device".into(),
+            ));
+        }
+        self.0.handle(method, params).await
+    }
+}
+
 /// Forwardable methods whose reply is a stream (proxied item-by-item).
 fn is_stream_method(method: &str) -> bool {
     matches!(
@@ -1068,10 +1092,8 @@ fn doc_messages_stream(
     .boxed()
 }
 
-/// Authentication-only RPC surface used while the headed app is waiting for a
-/// production WorkOS session. Keeping this independent from [`EngineRpc`] lets
-/// the UI show its sign-in and organization gates before identity-scoped Loro
-/// stores are opened.
+/// IPC-only pairing and peer management. This surface remains available before
+/// profile stores open, but is never exposed by `RemoteEngineRpc`.
 #[derive(Clone)]
 pub struct AuthRpc {
     auth: Auth,
@@ -1086,13 +1108,13 @@ impl AuthRpc {
         matches!(
             method,
             methods::AUTH_STATUS
-                | methods::SIGN_IN
-                | methods::SIGN_IN_HEADLESS
-                | methods::COMPLETE_SIGN_IN
                 | methods::SIGN_OUT
-                | methods::LIST_ORGS
-                | methods::CREATE_ORG
-                | methods::SELECT_ORG
+                | methods::PEER_INITIALIZE
+                | methods::PEER_PAIR
+                | methods::PEER_INVITE
+                | methods::PEER_DEVICES
+                | methods::PEER_REVOKE
+                | methods::PEER_STATUS
         )
     }
 }
@@ -1102,66 +1124,71 @@ impl RpcService for AuthRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         match method {
             methods::AUTH_STATUS => Ok(RpcReply::Stream(watch_stream(self.auth.watch_state()))),
-            methods::SIGN_IN => {
-                let url = self
-                    .auth
-                    .start_sign_in()
+            methods::PEER_INITIALIZE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct Params {
+                    #[serde(default)]
+                    name: String,
+                    #[serde(default)]
+                    derp_map: Option<String>,
+                }
+                let p: Params = parse_params(params)?;
+                self.auth
+                    .initialize_peer(&p.name, p.derp_map)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "url": url }))
+                RpcReply::value(&serde_json::json!({"ok": true}))
             }
-            methods::SIGN_IN_HEADLESS => {
-                let url = self.auth.start_headless_sign_in();
-                RpcReply::value(&serde_json::json!({ "url": url }))
-            }
-            methods::COMPLETE_SIGN_IN => {
+            methods::PEER_PAIR => {
                 #[derive(Deserialize)]
-                struct P {
+                #[serde(deny_unknown_fields)]
+                struct Params {
                     code: String,
                 }
-                let p: P = parse_params(params)?;
+                let p: Params = parse_params(params)?;
                 self.auth
-                    .complete_sign_in(&p.code)
+                    .pair(&p.code)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                RpcReply::value(&serde_json::json!({"ok": true}))
+            }
+            methods::PEER_INVITE => {
+                let code = self
+                    .auth
+                    .invite()
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({"code": code}))
+            }
+            methods::PEER_DEVICES => {
+                let devices = self
+                    .auth
+                    .devices()
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({"devices": devices}))
+            }
+            methods::PEER_REVOKE => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct Params {
+                    device_id: String,
+                }
+                let p: Params = parse_params(params)?;
+                self.auth
+                    .revoke(&p.device_id)
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({"ok": true}))
+            }
+            methods::PEER_STATUS => {
+                let status = self.auth.peer_status().await;
+                RpcReply::value(&status)
             }
             methods::SIGN_OUT => {
                 self.auth.sign_out();
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
-            methods::LIST_ORGS => {
-                let orgs = self
-                    .auth
-                    .list_orgs()
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "orgs": orgs }))
-            }
-            methods::CREATE_ORG => {
-                #[derive(Deserialize)]
-                struct P {
-                    name: String,
-                }
-                let p: P = parse_params(params)?;
-                self.auth
-                    .create_org(&p.name)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
-            }
-            methods::SELECT_ORG => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct P {
-                    organization_id: String,
-                }
-                let p: P = parse_params(params)?;
-                self.auth
-                    .select_org(&p.organization_id)
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&serde_json::json!({ "ok": true }))
+                RpcReply::value(&serde_json::json!({"ok": true}))
             }
             _ => Err(RpcError::UnknownMethod(method.to_string())),
         }
@@ -1549,42 +1576,6 @@ impl RpcService for EngineRpc {
             }
             methods::LOCAL_DEVICE => {
                 RpcReply::value(&serde_json::json!({ "deviceId": self.doc_host.device_id() }))
-            }
-            methods::LOCAL_IMPORT_STATUS => {
-                let importer = self.local_importer()?.clone();
-                let status = tokio::task::spawn_blocking(move || importer.status())
-                    .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
-                RpcReply::value(&status)
-            }
-            methods::IMPORT_LOCAL_WORKSPACE => {
-                let importer = self.local_importer()?.clone();
-                // Progress rides an unbounded channel: the importer is
-                // blocking (sqlite + fs) and must never wedge on a slow
-                // viewer; items are tiny and bounded by the chat count.
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
-                tokio::task::spawn_blocking(move || {
-                    let emit = |event: crate::local_import::ImportEvent| {
-                        if let Ok(item) = serde_json::to_value(&event) {
-                            let _ = tx.send(item);
-                        }
-                    };
-                    if let Err(err) = importer.run(emit) {
-                        tracing::error!(error = %err, "local import failed");
-                        let _ = tx.send(serde_json::json!({
-                            "kind": "summary",
-                            "importedChats": 0, "importedSpaces": 0,
-                            "skippedChats": 0, "skippedSpaces": 0,
-                            "journalsCopied": 0, "ledgerRowsMerged": 0,
-                            "errors": [format!("{err}")],
-                        }));
-                    }
-                    // tx drops here — the stream ends after the summary item.
-                });
-                Ok(RpcReply::Stream(Box::pin(futures::stream::poll_fn(
-                    move |cx| rx.poll_recv(cx),
-                ))))
             }
             methods::UPDATE_STATUS => Ok(RpcReply::Stream(watch_stream(self.updater()?.watch()))),
             methods::APPLY_UPDATE => {
@@ -2269,6 +2260,12 @@ impl RpcService for EngineRpc {
             }
             methods::READ_ATTACHMENT_CHUNK => {
                 let p: ReadAttachmentChunkParams = parse_params(params)?;
+                // Recovery only accepts a persisted custody identity directly inside
+                // this profile's uploads jail; arbitrary workspace paths never fetch.
+                self.doc_host
+                    .recover_history_attachment(&p.path)
+                    .await
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
                 // Path jail: the uploads dir plus every workspace-known chat cwd.
                 let roots: Vec<std::path::PathBuf> = self
                     .workspace
@@ -2301,6 +2298,40 @@ impl RpcService for EngineRpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_surface_excludes_ipc_and_unknown_methods() {
+        for method in [
+            methods::ENGINE_INFO,
+            methods::ENGINE_READY,
+            methods::LOCAL_DEVICE,
+            methods::STOP_ENGINE,
+            methods::AUTH_STATUS,
+            methods::RETRY_DELIVERY,
+            methods::PROBE_SYNC,
+            methods::SYNC_STATUS,
+            methods::WATCH_CONNECTIVITY,
+            methods::WATCH_TRANSFERS,
+            "FuturePrivilegedMethod",
+        ] {
+            assert!(!remotely_permitted(method), "remotely exposed {method}");
+        }
+        for method in [
+            methods::RELAY_COMMAND,
+            methods::MUTATE,
+            methods::QUEUE_COMMAND,
+            methods::BEGIN_QUEUED_MESSAGE_EDIT,
+            methods::READ_WORKSPACE_FILE,
+            methods::WRITE_TERMINAL,
+            methods::READ_ATTACHMENT_CHUNK,
+            methods::LIST_REPOS,
+        ] {
+            assert!(
+                remotely_permitted(method),
+                "remote capability missing {method}"
+            );
+        }
+    }
 
     /// The UI's Switch/Forget calls send `{id, accountId, harness}` (+ optional
     /// `targetDeviceId`); the extra fields must be tolerated, `accountId` wins.

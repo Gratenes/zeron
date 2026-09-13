@@ -1,6 +1,6 @@
 //! Remote-preview churn must not accumulate tasks, streams, or memory. This
 //! drives many mixed requests (small, echo, partially consumed then dropped,
-//! WebSocket) through the proxy on the viewing device over a real WebRTC pair
+//! WebSocket) through the proxy on the viewing device over a real relay pair
 //! to a backend on the hosting device and compares live tasks and RSS
 //! against the warmed-up baseline.
 use bytes::Bytes;
@@ -177,29 +177,27 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
             },
         )])
         .unwrap();
-    let (mut a, mut a_out) = Peers::new(
+    let (a, mut a_out) = Peers::new(
         "a".into(),
         Arc::new(Backend(host_catalog.clone())),
         stop.clone(),
     );
-    a.set_ice_servers(Vec::new()).unwrap();
     let viewer_catalog =
         Catalog::open(temp.path().join("b.json"), "b".into(), "Laptop".into()).unwrap();
     viewer_catalog
         .set_remote("a", host_catalog.local_services())
         .unwrap();
-    let (mut b, mut b_out) = Peers::new("b".into(), Arc::new(NoLocal), stop.clone());
-    b.set_ice_servers(Vec::new()).unwrap();
+    let (b, mut b_out) = Peers::new("b".into(), Arc::new(NoLocal), stop.clone());
     let peer_b = b.clone();
     tokio::spawn(async move {
         while let Some(message) = a_out.recv().await {
-            let _ = peer_b.signal("a", message.signal).await;
+            let _ = peer_b.receive("a", message.bytes).await;
         }
     });
     let peer_a = a.clone();
     tokio::spawn(async move {
         while let Some(message) = b_out.recv().await {
-            let _ = peer_a.signal("b", message.signal).await;
+            let _ = peer_a.receive("b", message.bytes).await;
         }
     });
     let local = mux::local(Arc::new(NoLocal), stop.clone());
@@ -282,7 +280,7 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
         tokio::time::sleep(Duration::from_millis(300)).await;
     };
 
-    // Warm up: pairs the WebRTC peer and fills connection pools.
+    // Warm up: creates the relay Mux and fills connection pools.
     for _ in 0..3 {
         round(client.clone(), url.clone(), hostname.clone()).await;
     }
@@ -313,13 +311,16 @@ async fn remote_preview_churn_does_not_accumulate_tasks_or_memory() {
     );
     // Re-pairing churn: a laptop that sleeps, roams networks, or loses the
     // coordinator lease tears the peer down and pairs again. Closed peers
-    // must release their WebRTC state.
+    // must release their Mux state.
     let churn: usize = std::env::var("PREVIEW_LEAK_CHURN")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(6);
     for i in 0..churn {
         b.remove("a").await;
+
+        // A replaced viewer lease emits `gone`, so the host drops its pair too.
+        a.remove("b").await;
         round(client.clone(), url.clone(), hostname.clone()).await;
         if (i + 1) % 4 == 0 {
             quiesce(active.clone()).await;

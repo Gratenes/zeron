@@ -13,8 +13,8 @@ use crate::constants::MSG_INLINE_MAX;
 /// non-empty line, nothing more. The per-part 4KB cap (c951c3e) bounded each
 /// part but not the session — chat 1b65e93d measured 917KB (85%) of a 1MB doc
 /// in capped outputs across 426 tool parts (docs/chat2-sync.md). Full outputs
-/// live in the R2 sidecar behind `output_ref`; t3code ships an 84-char
-/// summary, so 160 is generous.
+/// live in profile-scoped peer sidecars behind `output_ref`; the reference UI
+/// ships an 84-character summary, so 160 is generous.
 pub const TOOL_OUTPUT_SUMMARY_MAX: usize = 160;
 
 /// The bounded doc-resident form of public tool output. Full text is retrieved
