@@ -532,9 +532,7 @@ pub enum Route {
 
 /// Narrow windows use transient overlays instead of reserving dock space for either pane.
 const MOBILE_BREAKPOINT: f32 = 768.0;
-/// Keep drawers useful without hiding the whole conversation at phone widths.
-const MOBILE_DRAWER_MAX_WIDTH: f32 = 320.0;
-const MOBILE_DRAWER_VIEWPORT_FRACTION: f32 = 0.85;
+// Mobile drawer sizing is pane-specific; widening Changes must not widen navigation.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MobileDrawer {
@@ -546,8 +544,14 @@ fn is_mobile_width(viewport: f32) -> bool {
     viewport < MOBILE_BREAKPOINT
 }
 
-fn mobile_drawer_width(viewport: f32) -> f32 {
-    (viewport.max(0.0) * MOBILE_DRAWER_VIEWPORT_FRACTION).min(MOBILE_DRAWER_MAX_WIDTH)
+fn mobile_drawer_width(viewport: f32, drawer: MobileDrawer) -> f32 {
+    let (fraction, max_width) = match drawer {
+        // Keep navigation from covering most of a phone; at 390px this leaves
+        // 110px of backdrop while retaining enough width for session labels.
+        MobileDrawer::Sidebar => (0.75, 280.0),
+        MobileDrawer::RightPane => (0.90, 380.0),
+    };
+    (viewport.max(0.0) * fraction).min(max_width)
 }
 
 fn toggle_mobile_drawer(
@@ -1290,7 +1294,12 @@ impl Render for SidebarPane {
                 Route::Chat => shell.render_chat_sidebar(&theme, cx),
             }
         });
-        div().size_full().child(inner).into_any_element()
+        div()
+            .id("sidebar-pane-content")
+            .debug_selector(|| "sidebar-pane-content".into())
+            .size_full()
+            .child(inner)
+            .into_any_element()
     }
 }
 
@@ -2089,6 +2098,18 @@ impl Shell {
     fn sidebar_target(&self) -> f32 {
         if self.settings.sidebar_collapsed {
             0.0
+        } else {
+            self.settings.sidebar_width
+        }
+    }
+
+    /// One geometry contract for the mounted sidebar surface and every child.
+    /// Persisted width remains desktop-only; an open mobile navigation drawer
+    /// supplies its transient width without rewriting user settings.
+    fn effective_sidebar_width(&self) -> f32 {
+        if is_mobile_width(self.viewport_width) && self.mobile_drawer == Some(MobileDrawer::Sidebar)
+        {
+            mobile_drawer_width(self.viewport_width, MobileDrawer::Sidebar)
         } else {
             self.settings.sidebar_width
         }
@@ -4870,12 +4891,12 @@ impl Shell {
         out
     }
 
-    fn sidebar_content(&self, width: f32) -> AnyElement {
+    fn sidebar_content(&self) -> AnyElement {
         self.sidebar_pane
             .clone()
             .cached(
                 gpui::StyleRefinement::default()
-                    .w(px(width))
+                    .w(px(self.effective_sidebar_width()))
                     .h_full()
                     .flex_none(),
             )
@@ -4883,7 +4904,6 @@ impl Shell {
     }
 
     fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        let width = self.settings.sidebar_width;
         let target = self.sidebar_target();
         // Transparent — the sidebar sits directly on the frost shell; the main
         // card's own border provides the separation. The content row spans the
@@ -4895,7 +4915,7 @@ impl Shell {
             div()
                 .h_full()
                 .pt(px(Theme::TITLEBAR_HEIGHT))
-                .child(self.sidebar_content(width))
+                .child(self.sidebar_content())
                 .into_any_element(),
         )
     }
@@ -4909,7 +4929,7 @@ impl Shell {
             div()
                 .h_full()
                 .pt(px(Theme::TITLEBAR_HEIGHT))
-                .child(self.sidebar_content(width))
+                .child(self.sidebar_content())
                 .into_any_element(),
         )
     }
@@ -4938,7 +4958,9 @@ impl Shell {
         // the sidebar's right edge (user-reported). Device identity lives on
         // the Accounts page now — the one surface where the device matters.
         div()
-            .w(px(self.settings.sidebar_width))
+            .id("settings-sidebar-content")
+            .debug_selector(|| "settings-sidebar-content".into())
+            .w(px(self.effective_sidebar_width()))
             .h_full()
             .flex()
             .flex_col()
@@ -5529,7 +5551,9 @@ impl Shell {
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
 
-        presentation::sidebar(self.settings.sidebar_width)
+        presentation::sidebar(self.effective_sidebar_width())
+            .id("chat-sidebar-content")
+            .debug_selector(|| "chat-sidebar-content".into())
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
             .child(filter_row)
@@ -5867,7 +5891,7 @@ impl Shell {
             // (`px-2 pb-1 pt-1.5 text-[11px] text-muted-foreground/70`),
             // the action selected by the runtime scope, then "Settings".
             let menu = popover::popover_card(theme)
-                .w(px(self.settings.sidebar_width - 2.0 * Theme::SPACE_SM))
+                .w(px(self.effective_sidebar_width() - 2.0 * Theme::SPACE_SM))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.close_user_menu(cx);
                 }))
@@ -6455,9 +6479,6 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).clone();
         let mut overlays: Vec<AnyElement> = Vec::new();
-        if let Some(drawer) = self.render_mobile_drawer(viewport, cx) {
-            overlays.push(drawer);
-        }
 
         if let Some(menu_state) = self.chat_menu.get().cloned() {
             let chat_id = menu_state.chat_id;
@@ -7508,36 +7529,23 @@ impl Shell {
         if !is_mobile_width(f32::from(viewport.width)) {
             return None;
         }
-        let width = mobile_drawer_width(f32::from(viewport.width));
+        let width = mobile_drawer_width(f32::from(viewport.width), drawer);
         let theme = Theme::of(cx).clone();
         let panel: AnyElement = match drawer {
-            MobileDrawer::Sidebar => {
-                let close = self
-                    .mobile_drawer_close_button(
-                        "mobile-sidebar-drawer-close",
-                        "Close sidebar",
-                        &theme,
-                        cx,
-                    )
-                    .absolute()
-                    .top(px(5.0))
-                    .right(px(8.0));
-                div()
-                    .id("mobile-sidebar-drawer")
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left_0()
-                    .w(px(width))
-                    .bg(theme.surface)
-                    .border_r_1()
-                    .border_color(theme.border)
-                    .occlude()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(self.render_mobile_sidebar(width))
-                    .child(close)
-                    .into_any_element()
-            }
+            MobileDrawer::Sidebar => div()
+                .id("mobile-sidebar-drawer")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left_0()
+                .w(px(width))
+                .bg(theme.surface)
+                .border_r_1()
+                .border_color(theme.border)
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(self.render_mobile_sidebar(width))
+                .into_any_element(),
             MobileDrawer::RightPane => {
                 if !matches!(self.route, Route::Chat) || !self.right_pane_content_visible(cx) {
                     self.mobile_drawer = None;
@@ -9226,6 +9234,16 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
+                // Only the left drawer yields to the shared titlebar cluster:
+                // its original sidebar button remains the close/reopen control.
+                // The right drawer keeps its baseline occlusion and close button.
+                let drawer_side = self.mobile_drawer;
+                let mobile_drawer = self.render_mobile_drawer(window.viewport_size(), cx);
+                let (mobile_sidebar, mobile_right) = match (drawer_side, mobile_drawer) {
+                    (Some(MobileDrawer::Sidebar), drawer) => (drawer, None),
+                    (Some(MobileDrawer::RightPane), drawer) => (None, drawer),
+                    (None, _) => (None, None),
+                };
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let border_color = Theme::of(cx).border;
@@ -9325,7 +9343,9 @@ impl Render for Shell {
                             ),
                     )
                     .child(div().absolute().top_0().left_0().right_0().child(title_bar))
+                    .children(mobile_sidebar)
                     .child(self.render_titlebar_cluster(cx))
+                    .children(mobile_right)
                     .children(overlays);
                 root.child(sidebar_tone)
                     .child(motion::fade_in("phase-app", page))
@@ -9415,14 +9435,23 @@ mod tests {
 
     #[test]
     fn mobile_drawer_width_is_bounded_and_leaves_a_backdrop() {
-        for viewport in [240.0, 320.0, 390.0, 767.0] {
-            let width = mobile_drawer_width(viewport);
-            assert!(width > 0.0 && width < viewport);
-            assert!(width <= MOBILE_DRAWER_MAX_WIDTH);
+        for (drawer, cap) in [
+            (MobileDrawer::Sidebar, 280.0),
+            (MobileDrawer::RightPane, 380.0),
+        ] {
+            for viewport in [240.0, 320.0, 390.0, 767.0] {
+                let width = mobile_drawer_width(viewport, drawer);
+                assert!(width > 0.0 && width < viewport);
+                assert!(width <= cap);
+            }
+            assert_eq!(mobile_drawer_width(0.0, drawer), 0.0);
+            assert_eq!(mobile_drawer_width(-1.0, drawer), 0.0);
+            assert_eq!(mobile_drawer_width(768.0, drawer), cap);
         }
-        assert_eq!(mobile_drawer_width(0.0), 0.0);
-        assert_eq!(mobile_drawer_width(-1.0), 0.0);
-        assert_eq!(mobile_drawer_width(768.0), MOBILE_DRAWER_MAX_WIDTH);
+        assert_eq!(mobile_drawer_width(320.0, MobileDrawer::Sidebar), 240.0);
+        assert_eq!(mobile_drawer_width(320.0, MobileDrawer::RightPane), 288.0);
+        assert_eq!(mobile_drawer_width(390.0, MobileDrawer::Sidebar), 280.0);
+        assert_eq!(mobile_drawer_width(390.0, MobileDrawer::RightPane), 351.0);
     }
 
     #[test]
@@ -10350,7 +10379,146 @@ mod tests {
 #[cfg(test)]
 mod exit_regressions {
     use super::*;
-    use gpui::{AppContext, TestAppContext};
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
+
+    struct SidebarBoundsHost {
+        shell: Entity<Shell>,
+        viewport_width: f32,
+    }
+
+    impl Render for SidebarBoundsHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let viewport_width = self.viewport_width;
+            let width = if is_mobile_width(viewport_width) {
+                mobile_drawer_width(viewport_width, MobileDrawer::Sidebar)
+            } else {
+                self.shell.read(cx).settings.sidebar_width
+            };
+            let sidebar = self.shell.update(cx, |shell, cx| {
+                shell.viewport_width = viewport_width;
+                shell.mobile_drawer =
+                    is_mobile_width(viewport_width).then_some(MobileDrawer::Sidebar);
+                let theme = Theme::of(cx).clone();
+                match shell.route {
+                    Route::Settings(section) => shell.render_settings_nav(section, &theme, cx),
+                    Route::Chat => shell.render_chat_sidebar(&theme, cx),
+                }
+            });
+            div()
+                .id("sidebar-surface")
+                .debug_selector(|| "sidebar-surface".into())
+                .w(px(width))
+                .h(px(600.0))
+                .child(sidebar)
+        }
+    }
+
+    fn sidebar_bounds_fixture(
+        cx: &mut TestAppContext,
+        persisted_width: f32,
+    ) -> (
+        Entity<SidebarBoundsHost>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let (host, cx) = cx.add_window_view(move |_, cx| {
+            let state = cx.new(|_| AppState::new());
+            let shell = cx.new(|cx| {
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        data_dir: dir.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zeron_proto::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.settings.sidebar_width = persisted_width;
+                shell
+            });
+            SidebarBoundsHost {
+                shell,
+                viewport_width: 320.0,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        draw_sidebar(cx);
+        (host, shell, cx)
+    }
+
+    fn draw_sidebar(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.update(|window, cx| window.draw(cx).clear());
+    }
+
+    fn assert_sidebar_width(cx: &mut VisualTestContext, selector: &'static str, expected: f32) {
+        let surface = cx.debug_bounds("sidebar-surface").unwrap();
+        let content = cx.debug_bounds(selector).unwrap();
+        assert_eq!(f32::from(surface.size.width), expected);
+        assert_eq!(
+            f32::from(content.size.width),
+            expected,
+            "{selector} diverged from the rendered sidebar surface"
+        );
+    }
+
+    #[gpui::test]
+    fn sidebar_descendants_share_mobile_and_desktop_rendered_width(cx: &mut TestAppContext) {
+        let (host, shell, cx) = sidebar_bounds_fixture(cx, 340.0);
+
+        assert_sidebar_width(cx, "chat-sidebar-content", 240.0);
+
+        shell.update(cx, |shell, cx| {
+            shell.route = Route::Settings(SettingsSection::Devices);
+            cx.notify();
+        });
+        draw_sidebar(cx);
+        assert_sidebar_width(cx, "settings-sidebar-content", 240.0);
+
+        shell.update(cx, |shell, cx| {
+            shell.settings.sidebar_width = 220.0;
+            cx.notify();
+        });
+
+        host.update(cx, |host, cx| {
+            host.viewport_width = 390.0;
+            cx.notify();
+        });
+        draw_sidebar(cx);
+        assert_sidebar_width(cx, "settings-sidebar-content", 280.0);
+
+        shell.update(cx, |shell, cx| {
+            shell.route = Route::Chat;
+            cx.notify();
+        });
+        draw_sidebar(cx);
+        assert_sidebar_width(cx, "chat-sidebar-content", 280.0);
+
+        host.update(cx, |host, cx| {
+            host.viewport_width = 1200.0;
+            cx.notify();
+        });
+        draw_sidebar(cx);
+        assert_sidebar_width(cx, "chat-sidebar-content", 220.0);
+    }
 
     #[gpui::test]
     fn mobile_right_drawer_preserves_docked_panel_state(cx: &mut TestAppContext) {
