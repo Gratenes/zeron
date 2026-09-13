@@ -3,7 +3,8 @@ use std::fs;
 use rusqlite::{Connection, params};
 use zeron_engine::peer_auth::{AuthStore, DeviceIdentity};
 use zeron_engine::peer_runtime::backup::{
-    BackupError, TRUST_ROLLBACK_WARNING, create_generation, restore_generation, verify_generation,
+    BackupError, TRUST_ROLLBACK_WARNING, create_generation, publish_directory, restore_generation,
+    verify_generation,
 };
 use zeron_sync::peer::PeerStore;
 
@@ -182,6 +183,25 @@ fn restore_rejects_tampering_missing_secrets_and_nonempty_targets() {
         Err(BackupError::TargetNotEmpty)
     ));
     assert_eq!(fs::read(occupied.join("unrelated")).unwrap(), b"keep");
+}
+#[test]
+fn publication_validates_and_prepares_source_before_move() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("stage");
+    let destination = temp.path().join("published");
+
+    fs::write(&source, b"not a directory").unwrap();
+    let error = publish_directory(&source, &destination).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(fs::read(&source).unwrap(), b"not a directory");
+    assert!(!destination.exists());
+
+    fs::remove_file(&source).unwrap();
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("entry"), b"durable").unwrap();
+    publish_directory(&source, &destination).unwrap();
+    assert!(!source.exists());
+    assert_eq!(fs::read(destination.join("entry")).unwrap(), b"durable");
 }
 
 use std::io::Write as _;

@@ -21,8 +21,8 @@ enum NativeTailcatError: LocalizedError {
 }
 
 /// Owns the embedded Tailcat client and its loopback HTTP/WebSocket proxy.
-/// The gomobile contract is `StartClient(address,stateDir,derpMap)` and a
-/// returned handle with `URL()` and `Close()`.
+/// The generated bridge exposes nullable `StartClient` with an `NSError**`,
+/// and a returned handle with non-throwing `URL()` and `Close()`.
 protocol TailcatClient: Sendable {
     var url: URL { get }
     func close()
@@ -37,7 +37,14 @@ final class NativeTailcatClient: TailcatClient, @unchecked Sendable {
         try FileManager.default.createDirectory(at: stateDirectory,
                                                 withIntermediateDirectories: true)
         do {
-            let started = try TailcatnativeStartClient(address, stateDirectory.path, derpMap ?? "")
+            var startError: NSError?
+            guard let started = TailcatnativeStartClient(address, stateDirectory.path,
+                                                          derpMap ?? "", &startError) else {
+                if let startError {
+                    throw NativeTailcatError.startFailed(startError.localizedDescription)
+                }
+                throw NativeTailcatError.startFailed("The native adapter returned no client.")
+            }
             guard let url = URL(string: started.url()), url.isLoopbackHTTP else {
                 started.close()
                 throw NativeTailcatError.invalidProxyURL

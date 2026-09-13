@@ -108,6 +108,8 @@ pub fn create_generation(data_dir: &Path, peer_store: &PeerStore) -> Result<Path
             .map_err(|e| BackupError::Peer(e.to_string()))?;
         private_file_mode(&stage.join("peer.sqlite"))?;
 
+        sync_regular_file(&stage.join("peer.sqlite"))?;
+
         if stable_before != read_stable_files(data_dir)? {
             return Err(BackupError::Invalid(
                 "peer identity changed while backup was running; retry".into(),
@@ -133,9 +135,7 @@ pub fn create_generation(data_dir: &Path, peer_store: &PeerStore) -> Result<Path
         };
         let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
         private_write(&stage.join("manifest.json"), &manifest_bytes)?;
-        sync_dir(&stage)?;
-        fs::rename(&stage, &generation)?;
-        sync_dir(&backup_root)?;
+        publish_directory(&stage, &generation)?;
 
         let latest = Latest {
             generation_id,
@@ -240,13 +240,12 @@ pub fn restore_generation(
             }
             private_write(&path, &bytes)?;
         }
-        sync_dir(&stage.join("peer"))?;
-        sync_dir(&stage)?;
+        // The nested peer directory will not be prepared by publishing its parent.
+        prepare_directory_publication(&stage.join("peer"))?;
         if data_dir.exists() {
             fs::remove_dir(data_dir)?;
         }
-        fs::rename(&stage, data_dir)?;
-        sync_dir(parent)?;
+        publish_directory(&stage, data_dir)?;
         Ok(manifest.clone())
     })();
     if result.is_err() {
@@ -276,7 +275,7 @@ fn snapshot_sqlite(source: &Path, destination: &Path) -> Result<(), BackupError>
         params![destination.to_string_lossy().as_ref()],
     )?;
     private_file_mode(destination)?;
-    File::open(destination)?.sync_all()?;
+    sync_regular_file(destination)?;
     Ok(())
 }
 
@@ -357,51 +356,97 @@ fn private_write(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     file.sync_all()
 }
 
+fn sync_regular_file(path: &Path) -> Result<(), std::io::Error> {
+    // FlushFileBuffers requires GENERIC_WRITE on Windows; File::open is
+    // read-only there and fails with ERROR_ACCESS_DENIED.
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?
+        .sync_all()
+}
+
 fn atomic_private_write(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
     let tmp = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     private_write(&tmp, bytes)?;
-    let previous = path.with_extension(format!("previous-{}", uuid::Uuid::new_v4()));
-    let had_previous = path.exists();
-    if had_previous {
-        fs::rename(path, &previous)?;
+    let result = replace_file(&tmp, path);
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    if let Err(error) = fs::rename(&tmp, path) {
-        if had_previous {
-            let _ = fs::rename(&previous, path);
-        }
-        return Err(error);
-    }
-    if had_previous {
-        fs::remove_file(previous)?;
-    }
-    if let Some(parent) = path.parent() {
-        sync_dir(parent)?;
-    }
-    Ok(())
+    result
 }
 
-fn sync_dir(path: &Path) -> Result<(), std::io::Error> {
+fn prepare_directory_publication(path: &Path) -> Result<(), std::io::Error> {
+    if !fs::symlink_metadata(path)?.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "publication source is not a directory",
+        ));
+    }
     #[cfg(unix)]
     {
         return File::open(path)?.sync_all();
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        // CreateFile requires FILE_FLAG_BACKUP_SEMANTICS for directory handles;
-        // File::sync_all then calls FlushFileBuffers on that handle.
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        return OpenOptions::new()
-            .write(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path)?
-            .sync_all();
+        // Windows does not support POSIX-style directory fsync. Every regular
+        // file is flushed before this point; publication itself uses
+        // MoveFileExW(MOVEFILE_WRITE_THROUGH) below.
+        Ok(())
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "durable directory synchronization is unsupported on this platform",
-        ))
+}
+
+/// Atomically publishes a fully flushed directory within one parent.
+pub fn publish_directory(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    if source.parent() != destination.parent() || destination.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "publication requires an absent same-directory destination",
+        ));
     }
+    prepare_directory_publication(source)?;
+    move_path(source, destination, false)?;
+    #[cfg(unix)]
+    if let Some(parent) = destination.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn replace_file(source: &Path, destination: &Path) -> Result<(), std::io::Error> {
+    move_path(source, destination, true)?;
+    #[cfg(unix)]
+    if let Some(parent) = destination.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn move_path(source: &Path, destination: &Path, _replace: bool) -> Result<(), std::io::Error> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn move_path(source: &Path, destination: &Path, replace: bool) -> Result<(), std::io::Error> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let flags = MOVEFILE_WRITE_THROUGH
+        | if replace {
+            MOVEFILE_REPLACE_EXISTING
+        } else {
+            0
+        };
+    if unsafe { MoveFileExW(source.as_ptr(), destination.as_ptr(), flags) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }

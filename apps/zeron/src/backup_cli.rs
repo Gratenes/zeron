@@ -1,6 +1,6 @@
 //! Offline wrappers for hosted-peer disaster recovery.
 
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -68,8 +68,7 @@ pub fn restore(
             !destination.exists(),
             "restore destination appeared during restore; nothing was overwritten"
         );
-        fs::rename(&stage, destination)?;
-        sync_dir(parent)?;
+        zeron_engine::peer_runtime::backup::publish_directory(&stage, destination)?;
         drop(lock);
         Ok(())
     })();
@@ -114,11 +113,13 @@ fn export_generation(
             let destination = stage.join(name);
             fs::copy(&source, &destination)?;
             private_file(&destination)?;
-            File::open(&destination)?.sync_all()?;
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&destination)?
+                .sync_all()?;
         }
-        sync_dir(&stage)?;
-        fs::rename(&stage, &destination)?;
-        sync_dir(output_dir)?;
+        zeron_engine::peer_runtime::backup::publish_directory(&stage, &destination)?;
         Ok(())
     })();
     if result.is_err() {
@@ -134,32 +135,6 @@ fn nonce() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
-}
-
-fn sync_dir(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        return File::open(path)?.sync_all();
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        // CreateFile requires FILE_FLAG_BACKUP_SEMANTICS for directory handles;
-        // File::sync_all then calls FlushFileBuffers on that handle.
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        return fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path)?
-            .sync_all();
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "durable directory synchronization is unsupported on this platform",
-        ))
-    }
 }
 
 fn private_dir(path: &Path) -> std::io::Result<()> {
