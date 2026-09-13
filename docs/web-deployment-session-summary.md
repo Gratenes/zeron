@@ -1,5 +1,14 @@
 # Web deployment: session summary
 
+> Historical deployment record, not the current asset/pin inventory. Later staging
+> updates used ignored snapshots with local zui overrides; their success alone
+> did not validate the committed runtime pin. The web manifest now pins published
+> `Gratenes/zui@aca6b04288396d26a0b080ba9a21a50446443834` for reproducible review
+> builds. See [the web README](../apps/web/README.md) for runtime-first landing and
+> [the production checklist](web-production-rollout.md) for prerequisites,
+> including the new `v5` browser-session migration. Production remains undeployed.
+
+
 ## What is deployed?
 
 The existing Rust/GPUI web application and edge backend are deployed together as

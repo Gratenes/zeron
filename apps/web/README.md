@@ -33,7 +33,7 @@ env -u NO_COLOR RUSTUP_TOOLCHAIN=nightly-2026-09-08 \
   trunk serve --port 8080
 ```
 
-`index.html` selects the `comet-web` binary. The bundle is written to `apps/web/dist/` (ignored by git); `--locked` rejects unreviewed dependency or lockfile changes. The manifest pins the published [`Gratenes/zui@c1700b8de27a07b5bc1a190440b64e7323c008f9`](https://github.com/Gratenes/zui/commit/c1700b8de27a07b5bc1a190440b64e7323c008f9), including the runtime input fixes and regression tests.
+`index.html` selects the `comet-web` binary. The bundle is written to `apps/web/dist/` (ignored by git); `--locked` rejects unreviewed dependency or lockfile changes. The manifest pins the published [`Gratenes/zui@aca6b04288396d26a0b080ba9a21a50446443834`](https://github.com/Gratenes/zui/commit/aca6b04288396d26a0b080ba9a21a50446443834), including bundled color emoji, core touch-focus tracking and browser keyboard/input bridging. All web runtime packages resolve from Git, not the sibling checkout or an ignored staging snapshot.
 
 [`trunk.toml`](trunk.toml) binds development serving to `127.0.0.1:8080` and sets the GPUI/WASM headers:
 
@@ -71,7 +71,9 @@ remains a separate, manually deployed verification target.
 
 ## Runtime-first landing and final pin
 
-The web checkpoint uses the published runtime fixes from [zui PR #8](https://github.com/zeronsh/zui/pull/8), without a sibling-checkout dependency. Merge that runtime PR first. Then move the web dependencies and patches to the resulting published `zeronsh/zui` revision, regenerate `apps/web/Cargo.lock`, and rerun the locked build before merging the web PR. Never substitute an unpublished revision or local path for the committed pin.
+The web checkpoint uses the published fork revision from [zui PR #8](https://github.com/zeronsh/zui/pull/8), so it can be reviewed and built before that PR lands. The native workspace retains its existing upstream runtime pin until landing.
+
+Before merging the app PR, merge the runtime PR first. Use its actual published upstream merge/squash SHA (not a guessed SHA) for root `Cargo.toml` dependencies `gpui`, `gpui_platform`, `gpui_tokio` and the web direct dependencies. Remove the temporary web fork patches once all sources converge on `zeronsh/zui`. Regenerate and review both `Cargo.lock` and `apps/web/Cargo.lock`, verify Cargo metadata resolves `gpui_web` and `gpui_wgpu` to that Git revision, and rerun locked native/web checks. Never commit local runtime path overrides, snapshots or generated assets.
 
 ## Validation commands
 
@@ -95,7 +97,7 @@ The web CI workflow runs the locked Trunk WASM build, lifecycle tests, and the s
 - [ ] Revoke a session/device; verify its old cookie, socket, and request cannot be replayed, while another active session is unaffected.
 - [ ] Upload and read back 200 KiB and 1 MiB attachments without disconnects or duplicate submission. The attachment limit is 24 MiB; the encoded relay-frame ceiling is 1 MiB, so larger attachments use multiple frames.
 - [x] Phone taps, scrolling, keyboard behavior, and popovers: manually verified by the user. Device/browser versions and tested revision were not recorded.
-- [ ] Phone copy/paste and emoji insertion/deletion: user verification pending; automated Unicode tests do not replace this check.
+- [x] Terminal input/focus, mobile drawers, emoji and reconnect interactions: user-verified passing on staging on 2026-09-13 with the local-runtime bundle. This is user acceptance, not automated evidence for a later merge build.
 - [ ] Run the lifecycle and focused edge auth/device tests above.
 - [ ] Review manifest/lockfile sources; after runtime landing, repin to the exact published `zeronsh/zui` commit.
 - [ ] Keep native CI and unrelated upload/lifecycle implementation changes in their owning changesets.

@@ -13,12 +13,17 @@ That is evidence for the application flow, not production DNS, credentials or st
 `edge/wrangler.jsonc` keeps:
 
 - Worker `comet-native-edge` and account `b57dde68ee5964dccc025437b5478a5b`;
-- all existing routes, including `edge.zeron.sh`, preview, install and release routes;
-- the original Durable Object bindings and migration history (`v1` through `v5`);
+- existing native, install and release routes, including `edge.zeron.sh`;
+- the original Durable Object bindings and migration history (`v1` through `v4`);
 - R2 buckets `comet-native-blobs` and `comet-native-releases`;
 - the production WorkOS client ID and compatibility date.
 
-It adds `web.zeron.sh` and the built `apps/web/dist` assets to this same Worker.
+Relative to upstream, it adds `web.zeron.sh`, preview origin/wildcard routes,
+`BROWSER_SESSIONS`, and migration `v5` creating `BrowserSessionStore`, together
+with the built `apps/web/dist` assets on this same Worker. Before deploying,
+verify the actual remote migration history; do not assume `v5` is already applied
+or alter an existing migration tag. Existing device/session namespaces and R2
+buckets must remain intact.
 `src/production.ts` is a small entry-point wrapper that re-exports the exact existing
 DO classes. It serves only `/`, `/index.html` and the hashed Trunk JS/WASM files,
 only at `WORKOS_BROWSER_ORIGIN`, for GET/HEAD without an upgrade header. All other
@@ -55,7 +60,7 @@ to reconnect/update if it predates browser device registration.
 5. Configure the repository `CLOUDFLARE_API_TOKEN` for the production account with
    Workers Scripts/Routes and required R2 permissions. Never put it into the app.
 6. Merge the runtime dependency PR first and follow `apps/web/README.md` to repin
-   to the published upstream runtime revision and regenerate the web lockfile.
+   to the published upstream runtime revision and regenerate both Cargo lockfiles.
    Run the locked build again after changing the pin.
 
 No single-user allowlist is required. WorkOS authenticates users and the backend
@@ -116,15 +121,22 @@ reports a failed workflow but does not automatically undo the deployment. An
 operator should inspect the failure and use Cloudflare's supported version rollback
 if needed. A code rollback does not roll back DO/R2 data, secrets, DNS changes or
 WorkOS callback settings; do not delete namespaces/buckets as a rollback shortcut.
-This rollout intentionally introduces no storage migration or compatibility-date
-advance, reducing risk to existing clients.
+This rollout retains the compatibility date and existing storage identities,
+but adds the `v5` browser-session namespace migration. Review Cloudflare's
+migration rollback restrictions before deploying; rolling back code does not
+remove the new namespace or reverse stored data.
 
 ## Local verification for this change
 
 - Locked release WASM build, TypeScript typecheck and production Wrangler dry-run passed.
-- 44 unit tests and 24 workerd tests reported passing (exit 0). The full workerd
-  run also emitted `Expected global Vitest state` runner assertions; this diagnostic
-  remains unresolved and should not be mistaken for a completely clean test log.
+- Earlier workerd runs reported passing while emitting `Expected global Vitest
+  state` assertions. Investigation traced these to pre-initialization HTTP probes
+  reaching the Vitest pool entrypoint. `edge/scripts/patch-vitest-pool.mjs` applies
+  a temporary, layout-checked startup guard during `npm ci`; dependency versions
+  are unchanged. `npm run test:workerd` also fails on uncaught runner diagnostics
+  even when Vitest reports exit 0. Repeated local runs passed 44 unit + 24 workerd
+  tests without those diagnostics. Revalidate hosted CI; remove the patch when
+  an upstream release fixes this startup behavior.
 - 39 real local Worker routing checks passed, including static response bytes,
   isolation headers, native/preview host exclusion and backend route preservation.
 - Workflow actionlint and production storage/configuration preservation checks passed.

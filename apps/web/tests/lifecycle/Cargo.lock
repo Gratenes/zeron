@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-proto"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "chrono",
  "serde",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-rpc"
-version = "0.2.61"
+version = "0.2.62"
 dependencies = [
  "futures",
  "serde",
