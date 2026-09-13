@@ -167,12 +167,13 @@ jobs:
         run: |
           set -euo pipefail
           DERIVED_DATA="$RUNNER_TEMP/ios-derived-data"
+          CI_ENTITLEMENTS="$GITHUB_WORKSPACE/apps/ios/CI/Simulator.entitlements"
+          EXPECTED_APP_ID="5XY3M483YQ.sh.zeron.ios"
           SIGNING_ARGS=(
             CODE_SIGN_IDENTITY="-"
             CODE_SIGN_STYLE=Manual
             CODE_SIGNING_ALLOWED=YES
             CODE_SIGNING_REQUIRED=NO
-            CODE_SIGN_INJECT_BASE_ENTITLEMENTS=YES
           )
           xcodebuild -project Zeron.xcodeproj -scheme Zeron \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
@@ -180,11 +181,13 @@ jobs:
             -only-testing:ZeronTests "${SIGNING_ARGS[@]}" build-for-testing
 
           APP="$DERIVED_DATA/Build/Products/Debug-iphonesimulator/Zeron.app"
-          ENTITLEMENTS="$RUNNER_TEMP/zeron-simulator-entitlements.plist"
+          SIGNED_ENTITLEMENTS="$RUNNER_TEMP/zeron-simulator-entitlements.plist"
+          codesign --force --sign - --timestamp=none --generate-entitlement-der \
+            --entitlements "$CI_ENTITLEMENTS" "$APP"
           codesign --verify --verbose=2 "$APP"
-          codesign -d --entitlements :- "$APP" > "$ENTITLEMENTS"
-          APP_ID="$(plutil -extract application-identifier raw "$ENTITLEMENTS")"
-          test -n "$APP_ID"
+          codesign --display --entitlements - --xml "$APP" > "$SIGNED_ENTITLEMENTS"
+          test "$(plutil -extract application-identifier raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_APP_ID"
+          test "$(plutil -extract keychain-access-groups.0 raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_APP_ID"
 
           xcodebuild -project Zeron.xcodeproj -scheme Zeron \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \

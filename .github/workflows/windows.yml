@@ -108,14 +108,27 @@ jobs:
           $env:ZERON_IPC_PORT = '0'
           $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP "zeron smoke O'Brien 日本語"
           $expected = Join-Path $env:LOCALAPPDATA 'Zeron'
+          if (Test-Path -LiteralPath $expected) {
+            throw 'Windows startup path fixture must begin absent'
+          }
           $output = & ./target/release/zeron.exe status
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $output
-          if (-not ($output -contains "Data dir: $expected")) {
-            throw 'Windows startup did not select LOCALAPPDATA/Zeron'
+          if (-not (Test-Path -LiteralPath $expected -PathType Container)) {
+            throw 'Windows startup did not create LOCALAPPDATA/Zeron'
           }
-          if (-not ($output -match '^Mode:\s+local only$')) {
-            throw 'An isolated Windows startup must select local-only mode'
+          $status = ($output -join [Environment]::NewLine) | ConvertFrom-Json
+          foreach ($property in @('signedIn', 'hosting', 'connected', 'profileId', 'deviceId')) {
+            if ($null -eq $status.PSObject.Properties[$property]) {
+              throw "Status output is missing $property"
+            }
+          }
+          if ($status.signedIn -ne $false -or
+              $status.hosting -ne $false -or
+              $status.connected -ne $false -or
+              $null -ne $status.profileId -or
+              $null -ne $status.deviceId) {
+            throw 'An isolated Windows startup must report local-only peer status'
           }
       - name: Build rendering fixture
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_gui }}
