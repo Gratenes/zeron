@@ -205,7 +205,26 @@ async fn chat_rows_dedupe_restart_range_and_profile_isolation() {
     );
     assert_eq!(&ranged.bytes().await.unwrap()[..], &snapshot[4..]);
 
-    store.backup_to(tmp.path().join("backup.sqlite")).unwrap();
+    let backup_path = tmp.path().join("backup.sqlite");
+    store.backup_to(&backup_path).unwrap();
+    // Exercise replacement as well as first publication, then verify that the
+    // lower-level helper produced a complete standalone snapshot.
+    store.backup_to(&backup_path).unwrap();
+    let backup = rusqlite::Connection::open(&backup_path).unwrap();
+    assert_eq!(
+        backup
+            .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    let backed_up_checkpoint: Vec<u8> = backup
+        .query_row(
+            "SELECT bytes FROM chat_checkpoints WHERE profile='alice' AND chat='c1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(backed_up_checkpoint, snapshot);
     task.abort();
     drop(store);
     let (url, _store, task) = start(&db).await;

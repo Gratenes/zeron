@@ -54,7 +54,7 @@ final class PeerIntegrationTests: XCTestCase {
                 XCTAssertEqual(json["fileName"] as? String, "photo.png")
                 XCTAssertEqual(json["length"] as? Int, bytes.count)
                 XCTAssertEqual(json["digest"] as? String, expectedDigest)
-                return (200, self.meta(committed: false, nextOffset: 4, length: bytes.count))
+                return (200, try self.meta(committed: false, nextOffset: 4, length: bytes.count))
             case 2:
                 XCTAssertEqual(request.httpMethod, "PUT")
                 XCTAssertEqual(request.url?.path, "/attachment/upload-1/chunk")
@@ -62,11 +62,11 @@ final class PeerIntegrationTests: XCTestCase {
                 XCTAssertEqual(query?.first { $0.name == "targetDevice" }?.value, "dev_host")
                 XCTAssertEqual(query?.first { $0.name == "offset" }?.value, "4")
                 XCTAssertEqual(request.httpBody, bytes.subdata(in: 4..<bytes.count))
-                return (200, self.meta(committed: false, nextOffset: 10, length: bytes.count))
+                return (200, try self.meta(committed: false, nextOffset: 10, length: bytes.count))
             case 3:
                 XCTAssertEqual(request.httpMethod, "POST")
                 XCTAssertEqual(request.url?.path, "/attachment/upload-1/commit")
-                return (200, self.meta(committed: true, nextOffset: 10, length: bytes.count))
+                return (200, try self.meta(committed: true, nextOffset: 10, length: bytes.count))
             default:
                 XCTFail("unexpected custody request")
                 return (500, Data())
@@ -100,7 +100,8 @@ final class PeerIntegrationTests: XCTestCase {
                                authSession: PeerURLProtocol.session()) {
             revoked.fulfill()
         }
-        XCTAssertNil(await config.currentToken())
+        let token = await config.currentToken()
+        XCTAssertNil(token)
         await fulfillment(of: [revoked], timeout: 1)
     }
 

@@ -60,18 +60,19 @@ backup/restore of the new peer remain: recovery is not cross-profile migration.
 
 ## Verification record
 
-After removing migration/import code, the parent ran
-`cargo test --locked -p zeron-engine -p zeron-doc -p zeron-rpc -p zeron-sync
---features zeron-sync/mock-server -- --test-threads=1`: **558 passed**, no failures,
-with four existing credential/private-fixture tests ignored. Log:
-`target/verification/fresh-start-core.log`. The native CLI suite passed **11/11**.
+After the PR recovery fixes, the parent ran the combined engine/doc/rpc/sync/
+preview/update/CLI suite with `--locked`, `zeron-sync/mock-server`, and serial
+execution: **600 passed**, no failures, four existing credential/private-fixture
+tests ignored. Log: `target/verification/pr8-final-integrated.log`. Subsequent
+backup-publication changes passed the focused peer-backup and CLI backup tests.
 The built binary rejects `zeron migrate`; current peer backup/restore help remains.
 
 Fresh-start regressions verify old/global/local upload roots stay inaccessible
 from a new paired profile while source files remain untouched, removed import
 RPCs return UnknownMethod, and desktop setup never offers or performs local import.
 Focused native UI pairing, device management, keyboard and switch tests passed.
-iOS has a matching no-adoption XCTest, source-reviewed but not executed on Linux.
+iOS has matching no-adoption and saved-key recovery XCTests; native execution uses
+the GitHub-hosted simulator job rather than claiming XCTest execution on Linux.
 
 The retained real Tailcat integration uses the actual Go adapter and a local
 DERP/STUN fixture with Rust Auth and EngineRuntimes. It tests pairing, registry/chat
@@ -97,11 +98,22 @@ checkpoint data loss, revocation races, re-pairing, adapter recovery and failed
 startup cleanup. The fresh-start removal also passed focused Astra low-reasoning
 UI/iOS and final integrated backend/code reviews with no outstanding findings.
 
+
+The PR follow-up added regressions for sender restart before/during attachment
+custody upload, revoked-device re-pairing, concurrent identity publication, and
+failed iOS redemption preserving a saved key. Native CI exercises macOS/Windows
+Tailcat transport and durable-peer recovery; macOS also runs managed Auth tests.
+The obsolete edge coordinator job was removed, while its replacement authenticated
+preview coverage remains. Native browser fixtures retain their input-isolation
+assertions and wait for actual popup teardown rather than fixed timing.
+
 ## Operational/platform limits
 
-- macOS/iOS Xcode builds, XCTest/device execution and native Windows runtime/crash
-  durability remain unverified on this Linux host. Source reviews and cross-builds
-  do not replace native platform testing.
+- Native macOS/Windows jobs and iOS simulator tests run in GitHub Actions. See
+  [PR #8 checks](https://github.com/wasimysaid/Kratos/pull/8/checks) for the exact
+  tested commits and current outcomes; source review and cross-builds are not
+  substitutes. Physical-device, power-loss, and release signing/notarization
+  validation remain separate rollout checks.
 - No live cloud data, local historical files, deployments or releases were deleted
   or published. Starting fresh does not authorize destructive cleanup. There is no
   supported old-data import workflow. New-peer [backup/restore](peer-backup.md)

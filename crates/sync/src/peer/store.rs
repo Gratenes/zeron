@@ -105,8 +105,13 @@ impl PeerStore {
             let db = self.db();
             db.execute("VACUUM INTO ?1", params![tmp.to_string_lossy().as_ref()])?;
         }
-        let file = std::fs::OpenOptions::new().read(true).open(&tmp)?;
+        // FlushFileBuffers requires a handle opened with write access on Windows.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&tmp)?;
         file.sync_all()?;
+        drop(file);
         let previous = destination.with_extension(format!("previous-{}", uuid::Uuid::new_v4()));
         let had_previous = destination.exists();
         if had_previous {
@@ -121,10 +126,9 @@ impl PeerStore {
         if had_previous {
             std::fs::remove_file(previous)?;
         }
+        #[cfg(unix)]
         if let Some(parent) = destination.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
+            std::fs::File::open(parent)?.sync_all()?;
         }
         Ok(())
     }

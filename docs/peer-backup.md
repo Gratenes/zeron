@@ -30,16 +30,20 @@ Each generation contains:
 
 SQLite files are made with SQLite snapshot operations; live database, `-wal`,
 and `-shm` files are never copied. Stable secret files are read before and
-after snapshotting, and a generation is rejected if they changed. Files are
-`0600`, directories are `0700`, the manifest is written last, and the complete
-directory is atomically renamed into place. `latest.json` is only an atomic
-pointer; a generation remains independently verifiable.
+after snapshotting, and a generation is rejected if they changed. On Unix, files
+are `0600` and directories are `0700`; on Windows, protect the data and export
+locations with account-restricted ACLs. The manifest is written last, and the
+complete directory is atomically renamed into place. `latest.json` is only an
+atomic pointer; a generation remains independently verifiable.
 
 
-Publication metadata is flushed before success: Unix uses directory `fsync`;
-Windows opens the directory with `FILE_FLAG_BACKUP_SEMANTICS` and write access,
-then calls `FlushFileBuffers`. An unsupported platform or failed directory flush
-is reported as an error rather than silently weakening durability.
+Regular files are flushed before publication. Unix also uses staging-directory
+and parent-directory `fsync`. Windows flushes writable file handles and publishes
+same-parent moves with `MoveFileExW(MOVEFILE_WRITE_THROUGH)`; the latest pointer
+uses atomic replacement. Windows does not provide the POSIX directory-fsync
+operation, so no directory-handle flush is attempted. File-flush and publication
+errors are reported. These checks do not replace power-loss testing of the actual
+filesystem and storage hardware.
 
 To create and copy a fresh generation to operator-controlled storage, first
 stop Zeron on the hosted peer, then run:
