@@ -698,6 +698,11 @@ pub enum ToolDetail {
         lines: Vec<Vec<InlineRun>>,
         truncated_by: usize,
     },
+    /// Schema-identified public Markdown rendered through the full measured renderer.
+    Markdown {
+        source: SharedString,
+        tree: Arc<BlockTree>,
+    },
     /// A file diff, in the changes pane's model: hunks with 3 lines of
     /// context, dual line numbers, and (for recognized languages) syntax
     /// tokens — rendered by `changes::render_file_body`.
@@ -781,6 +786,21 @@ pub fn tool_detail(
     })
 }
 
+fn markdown_tool_detail(output: Option<&str>) -> Option<ToolDetail> {
+    let source = output?.trim();
+    if source.is_empty() {
+        return None;
+    }
+    let tree = Arc::new(parse_full(source));
+    if tree.blocks.is_empty() {
+        return None;
+    }
+    Some(ToolDetail::Markdown {
+        source: source.to_owned().into(),
+        tree,
+    })
+}
+
 /// Small public results already ride whole in the doc (apart from transport
 /// fences/outer whitespace). Do not offer a fetch which only repeats them.
 /// Unknown lengths and locally truncated detail still need the sidecar.
@@ -835,6 +855,7 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
         },
         ToolCall::WebSearch { query } => query.clone(),
         ToolCall::Document { .. } => return None,
+        ToolCall::Answer { .. } | ToolCall::Report { .. } => return None,
         ToolCall::Todo { items } => items
             .iter()
             .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
@@ -1053,9 +1074,26 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlobPresentation {
+    Output,
+    Document,
+    Markdown,
+}
+
+impl BlobPresentation {
+    fn for_tool_output(call: &ToolCall) -> Self {
+        match call {
+            ToolCall::Document { .. } => Self::Document,
+            ToolCall::Answer { .. } | ToolCall::Report { .. } => Self::Markdown,
+            _ => Self::Output,
+        }
+    }
+}
+
 fn collect_public_blob_owners(
     entry: &SessionMessageEntry,
-    owners: &mut HashMap<SharedString, (u64, bool)>,
+    owners: &mut HashMap<SharedString, (u64, BlobPresentation)>,
 ) {
     for part in &entry.parts {
         if let MessagePart::Tool {
@@ -1077,7 +1115,7 @@ fn collect_public_blob_owners(
             token ^= u64::from(*resolved) << 62 | u64::from(*is_error) << 63;
             owners.insert(
                 blob_ref.as_str().into(),
-                (token, matches!(call, ToolCall::Document { .. })),
+                (token, BlobPresentation::for_tool_output(call)),
             );
         }
     }
@@ -1129,6 +1167,12 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                     acc.push(b'\n');
                 }
             }
+            Some(ToolDetail::Markdown { source, tree }) => {
+                acc.push(5);
+                acc.extend_from_slice(&fnv1a(source.as_bytes()).to_le_bytes());
+                acc.extend_from_slice(&(tree.blocks.len() as u32).to_le_bytes());
+            }
+
             Some(ToolDetail::Diff { file, .. }) => {
                 acc.push(2);
                 acc.extend_from_slice(file.path.as_bytes());
@@ -1378,8 +1422,12 @@ pub fn rows_for_entry(
                     call: call.clone(),
                     is_error: *is_error,
                     resolved: *resolved,
-                    detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
-                        .map(Arc::new),
+                    detail: if matches!(call, ToolCall::Answer { .. } | ToolCall::Report { .. }) {
+                        markdown_tool_detail(output.as_deref())
+                    } else {
+                        tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
+                    }
+                    .map(Arc::new),
                     invocation: call_block(call).map(Arc::new),
                     output_ref: output_ref
                         .clone()
@@ -1820,6 +1868,9 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
             let rows = lines.len() + usize::from(*truncated_by > 0);
             rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
         }
+        // Full Markdown uses measured GPUI layout; callers with this variant do
+        // not constrain the card or group to this analytic estimate.
+        ToolDetail::Markdown { .. } => 0.0,
         ToolDetail::Diff { file, .. } => crate::changes::body_height(file),
         ToolDetail::Stats { stats } => stats.len() as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD,
     };
@@ -1837,6 +1888,7 @@ pub const BLOB_AFFORDANCE_HEIGHT: f32 = 24.0;
 struct ChipAffordance {
     blob_ref: SharedString,
     label: SharedString,
+    presentation: BlobPresentation,
 }
 
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —
@@ -2573,7 +2625,7 @@ pub struct Transcript {
     blob_details: HashMap<SharedString, BlobFetch>,
     /// Public owner fingerprint and fetch generation for each stable blob ref.
     /// Child revisions intentionally reuse refs, so the ref alone is not a cache key.
-    blob_owners: HashMap<SharedString, (u64, bool)>,
+    blob_owners: HashMap<SharedString, (u64, BlobPresentation)>,
     blob_generations: HashMap<SharedString, u64>,
     /// Monotonic fetch order per blob ref: when a tool has BOTH a diff and
     /// an output blob fetched, the chip shows the one requested most
@@ -2592,6 +2644,18 @@ enum BlobFetch {
     Ready(Arc<ToolDetail>),
     /// Parsed only when the owning tool is explicitly a Markdown document.
     Document(Arc<BlockTree>),
+}
+
+fn build_blob_fetch(text: &str, is_diff: bool, presentation: BlobPresentation) -> BlobFetch {
+    match presentation {
+        BlobPresentation::Output => blob_detail(text, is_diff)
+            .map(|detail| BlobFetch::Ready(Arc::new(detail)))
+            .unwrap_or(BlobFetch::Failed),
+        BlobPresentation::Document => BlobFetch::Document(Arc::new(parse_full(text))),
+        BlobPresentation::Markdown => markdown_tool_detail(Some(text))
+            .map(|detail| BlobFetch::Ready(Arc::new(detail)))
+            .unwrap_or(BlobFetch::Failed),
+    }
 }
 
 /// Shell-facing events (the transcript itself hosts no surfaces).
@@ -4092,23 +4156,29 @@ impl Transcript {
     fn reconcile_blob_owners(
         &mut self,
         rows: &[Row],
-        public_owners: HashMap<SharedString, (u64, bool)>,
+        public_owners: HashMap<SharedString, (u64, BlobPresentation)>,
         cx: &mut Context<Self>,
     ) {
-        let mut owners = HashMap::<SharedString, (u64, bool)>::new();
+        let mut owners = HashMap::<SharedString, (u64, BlobPresentation)>::new();
         for row in rows {
             match &row.kind {
                 RowKind::Document {
                     output_ref: Some(blob_ref),
                     ..
                 } => {
-                    owners.insert(blob_ref.clone(), (row.version, true));
+                    owners.insert(blob_ref.clone(), (row.version, BlobPresentation::Document));
                 }
                 RowKind::ToolGroup { tools, .. } => {
                     for tool in tools.iter() {
                         let version = tool_fingerprint(std::slice::from_ref(tool), false);
-                        for blob_ref in [&tool.output_ref, &tool.diff_ref].into_iter().flatten() {
-                            owners.insert(blob_ref.clone(), (version, false));
+                        if let Some(blob_ref) = &tool.output_ref {
+                            owners.insert(
+                                blob_ref.clone(),
+                                (version, BlobPresentation::for_tool_output(&tool.call)),
+                            );
+                        }
+                        if let Some(blob_ref) = &tool.diff_ref {
+                            owners.insert(blob_ref.clone(), (version, BlobPresentation::Output));
                         }
                     }
                 }
@@ -4137,8 +4207,8 @@ impl Transcript {
                 Some(_) => {}
             }
         }
-        for (blob_ref, document) in refresh {
-            self.spawn_blob_fetch(blob_ref, document, cx);
+        for (blob_ref, presentation) in refresh {
+            self.spawn_blob_fetch_with_presentation(blob_ref, presentation, cx);
         }
     }
 
@@ -4197,7 +4267,12 @@ impl Transcript {
     /// Fetch a sidecar blob (full tool output or diff) and build its upgraded
     /// [`ToolDetail`] once, off the render path. Re-entry while Loading/Ready
     /// is a no-op; Failed re-arms as a retry (the affordance label says so).
-    fn spawn_blob_fetch(&mut self, blob_ref: SharedString, document: bool, cx: &mut Context<Self>) {
+    fn spawn_blob_fetch_with_presentation(
+        &mut self,
+        blob_ref: SharedString,
+        presentation: BlobPresentation,
+        cx: &mut Context<Self>,
+    ) {
         // Rank BEFORE the already-fetched guard: clicking a Ready ref is the
         // "show me this one again" toggle (recency bump + repaint, no
         // re-fetch) — with both a diff and an output fetched, the two
@@ -4235,13 +4310,7 @@ impl Transcript {
                         .get("text")
                         .and_then(|t| t.as_str())
                         .unwrap_or_default();
-                    if document {
-                        BlobFetch::Document(Arc::new(parse_full(text)))
-                    } else {
-                        blob_detail(text, is_diff)
-                            .map(|d| BlobFetch::Ready(Arc::new(d)))
-                            .unwrap_or(BlobFetch::Failed)
-                    }
+                    build_blob_fetch(text, is_diff, presentation)
                 }
                 Err(_) => BlobFetch::Failed,
             };
@@ -5270,7 +5339,7 @@ impl Transcript {
             RowKind::Document { .. } => self.render_document(&row, &theme, window, cx),
             RowKind::Checklist { items } => self.render_checklist(&row.id, items, &theme, cx),
             RowKind::ToolGroup { tools, auto_open } => {
-                self.render_tool_group(&row.id, tools, *auto_open, &theme, cx)
+                self.render_tool_group(&row.id, tools, *auto_open, &theme, window, cx)
             }
             RowKind::InputChip { header, resolved } => {
                 input_chip(header.clone(), *resolved, &theme)
@@ -5557,12 +5626,58 @@ impl Transcript {
         Some(Arc::new(crate::changes::DiffHighlights { old, new }))
     }
 
+    fn render_markdown_tool_detail(
+        &mut self,
+        row_id: &SharedString,
+        tree: &Arc<BlockTree>,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let highlights = self.code_highlight_for(row_id, tree, None, cx);
+        let mut body = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(render::MD_BLOCK_GAP))
+            .py(px(10.0));
+        for (ix, top) in tree.blocks.iter().enumerate() {
+            let opts = RenderOptions {
+                tasks: None,
+                media: None,
+                row_key: row_id.clone(),
+                veil: None,
+                cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
+                now: Instant::now(),
+                copy: Some(self.copy_ui_for(row_id, cx)),
+                link: self.workspace_link.clone(),
+                code: self.code_uis_for(row_id, &top.block, ix, cx),
+            };
+            body = body.child(render::render_block(
+                &top.block,
+                ix,
+                ix,
+                &opts,
+                theme,
+                window,
+                highlights
+                    .get(&ix)
+                    .and_then(|highlight| highlight.as_deref())
+                    .map(|highlight| highlight.lines.as_slice()),
+            ));
+        }
+        body.into_any_element()
+    }
+
     fn render_tool_group(
         &mut self,
         row_id: &SharedString,
         tools: &Arc<Vec<ToolItem>>,
         auto_open: bool,
         theme: &Theme,
+
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let fold = self.folds.get(row_id).copied().unwrap_or_default();
@@ -5628,10 +5743,20 @@ impl Transcript {
                     best.map(|(_, r)| r)
                 };
                 let candidates = [
-                    (tool.diff_ref.as_ref(), "diff", None),
-                    (tool.output_ref.as_ref(), "output", tool.output_bytes),
+                    (
+                        tool.diff_ref.as_ref(),
+                        "diff",
+                        None,
+                        BlobPresentation::Output,
+                    ),
+                    (
+                        tool.output_ref.as_ref(),
+                        "output",
+                        tool.output_bytes,
+                        BlobPresentation::for_tool_output(&tool.call),
+                    ),
                 ];
-                for (blob_ref, what, bytes) in candidates {
+                for (blob_ref, what, bytes, presentation) in candidates {
                     let Some(blob_ref) = blob_ref else { continue };
                     let label = match self.blob_details.get(blob_ref) {
                         Some(BlobFetch::Ready(_)) | Some(BlobFetch::Document(_)) => {
@@ -5652,6 +5777,7 @@ impl Transcript {
                     return Some(ChipAffordance {
                         blob_ref: blob_ref.clone(),
                         label: SharedString::from(label),
+                        presentation,
                     });
                 }
                 None
@@ -5686,6 +5812,10 @@ impl Transcript {
                 (detail.is_some() || invocation.is_some()) && fold.open.unwrap_or(default_open)
             })
             .collect();
+
+        let has_measured_markdown = details
+            .iter()
+            .any(|detail| matches!(detail.as_deref(), Some(ToolDetail::Markdown { .. })));
         let detail_highlights: Vec<Option<Arc<crate::changes::DiffHighlights>>> = details
             .iter()
             .enumerate()
@@ -5832,7 +5962,10 @@ impl Transcript {
                     + detail.as_deref().map_or(0.0, detail_height)
                     + affordance_h;
                 let card_target = if open { open_h } else { closed_h };
-                let animating = dfold.epoch > 0
+                let measured_markdown =
+                    matches!(detail.as_deref(), Some(ToolDetail::Markdown { .. }));
+                let animating = !measured_markdown
+                    && dfold.epoch > 0
                     && dfold
                         .toggled_at
                         .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
@@ -5921,9 +6054,19 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(detail_body(detail, detail_highlights[ix].clone(), theme));
+                            .child(match detail {
+                                ToolDetail::Markdown { tree, .. } => {
+                                    self.render_markdown_tool_detail(&key, tree, theme, window, cx)
+                                }
+                                _ => detail_body(detail, detail_highlights[ix].clone(), theme),
+                            });
                     }
-                    if let Some(ChipAffordance { blob_ref, label }) = affordance {
+                    if let Some(ChipAffordance {
+                        blob_ref,
+                        label,
+                        presentation,
+                    }) = affordance
+                    {
                         let loading = matches!(
                             self.blob_details.get(&blob_ref),
                             Some(BlobFetch::Loading(_))
@@ -5942,7 +6085,11 @@ impl Transcript {
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.text_muted))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.spawn_blob_fetch(blob_ref.clone(), false, cx);
+                                    this.spawn_blob_fetch_with_presentation(
+                                        blob_ref.clone(),
+                                        presentation,
+                                        cx,
+                                    );
                                     cx.notify();
                                 }));
                         }
@@ -5950,7 +6097,9 @@ impl Transcript {
                     }
                     card = card.child(panel);
                 }
-                let card: AnyElement = if animating {
+                let card: AnyElement = if measured_markdown && open {
+                    card.into_any_element()
+                } else if animating {
                     let from = dfold.from;
                     card.with_animation(
                         SharedString::from(format!("{key}-tween{}", dfold.epoch)),
@@ -5983,12 +6132,21 @@ impl Transcript {
         // toggles animate — composes with the stick spring). Agent groups skip
         // the fold entirely (always open, no header).
         let animating = collapses
+            && !has_measured_markdown
             && fold.epoch > 0
             && fold
                 .toggled_at
                 .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
         let body: AnyElement = if !collapses {
             chips.into_any_element()
+        } else if has_measured_markdown && open {
+            div().child(chips).into_any_element()
+        } else if has_measured_markdown {
+            div()
+                .overflow_hidden()
+                .h(px(0.0))
+                .child(chips)
+                .into_any_element()
         } else if animating {
             let from = fold.from;
             div()
@@ -6265,6 +6423,7 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Glob { .. } => crate::icons::FOLDER_WITH_FILES,
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
         ToolCall::Document { .. } => crate::icons::DOCUMENT,
+        ToolCall::Answer { .. } | ToolCall::Report { .. } => crate::icons::DOCUMENT,
         ToolCall::Todo { .. } => crate::icons::CHECKLIST,
         call if is_agent_call(call) => crate::icons::BOT,
         ToolCall::Unknown { name, .. } if name == "Wait for agents" => crate::icons::BOT,
@@ -6349,6 +6508,8 @@ fn detail_body(
                 block.child(more_lines_row(*truncated_by, theme))
             })
             .into_any_element(),
+        ToolDetail::Markdown { .. } => gpui::Empty.into_any_element(),
+
         ToolDetail::Thought {
             lines,
             truncated_by,
@@ -7852,6 +8013,83 @@ mod tests {
     }
 
     #[test]
+    fn answer_stays_a_tool_card_with_markdown_styled_detail() {
+        let mut part = tool_part("answer", "");
+        if let MessagePart::Tool { call, output, .. } = &mut part {
+            *call = ToolCall::Answer {
+                title: "Answered".into(),
+            };
+            *output = Some(
+                "### Result\n\nUse **bold**, a [link](https://example.com), and `code`.\n\n- First"
+                    .into(),
+            );
+        }
+        let rows = rows_for_entry(
+            &assistant("answer-entry", MessageStatus::Complete, vec![part]),
+            false,
+            &mut parse,
+        );
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
+            panic!("answer should preserve tool-card identity")
+        };
+        assert_eq!(
+            tool_chip_content(&tools[0].call),
+            ("Answer", "Answered".into())
+        );
+        assert!(
+            tools[0].invocation.is_none(),
+            "input JSON must not be shown"
+        );
+        let Some(ToolDetail::Markdown { source, tree }) = tools[0].detail.as_deref() else {
+            panic!("answer output should be parsed as Markdown")
+        };
+        assert!(source.contains("**bold**"));
+        assert!(source.contains("[link](https://example.com)"));
+        assert!(source.contains("`code`"));
+        assert!(matches!(
+            tree.blocks[0].block,
+            Block::Heading { level: 3, .. }
+        ));
+        assert!(
+            tree.blocks
+                .iter()
+                .any(|block| matches!(block.block, Block::List { .. }))
+        );
+    }
+
+    #[test]
+    fn fetched_semantic_output_keeps_full_measured_markdown_tree() {
+        let body = format!(
+            "### Full report\n\n{}",
+            (0..80)
+                .map(|index| format!("- **Finding {index}** uses `code` and a long explanation that must wrap at narrow widths"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let Some(ToolDetail::Markdown { source, tree }) = markdown_tool_detail(Some(&body)) else {
+            panic!("fetched semantic output should remain Markdown")
+        };
+        assert_eq!(source.as_ref(), body);
+        assert!(matches!(
+            tree.blocks[0].block,
+            Block::Heading { level: 3, .. }
+        ));
+        assert!(
+            tree.blocks
+                .iter()
+                .any(|block| matches!(block.block, Block::List { .. }))
+        );
+        assert!(
+            source.contains("Finding 79"),
+            "semantic Markdown must not use the 24-line tool-output cap"
+        );
+        assert_eq!(
+            detail_height(&ToolDetail::Markdown { source, tree }),
+            DETAIL_SEPARATOR
+        );
+    }
+
+    #[test]
     fn delivery_steps_are_separate_rows_and_completion_changes_the_version() {
         let mut part = tool_part("steps", "");
         if let MessagePart::Tool { call, .. } = &mut part {
@@ -8764,6 +9002,95 @@ mod tests {
                     this.blob_details.get("chat/plan"),
                     Some(BlobFetch::Document(tree)) if Arc::ptr_eq(tree, &fresh_tree)
                 ));
+            });
+        }
+
+        #[test]
+        fn same_ref_digest_refresh_keeps_semantic_sidecars_markdown() {
+            with_transcript(|this, cx| {
+                let semantic = |id: &str, call: ToolCall, digest: u64| {
+                    let mut part = tool_part(id, "");
+                    if let MessagePart::Tool {
+                        call: part_call,
+                        output,
+                        output_ref,
+                        output_bytes,
+                        output_digest,
+                        ..
+                    } = &mut part
+                    {
+                        *part_call = call;
+                        *output = Some("### Preview\n\n- **Finding**".into());
+                        *output_ref = Some(format!("chat/{id}"));
+                        *output_bytes = Some(512);
+                        *output_digest = Some(digest);
+                    }
+                    assistant(&format!("reply-{id}"), MessageStatus::Complete, vec![part])
+                };
+                let assert_fetched_markdown = |fetch: &BlobFetch, expected: &str| {
+                    let BlobFetch::Ready(detail) = fetch else {
+                        panic!("semantic sidecar should be ready")
+                    };
+                    let ToolDetail::Markdown { source, tree } = detail.as_ref() else {
+                        panic!("semantic sidecar should retain Markdown presentation")
+                    };
+                    assert_eq!(source.as_ref(), expected);
+                    assert!(matches!(tree.blocks[0].block, Block::Heading { .. }));
+                };
+
+                for (id, call) in [
+                    (
+                        "answer",
+                        ToolCall::Answer {
+                            title: "Answered".into(),
+                        },
+                    ),
+                    (
+                        "report",
+                        ToolCall::Report {
+                            title: "Report findings".into(),
+                        },
+                    ),
+                ] {
+                    let blob_ref = format!("chat/{id}");
+                    feed(this, vec![semantic(id, call.clone(), 11)], cx);
+                    assert!(this.rows.iter().any(|row| matches!(
+                        &row.kind,
+                        RowKind::ToolGroup { tools, .. }
+                            if matches!(tools[0].detail.as_deref(), Some(ToolDetail::Markdown { .. }))
+                    )));
+                    let old_generation = this.blob_generation(&blob_ref);
+                    let old_presentation = this.blob_owners[blob_ref.as_str()].1;
+                    assert_eq!(old_presentation, BlobPresentation::Markdown);
+                    let old_body = format!("## Initial {id}\n\n- **Old finding**");
+                    let old_fetch = build_blob_fetch(&old_body, false, old_presentation);
+                    assert_fetched_markdown(&old_fetch, &old_body);
+                    this.finish_blob_fetch(blob_ref.clone().into(), old_generation, old_fetch, cx);
+
+                    feed(this, vec![semantic(id, call, 12)], cx);
+                    let new_generation = this.blob_generation(&blob_ref);
+                    assert_ne!(new_generation, old_generation);
+                    let new_presentation = this.blob_owners[blob_ref.as_str()].1;
+                    assert_eq!(new_presentation, BlobPresentation::Markdown);
+                    assert!(
+                        !this.blob_details.contains_key(blob_ref.as_str()),
+                        "digest refresh must invalidate the old fetched sidecar"
+                    );
+                    assert!(this.rows.iter().any(|row| matches!(
+                        &row.kind,
+                        RowKind::ToolGroup { tools, .. }
+                            if matches!(tools[0].detail.as_deref(), Some(ToolDetail::Markdown { .. }))
+                    )));
+
+                    let new_body = format!("## Refreshed {id}\n\n- **New finding**");
+                    let new_fetch = build_blob_fetch(&new_body, false, new_presentation);
+                    assert_fetched_markdown(&new_fetch, &new_body);
+                    this.finish_blob_fetch(blob_ref.clone().into(), new_generation, new_fetch, cx);
+                    assert_fetched_markdown(
+                        this.blob_details.get(blob_ref.as_str()).unwrap(),
+                        &new_body,
+                    );
+                }
             });
         }
 

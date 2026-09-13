@@ -71,6 +71,9 @@ pub(crate) const fn click_activation_drag_enabled() -> bool {
     !cfg!(target_os = "windows")
 }
 
+/// Shared contract between main-window creation and shell client-decoration chrome.
+pub(crate) const MAIN_WINDOW_RESIZABLE: bool = true;
+
 /// Everything the headed binary passes in (config/env resolution lives in
 /// `apps/zeron`, not here).
 #[derive(Debug, Clone)]
@@ -258,6 +261,7 @@ fn open_main_window(state: gpui::Entity<state::AppState>, boot: EngineBootConfig
             // Drag + start_window_move) — mark the content view app-owned
             // so AppKit neither dead-zones the strip nor delays clicks.
             app_owns_titlebar_drag: true,
+            is_resizable: MAIN_WINDOW_RESIZABLE,
             // Linux: request client-side decorations — zeron draws its own
             // unified titlebar and (under CSD) its own caption buttons
             // (shell.rs `render_linux_caption_controls`). Leaving this unset

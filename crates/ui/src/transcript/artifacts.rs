@@ -108,7 +108,11 @@ impl Transcript {
         if let Some(blob_ref) = output_ref
             && !self.blob_details.contains_key(blob_ref)
         {
-            self.spawn_blob_fetch(blob_ref.clone(), true, cx);
+            self.spawn_blob_fetch_with_presentation(
+                blob_ref.clone(),
+                BlobPresentation::Document,
+                cx,
+            );
         }
         let fetched = output_ref.as_ref().and_then(|r| self.blob_details.get(r));
         let tree = match fetched {
@@ -171,7 +175,11 @@ impl Transcript {
                 status = status
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.spawn_blob_fetch(blob_ref.clone(), true, cx);
+                        this.spawn_blob_fetch_with_presentation(
+                            blob_ref.clone(),
+                            BlobPresentation::Document,
+                            cx,
+                        );
                     }));
             }
             body = body.child(status);
