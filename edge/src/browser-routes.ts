@@ -75,6 +75,16 @@ const csrfSession = async (request: Request, env: Env, url: URL) => {
   return found && request.headers.get("x-csrf-token") === found.csrfToken ? found : undefined;
 };
 
+export const deviceRoomOnline = async (stub: DurableObjectStub, ownerId: string): Promise<boolean> => {
+  try {
+    const status = await stub.fetch(new Request("https://device-room/status", { headers: { [AUTH_USER_HEADER]: ownerId } }));
+    return status.ok && (await status.json() as { hostConnected?: unknown }).hostConnected === true;
+  } catch {
+    return false;
+  }
+};
+
+
 /** Browser UI API. Provider credentials remain only inside BrowserSessionStore. */
 export const handleBrowserRoute = async (request: Request, env: Env, url: URL): Promise<Response | undefined> => {
   if (!url.pathname.startsWith("/api/browser/")) return undefined;
@@ -182,12 +192,12 @@ export const handleBrowserRoute = async (request: Request, env: Env, url: URL): 
     ) : [];
     const devices = await Promise.all(entries.map(async ({ id, name }) => {
       const stub = env.DEVICE_ROOMS.get(env.DEVICE_ROOMS.idFromName(`d2/${id}`));
-      const status = await stub.fetch(new Request("https://device-room/status", { headers: { [AUTH_USER_HEADER]: found.ownerId } }));
-      const body = status.ok ? await status.json() as { hostConnected?: unknown } : undefined;
-      return { id, ...(name ? { name } : {}), online: body?.hostConnected === true };
+      return { id, ...(name ? { name } : {}), online: await deviceRoomOnline(stub, found.ownerId) };
     }));
     return json({ devices });
   }
+
+
 
   if (path === "/api/browser/revoke-all" && request.method === "POST") {
     const found = await csrfSession(request, env, url);

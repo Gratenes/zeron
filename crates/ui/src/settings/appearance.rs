@@ -390,8 +390,18 @@ impl AppearancePage {
 
     #[cfg(target_arch = "wasm32")]
     fn choose_import_source(&mut self, cx: &mut Context<Self>) {
+        let selected = match pick_browser_theme_file() {
+            Ok(selected) => selected,
+            Err(error) => {
+                if let Some(dialog) = self.import_dialog.as_mut() {
+                    dialog.error = Some(error.into());
+                }
+                cx.notify();
+                return;
+            }
+        };
         cx.spawn(async move |this, cx| {
-            let selected = pick_browser_theme_file().await;
+            let selected = selected.await;
             let _ = this.update(cx, |page, cx| match selected {
                 Ok(Some((name, bytes))) => {
                     if let Some(dialog) = page.import_dialog.as_mut() {
@@ -485,7 +495,8 @@ fn slug(value: &str) -> String {
 /// Browser `File` objects are not host paths, so imported themes are always
 /// snapshots rather than reloadable links.
 #[cfg(target_arch = "wasm32")]
-async fn pick_browser_theme_file() -> Result<Option<(String, Vec<u8>)>, String> {
+fn pick_browser_theme_file()
+-> Result<impl std::future::Future<Output = Result<Option<(String, Vec<u8>)>, String>>, String> {
     let window = web_sys::window().ok_or_else(|| "Browser window is unavailable.".to_string())?;
     let document = window
         .document()
@@ -519,30 +530,33 @@ async fn pick_browser_theme_file() -> Result<Option<(String, Vec<u8>)>, String> 
             let _ = sender.send(Ok(None));
         }
     }) as Box<dyn FnMut(_)>);
-    let change_callback = change.as_ref().unchecked_ref();
-    let cancel_callback = cancel.as_ref().unchecked_ref();
     input
-        .add_event_listener_with_callback("change", change_callback)
+        .add_event_listener_with_callback("change", change.as_ref().unchecked_ref())
         .map_err(|error| format!("Could not open the theme picker: {error:?}"))?;
     input
-        .add_event_listener_with_callback("cancel", cancel_callback)
+        .add_event_listener_with_callback("cancel", cancel.as_ref().unchecked_ref())
         .map_err(|error| format!("Could not open the theme picker: {error:?}"))?;
+    // Open before returning to the GPUI executor so browser user activation survives.
     input.click();
 
-    let selected = receiver
-        .await
-        .map_err(|_| "The theme picker closed unexpectedly.".to_string())?;
-    let _ = input.remove_event_listener_with_callback("change", change_callback);
-    let _ = input.remove_event_listener_with_callback("cancel", cancel_callback);
-    let _ = body.remove_child(&input);
-    let Some(file) = selected? else {
-        return Ok(None);
-    };
-    let name = file.name();
-    let bytes = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
-        .await
-        .map_err(|_| format!("{name} could not be read."))?;
-    Ok(Some((name, js_sys::Uint8Array::new(&bytes).to_vec())))
+    Ok(async move {
+        let selected = receiver
+            .await
+            .map_err(|_| "The theme picker closed unexpectedly.".to_string())?;
+        let _ =
+            input.remove_event_listener_with_callback("change", change.as_ref().unchecked_ref());
+        let _ =
+            input.remove_event_listener_with_callback("cancel", cancel.as_ref().unchecked_ref());
+        let _ = body.remove_child(&input);
+        let Some(file) = selected? else {
+            return Ok(None);
+        };
+        let name = file.name();
+        let bytes = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+            .await
+            .map_err(|_| format!("{name} could not be read."))?;
+        Ok(Some((name, js_sys::Uint8Array::new(&bytes).to_vec())))
+    })
 }
 
 fn step_font(

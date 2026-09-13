@@ -1749,8 +1749,17 @@ impl Composer {
     /// succeeds, leaving the draft unchanged on cancellation or failure.
     #[cfg(target_arch = "wasm32")]
     fn open_file_picker(&mut self, cx: &mut Context<Self>) {
+        let picked = match attachments::pick_browser_files() {
+            Ok(picked) => picked,
+            Err(message) => {
+                self.failure = Some(message.into());
+                self.failure_key = Some(self.current_key.clone());
+                cx.notify();
+                return;
+            }
+        };
         self.picker_task = Some(cx.spawn(async move |this, cx| {
-            let picked = attachments::pick_browser_files().await;
+            let picked = picked.await;
             this.update(cx, |composer, cx| match picked {
                 Ok(staged) => composer.add_staged(staged, cx),
                 Err(message) => {

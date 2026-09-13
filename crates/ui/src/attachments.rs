@@ -299,7 +299,8 @@ pub fn stage_file(path: &Path) -> Result<StagedAttachment, String> {
 /// Open a native browser file input and stage the selected files from their
 /// actual browser-owned bytes. No filesystem path crosses this boundary.
 #[cfg(target_arch = "wasm32")]
-pub async fn pick_browser_files() -> Result<Vec<StagedAttachment>, String> {
+pub fn pick_browser_files()
+-> Result<impl std::future::Future<Output = Result<Vec<StagedAttachment>, String>>, String> {
     let window = web_sys::window().ok_or_else(|| "Browser window is unavailable.".to_string())?;
     let document = window
         .document()
@@ -335,44 +336,48 @@ pub async fn pick_browser_files() -> Result<Vec<StagedAttachment>, String> {
             let _ = sender.send(Ok(None));
         }
     }) as Box<dyn FnMut(_)>);
-    let change_callback = change.as_ref().unchecked_ref();
-    let cancel_callback = cancel.as_ref().unchecked_ref();
     input
-        .add_event_listener_with_callback("change", change_callback)
+        .add_event_listener_with_callback("change", change.as_ref().unchecked_ref())
         .map_err(|error| format!("Could not open the attachment picker: {error:?}"))?;
     input
-        .add_event_listener_with_callback("cancel", cancel_callback)
+        .add_event_listener_with_callback("cancel", cancel.as_ref().unchecked_ref())
         .map_err(|error| format!("Could not open the attachment picker: {error:?}"))?;
+    // This must remain in the trusted click stack; the returned future only reads
+    // the selection after the browser has opened the native picker.
     input.click();
 
-    let selected = receiver
-        .await
-        .map_err(|_| "The attachment picker closed unexpectedly.".to_string())?;
-    let _ = input.remove_event_listener_with_callback("change", change_callback);
-    let _ = input.remove_event_listener_with_callback("cancel", cancel_callback);
-    let _ = body.remove_child(&input);
-    let Some(files) = selected? else {
-        return Ok(Vec::new());
-    };
-
-    let mut staged = Vec::with_capacity(files.length() as usize);
-    for index in 0..files.length() {
-        let file = files
-            .item(index)
-            .ok_or_else(|| "The selected attachment could not be read.".to_string())?;
-        let name = file.name();
-        if file.size() > MAX_ATTACHMENT_BYTES as f64 {
-            return Err(format!("{name} is too large (24 MB max)."));
-        }
-        let buffer = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+    Ok(async move {
+        let selected = receiver
             .await
-            .map_err(|_| format!("{name} could not be read."))?;
-        staged.push(stage_bytes(
-            &name,
-            js_sys::Uint8Array::new(&buffer).to_vec(),
-        )?);
-    }
-    Ok(staged)
+            .map_err(|_| "The attachment picker closed unexpectedly.".to_string())?;
+        let _ =
+            input.remove_event_listener_with_callback("change", change.as_ref().unchecked_ref());
+        let _ =
+            input.remove_event_listener_with_callback("cancel", cancel.as_ref().unchecked_ref());
+        let _ = body.remove_child(&input);
+        let Some(files) = selected? else {
+            return Ok(Vec::new());
+        };
+
+        let mut staged = Vec::with_capacity(files.length() as usize);
+        for index in 0..files.length() {
+            let file = files
+                .item(index)
+                .ok_or_else(|| "The selected attachment could not be read.".to_string())?;
+            let name = file.name();
+            if file.size() > MAX_ATTACHMENT_BYTES as f64 {
+                return Err(format!("{name} is too large (24 MB max)."));
+            }
+            let buffer = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+                .await
+                .map_err(|_| format!("{name} could not be read."))?;
+            staged.push(stage_bytes(
+                &name,
+                js_sys::Uint8Array::new(&buffer).to_vec(),
+            )?);
+        }
+        Ok(staged)
+    })
 }
 
 /// Host paths cannot be read by the browser. File-picker bytes must enter
