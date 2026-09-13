@@ -6,7 +6,8 @@
   <title>Comet</title>
   <link data-trunk rel="copy-file" href="_headers">
   <link data-trunk rel="rust" data-bin="comet-web" data-bindgen-target="web" data-wasm-opt="0">
-  <style>html,body{margin:0;height:100%;overflow:hidden;background:#18181b}canvas{display:block;width:100%;height:100%;outline:none}</style>
+  <!-- GPUI sets the button cursor on body, so suppress its tap highlight too. -->
+  <style>html,body{margin:0;height:100%;overflow:hidden;background:#18181b;-webkit-tap-highlight-color:transparent}canvas{display:block;width:100%;height:100%;outline:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}</style>
 </head>
 <body></body>
 </html>
