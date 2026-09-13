@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -85,8 +86,8 @@ func TestLocalDERPTwoPeerProxy(t *testing.T) {
 	}
 	<-backendDone
 
-	assertMode0600(t, serverState)
-	assertMode0600(t, clientState)
+	assertPrivateModeOnPOSIX(t, serverState)
+	assertPrivateModeOnPOSIX(t, clientState)
 	serverIdentity, err := os.ReadFile(serverState)
 	if err != nil {
 		t.Fatal(err)
@@ -146,12 +147,14 @@ func TestStateCorruptionAndPermissionsFailClosed(t *testing.T) {
 		t.Fatal("corrupt state was modified")
 	}
 
-	wide := filepath.Join(dir, "wide.key")
-	if err := os.WriteFile(wide, []byte("{}"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadOrCreateState(wide, "client"); err == nil {
-		t.Fatal("over-permissive state was accepted")
+	if runtime.GOOS != "windows" {
+		wide := filepath.Join(dir, "wide.key")
+		if err := os.WriteFile(wide, []byte("{}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadOrCreateState(wide, "client"); err == nil {
+			t.Fatal("over-permissive state was accepted")
+		}
 	}
 
 	serverPath := filepath.Join(dir, "server.key")
@@ -163,8 +166,11 @@ func TestStateCorruptionAndPermissionsFailClosed(t *testing.T) {
 	}
 }
 
-func assertMode0600(t *testing.T, path string) {
+func assertPrivateModeOnPOSIX(t *testing.T, path string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		return // Windows file privacy is represented by ACLs, not FileMode.Perm.
+	}
 	st, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)

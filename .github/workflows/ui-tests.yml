@@ -9,6 +9,8 @@ on:
       - 'crates/**'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/run-macos-browser-fixture.sh'
+
+      - 'scripts/fixtures/preview-server/**'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
       - '.github/workflows/ui-tests.yml'
@@ -21,6 +23,8 @@ on:
       - 'crates/**'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/run-macos-browser-fixture.sh'
+
+      - 'scripts/fixtures/preview-server/**'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
       - '.github/workflows/ui-tests.yml'
@@ -110,13 +114,13 @@ jobs:
         with:
           node-version: 24
       - name: Install preview fixture server
-        run: npm ci --prefix edge
+        run: npm ci --prefix scripts/fixtures/preview-server
       - name: Project discovery, stable URLs and HMR in native WebKit
         timeout-minutes: 3
         env:
           ZERON_PREVIEW_AUTO_OPEN: 1
         run: |
-          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" bash scripts/run-macos-browser-fixture.sh target/release/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
+          VITE_BINARY="$GITHUB_WORKSPACE/scripts/fixtures/preview-server/node_modules/vite/bin/vite.js" bash scripts/run-macos-browser-fixture.sh target/release/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
           test -f "$RUNNER_TEMP/preview-captures/result.txt"
       - name: Upload preview screenshots
         if: always()
@@ -134,6 +138,17 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: connectivity/tailcat/go.sum
+      - name: Build pinned Tailcat XCFramework
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260908204917-8b95e45f8d3e
+          GOMOBILE="$(go env GOPATH)/bin/gomobile" scripts/build-tailcat.sh xcframework
+          test -d target/tailcat/KratosTailcat.xcframework
       - name: Select an available iPhone simulator
         run: |
           python3 - <<'PYTHON'

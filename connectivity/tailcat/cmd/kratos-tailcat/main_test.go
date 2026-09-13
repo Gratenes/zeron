@@ -40,25 +40,52 @@ func TestLoadConnectConfigFailsClosed(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		body string
-		mode os.FileMode
 	}{
-		{"malformed", `{`, 0600},
-		{"unknown field", `{"address":"tc-secret","extra":true}`, 0600},
-		{"trailing JSON", `{"address":"tc-secret"}{}`, 0600},
-		{"missing address", `{}`, 0600},
-		{"wide permissions", `{"address":"tc-secret"}`, 0644},
+		{"malformed", `{`},
+		{"unknown field", `{"address":"tc-secret","extra":true}`},
+		{"trailing JSON", `{"address":"tc-secret"}{}`},
+		{"missing address", `{}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "connect.json")
-			if err := os.WriteFile(path, []byte(test.body), test.mode); err != nil {
+			if err := os.WriteFile(path, []byte(test.body), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := loadConnectConfig(path); err == nil {
-				t.Fatal("config accepted")
-			} else if strings.Contains(err.Error(), "tc-secret") {
-				t.Fatal("diagnostic leaked address")
-			}
+			assertConnectConfigRejectedWithoutSecret(t, path)
 		})
+	}
+}
+
+func TestLoadConnectConfigRejectsUnsafeFilesystemObjects(t *testing.T) {
+	dir := t.TempDir()
+	assertConnectConfigRejectedWithoutSecret(t, dir)
+
+	oversized := filepath.Join(dir, "oversized.json")
+	body := append([]byte(`{"address":"tc-secret","padding":"`), bytes.Repeat([]byte("x"), maxConnectConfigSize)...)
+	body = append(body, []byte(`"}`)...)
+	if err := os.WriteFile(oversized, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	assertConnectConfigRejectedWithoutSecret(t, oversized)
+}
+
+func TestLoadConnectConfigRejectsWidePermissionsOnPOSIX(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows authorization is enforced by ACLs, not POSIX mode bits")
+	}
+	path := filepath.Join(t.TempDir(), "connect.json")
+	if err := os.WriteFile(path, []byte(`{"address":"tc-secret"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	assertConnectConfigRejectedWithoutSecret(t, path)
+}
+
+func assertConnectConfigRejectedWithoutSecret(t *testing.T, path string) {
+	t.Helper()
+	if _, err := loadConnectConfig(path); err == nil {
+		t.Fatal("config accepted")
+	} else if strings.Contains(err.Error(), "tc-secret") {
+		t.Fatal("diagnostic leaked address")
 	}
 }
 

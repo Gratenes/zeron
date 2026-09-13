@@ -20,7 +20,7 @@ func TestPackagingIncludesAdjacentCompanion(t *testing.T) {
 		},
 		"scripts/package-windows.ps1": {
 			"Join-Path $stage 'kratos-tailcat.exe'",
-			"policy = 'preserve'",
+			"companion = @{ file = 'kratos-tailcat.exe'",
 			"sha256 = $companionHash",
 		},
 	}
