@@ -155,6 +155,11 @@ mod unix {
     /// never closes it — can't hang us on EOF.
     fn run_and_capture(shell: &Path, flags: &[&str], script: &str, timeout: Duration) -> Vec<u8> {
         let mut cmd = std::process::Command::new(shell);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
         cmd.args(flags)
             .arg(script)
             .stdin(Stdio::null())
