@@ -7,6 +7,8 @@ publish.workspace = true
 
 [features]
 browser-fixture = []
+# Enables the web terminal bridge in native GPUI integration tests.
+web-input-tests = []
 resource-profile = ["gpui/bench", "gpui_platform/test-support"]
 
 [[example]]
