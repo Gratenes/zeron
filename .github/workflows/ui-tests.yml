@@ -187,6 +187,9 @@ jobs:
           codesign --verify --verbose=2 "$APP"
           codesign --display --entitlements - --xml "$APP" > "$SIGNED_ENTITLEMENTS"
           test "$(plutil -extract application-identifier raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_APP_ID"
+
+          test "$(plutil -extract 'com\.apple\.developer\.team-identifier' raw "$SIGNED_ENTITLEMENTS")" = "${EXPECTED_APP_ID%%.*}"
+          test "$(plutil -extract get-task-allow raw "$SIGNED_ENTITLEMENTS")" = "true"
           test "$(plutil -extract keychain-access-groups.0 raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_APP_ID"
 
           xcodebuild -project Zeron.xcodeproj -scheme Zeron \
