@@ -302,6 +302,49 @@ fn complete_assistant_count(core: &EngineCore) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn locally_assembled_engines_initialize_isolated_fallback_auth() {
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let dir_a = dirs.path().join("auth-a");
+    let dir_b = dirs.path().join("auth-b");
+    let core_a = Arc::new(assemble(&dir_a, "device-a"));
+    let core_b = Arc::new(assemble(&dir_b, "device-b"));
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+
+    let open_a = {
+        let core = core_a.clone();
+        let barrier = barrier.clone();
+        tokio::task::spawn_blocking(move || {
+            barrier.wait();
+            core.auth()
+        })
+    };
+    let open_b = {
+        let core = core_b.clone();
+        tokio::task::spawn_blocking(move || {
+            barrier.wait();
+            core.auth()
+        })
+    };
+    let (auth_a, auth_b) = tokio::join!(open_a, open_b);
+    drop(auth_a.expect("open A fallback auth"));
+    drop(auth_b.expect("open B fallback auth"));
+
+    assert!(
+        dir_a.join("peer/auth.sqlite").is_file(),
+        "A's fallback auth belongs to A's data directory"
+    );
+    assert!(
+        dir_b.join("peer/auth.sqlite").is_file(),
+        "B's fallback auth belongs to B's data directory"
+    );
+
+    let core_a = Arc::try_unwrap(core_a).unwrap_or_else(|_| panic!("release core A"));
+    let core_b = Arc::try_unwrap(core_b).unwrap_or_else(|_| panic!("release core B"));
+    core_a.shutdown().await;
+    core_b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rows_dark_command_delivers_over_the_peer_relay_exactly_once() {
     let (relay_url, _relay) = fake_device_room().await;
     let dirs = tempfile::tempdir().expect("tempdir");

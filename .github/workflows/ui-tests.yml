@@ -168,7 +168,9 @@ jobs:
           set -euo pipefail
           DERIVED_DATA="$RUNNER_TEMP/ios-derived-data"
           CI_ENTITLEMENTS="$GITHUB_WORKSPACE/apps/ios/CI/Simulator.entitlements"
-          EXPECTED_APP_ID="5XY3M483YQ.sh.zeron.ios"
+          # An ad-hoc signature has no Apple team identity. Keep its entitlement
+          # identity exact and self-consistent so taskgated accepts the test host.
+          EXPECTED_APP_ID="sh.zeron.ios"
           SIGNING_ARGS=(
             CODE_SIGN_IDENTITY="-"
             CODE_SIGN_STYLE=Manual
@@ -188,7 +190,10 @@ jobs:
           codesign --display --entitlements - --xml "$APP" > "$SIGNED_ENTITLEMENTS"
           test "$(plutil -extract application-identifier raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_APP_ID"
 
-          test "$(plutil -extract 'com\.apple\.developer\.team-identifier' raw "$SIGNED_ENTITLEMENTS")" = "${EXPECTED_APP_ID%%.*}"
+          if plutil -extract 'com\.apple\.developer\.team-identifier' raw "$SIGNED_ENTITLEMENTS" >/dev/null 2>&1; then
+            echo "Ad-hoc simulator host must not claim an Apple team identity" >&2
+            exit 1
+          fi
           test "$(plutil -extract get-task-allow raw "$SIGNED_ENTITLEMENTS")" = "true"
           test "$(plutil -extract keychain-access-groups.0 raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_APP_ID"
 

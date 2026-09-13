@@ -124,6 +124,9 @@ pub struct EngineCore {
     pub agent_accounts: AgentAccounts,
     pub device_id: String,
     workspace_scope: WorkspaceScope,
+    /// Device-local root for the lazy auth service used by directly assembled cores.
+    auth_data_dir: PathBuf,
+
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
     /// Peer link cache for `targetDeviceId` routing (attached when edge+auth are ready).
@@ -317,6 +320,8 @@ impl EngineCore {
             agent_accounts,
             device_id,
             workspace_scope: profile.scope(),
+            auth_data_dir: data_dir.to_path_buf(),
+
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
             updater: std::sync::Mutex::new(None),
@@ -345,9 +350,8 @@ impl EngineCore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         slot.get_or_insert_with(|| {
-            let fallback =
-                std::env::temp_dir().join(format!("kratos-engine-auth-{}", std::process::id()));
-            Auth::open(AuthConfig::new(fallback)).expect("open local fallback auth")
+            Auth::open(AuthConfig::new(self.auth_data_dir.clone()))
+                .expect("open local fallback auth")
         })
         .clone()
     }
