@@ -45,8 +45,58 @@ impl OnlineDeviceCandidates {
 pub const NO_ONLINE_DEVICES_MESSAGE: &str =
     "No online devices are available for this account. Open Zeron on a device and try again.";
 
-pub const BROWSER_DISCONNECTED_MESSAGE: &str =
-    "The remote device disconnected. No changes were retried. Try again to reconnect.";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconnectPlan {
+    WaitForVisible,
+    Schedule,
+    AlreadyScheduled,
+    None,
+}
+
+pub fn reconnect_plan(pending: bool, visible: bool, scheduled: bool) -> ReconnectPlan {
+    if !pending {
+        ReconnectPlan::None
+    } else if !visible {
+        ReconnectPlan::WaitForVisible
+    } else if scheduled {
+        ReconnectPlan::AlreadyScheduled
+    } else {
+        ReconnectPlan::Schedule
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReconnectState {
+    pub pending: bool,
+    pub scheduled: bool,
+}
+
+pub fn consume_reconnect(
+    state: ReconnectState,
+    current_epoch: bool,
+    visible: bool,
+) -> (ReconnectState, bool) {
+    if !current_epoch {
+        return (state, false);
+    }
+    let mut state = ReconnectState {
+        scheduled: false,
+        ..state
+    };
+    if state.pending && visible {
+        state.pending = false;
+        (state, true)
+    } else {
+        (state, false)
+    }
+}
+
+pub const MAX_AUTOMATIC_RECONNECTS: u8 = 3;
+pub const RECONNECT_EXHAUSTED_MESSAGE: &str = "The remote device keeps disconnecting. Try again.";
+
+pub fn next_reconnect_attempt(attempts: u8) -> Option<u8> {
+    (attempts < MAX_AUTOMATIC_RECONNECTS).then_some(attempts + 1)
+}
 
 pub fn browser_connection_failure_message(error: &str) -> String {
     format!("Could not connect to your online device: {error}. Try again.")
@@ -117,8 +167,9 @@ mod browser {
     use zeron_ui::{EngineBootConfig, shell};
 
     use super::{
-        BROWSER_DISCONNECTED_MESSAGE, DeviceDto, NO_ONLINE_DEVICES_MESSAGE, OnlineDeviceCandidates,
-        browser_connection_failure_message,
+        DeviceDto, NO_ONLINE_DEVICES_MESSAGE, OnlineDeviceCandidates, RECONNECT_EXHAUSTED_MESSAGE,
+        ReconnectPlan, ReconnectState, browser_connection_failure_message, consume_reconnect,
+        next_reconnect_attempt, reconnect_plan,
     };
 
     use crate::rpc::connection::{ConnectionEpoch, ConnectionEpochs, connect_client};
@@ -153,6 +204,8 @@ mod browser {
 
     const REQUEST_TIMEOUT_MS: i32 = 15_000;
     const ACTIVITY_INTERVAL_MS: f64 = 60_000.0;
+    const RECONNECT_DELAY_MS: u64 = 250;
+    const RECONNECT_STABLE_MS: u64 = 10_000;
 
     enum RequestError {
         Expired,
@@ -177,6 +230,8 @@ mod browser {
         DevLogin,
         Logout,
         Activity,
+        Reconnect(ConnectionEpoch),
+        VisibilityChanged,
     }
 
     enum Screen {
@@ -200,6 +255,9 @@ mod browser {
         actions: Rc<RefCell<VecDeque<Action>>>,
         handlers: RefCell<Vec<Closure<dyn FnMut(Event)>>>,
         input_handlers: RefCell<Vec<Closure<dyn FnMut(Event)>>>,
+        reconnect_pending: Cell<bool>,
+        reconnect_scheduled: Cell<bool>,
+        automatic_reconnects: Cell<u8>,
     }
 
     impl BrowserSession {
@@ -221,6 +279,9 @@ mod browser {
                 actions: Rc::new(RefCell::new(VecDeque::new())),
                 handlers: RefCell::new(Vec::new()),
                 input_handlers: RefCell::new(Vec::new()),
+                reconnect_pending: Cell::new(false),
+                reconnect_scheduled: Cell::new(false),
+                automatic_reconnects: Cell::new(0),
             });
             session.install_activity_handlers();
             session.render();
@@ -252,15 +313,21 @@ mod browser {
 
         fn handle(self: &Rc<Self>, action: Action, cx: &mut gpui::AsyncApp) {
             match action {
-                Action::Check => self.start_check(cx),
+                Action::Check => {
+                    self.automatic_reconnects.set(0);
+                    self.start_check(cx);
+                }
                 Action::Login => self.start_login(cx),
                 Action::DevLogin => self.start_dev_login(cx),
                 Action::Logout => self.start_logout(cx),
                 Action::Activity => self.start_activity(cx),
+                Action::Reconnect(epoch) => self.start_reconnect(epoch, cx),
+                Action::VisibilityChanged => self.handle_visibility_change(cx),
             }
         }
 
         fn start_check(self: &Rc<Self>, cx: &mut gpui::AsyncApp) {
+            self.cancel_reconnect();
             let request_epoch = self.begin_request_epoch();
             let epoch = self.epochs.borrow_mut().begin_auth();
             self.set_screen(Screen::Loading);
@@ -384,6 +451,73 @@ mod browser {
                 .detach();
         }
 
+        fn start_reconnect(self: &Rc<Self>, epoch: ConnectionEpoch, cx: &mut gpui::AsyncApp) {
+            let (state, start) = consume_reconnect(
+                ReconnectState {
+                    pending: self.reconnect_pending.get(),
+                    scheduled: self.reconnect_scheduled.get(),
+                },
+                self.epochs.borrow().is_current(epoch),
+                page_is_visible(),
+            );
+            self.reconnect_pending.set(state.pending);
+            self.reconnect_scheduled.set(state.scheduled);
+            if start {
+                self.start_check(cx);
+            }
+        }
+
+        fn handle_visibility_change(self: &Rc<Self>, cx: &mut gpui::AsyncApp) {
+            if page_is_visible() {
+                let epoch = self.epochs.borrow().current();
+                self.schedule_reconnect(epoch, cx);
+            }
+        }
+
+        fn request_reconnect(self: &Rc<Self>, epoch: ConnectionEpoch, cx: &mut gpui::AsyncApp) {
+            if !self.epochs.borrow().is_current(epoch) || self.reconnect_pending.get() {
+                return;
+            }
+            let Some(attempt) = next_reconnect_attempt(self.automatic_reconnects.get()) else {
+                self.set_screen(Screen::Failed(RECONNECT_EXHAUSTED_MESSAGE.into()));
+                return;
+            };
+            self.automatic_reconnects.set(attempt);
+            self.reconnect_pending.set(true);
+            self.set_screen(Screen::Connecting);
+            self.schedule_reconnect(epoch, cx);
+        }
+
+        fn schedule_reconnect(self: &Rc<Self>, epoch: ConnectionEpoch, cx: &mut gpui::AsyncApp) {
+            if !self.epochs.borrow().is_current(epoch) {
+                return;
+            }
+            let plan = reconnect_plan(
+                self.reconnect_pending.get(),
+                page_is_visible(),
+                self.reconnect_scheduled.get(),
+            );
+            if !matches!(plan, ReconnectPlan::Schedule) {
+                return;
+            }
+            self.reconnect_scheduled.set(true);
+            let session = self.clone();
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(RECONNECT_DELAY_MS))
+                    .await;
+                if !session.epochs.borrow().is_current(epoch) {
+                    return;
+                }
+                if !session.reconnect_pending.get() || !page_is_visible() {
+                    session.reconnect_scheduled.set(false);
+                    return;
+                }
+                session.queue(Action::Reconnect(epoch));
+            })
+            .detach();
+        }
+
         async fn connect(
             self: Rc<Self>,
             epoch: ConnectionEpoch,
@@ -433,6 +567,19 @@ mod browser {
                     .update(cx, |state, cx| state.attach_engine(handle, cx));
                 self.set_screen(Screen::Connected);
 
+                let stable = self.clone();
+                cx.spawn(async move |cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(RECONNECT_STABLE_MS))
+                        .await;
+                    if stable.epochs.borrow().is_current(epoch)
+                        && matches!(&*stable.screen.borrow(), Screen::Connected)
+                    {
+                        stable.automatic_reconnects.set(0);
+                    }
+                })
+                .detach();
+
                 let watcher = self.clone();
                 cx.spawn(async move |cx| {
                     if closed.changed().await.is_ok()
@@ -440,7 +587,9 @@ mod browser {
                         && watcher.epochs.borrow().is_current(epoch)
                     {
                         watcher.detach_engine(cx).await;
-                        watcher.set_screen(Screen::Failed(BROWSER_DISCONNECTED_MESSAGE.into()));
+                        if watcher.epochs.borrow().is_current(epoch) {
+                            watcher.request_reconnect(epoch, cx);
+                        }
                     }
                 })
                 .detach();
@@ -456,6 +605,7 @@ mod browser {
         }
 
         fn start_logout(self: &Rc<Self>, cx: &mut gpui::AsyncApp) {
+            self.cancel_reconnect();
             let request_epoch = self.begin_request_epoch();
             let epoch = self.epochs.borrow_mut().begin_auth();
             let csrf = self
@@ -532,6 +682,11 @@ mod browser {
             epoch
         }
 
+        fn cancel_reconnect(&self) {
+            self.reconnect_pending.set(false);
+            self.reconnect_scheduled.set(false);
+        }
+
         async fn get_json<T: for<'de> Deserialize<'de>>(
             &self,
             request_epoch: u64,
@@ -594,6 +749,15 @@ mod browser {
                     .add_event_listener_with_callback(event, handler.as_ref().unchecked_ref());
                 self.input_handlers.borrow_mut().push(handler);
             }
+            let actions = self.actions.clone();
+            let handler = Closure::new(move |_: Event| {
+                actions.borrow_mut().push_back(Action::VisibilityChanged);
+            });
+            let _ = document.add_event_listener_with_callback(
+                "visibilitychange",
+                handler.as_ref().unchecked_ref(),
+            );
+            self.input_handlers.borrow_mut().push(handler);
         }
 
         async fn detach_engine(&self, cx: &mut gpui::AsyncApp) {
@@ -618,6 +782,8 @@ mod browser {
         }
 
         async fn expire(&self, cx: &mut gpui::AsyncApp) {
+            self.cancel_reconnect();
+            self.automatic_reconnects.set(0);
             self.begin_request_epoch();
             self.epochs.borrow_mut().begin_auth();
             *self.session.borrow_mut() = None;
@@ -769,6 +935,19 @@ mod browser {
             }
             let _ = parent.append_child(&button);
         }
+    }
+
+    fn page_is_visible() -> bool {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return true;
+        };
+        js_sys::Reflect::get(
+            document.as_ref(),
+            &wasm_bindgen::JsValue::from_str("visibilityState"),
+        )
+        .ok()
+        .and_then(|value| value.as_string())
+        .map_or(true, |state| state != "hidden")
     }
 
     fn dev_login_enabled() -> bool {

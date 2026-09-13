@@ -14,8 +14,9 @@ use crate::browser_connection::{
     SocketState, outbound_frame_policy, pump, signal,
 };
 use crate::browser_session::{
-    BROWSER_DISCONNECTED_MESSAGE, DeviceDto, LifecycleCoordinator, NO_ONLINE_DEVICES_MESSAGE,
-    OnlineDeviceCandidates, browser_connection_failure_message,
+    DeviceDto, LifecycleCoordinator, MAX_AUTOMATIC_RECONNECTS, NO_ONLINE_DEVICES_MESSAGE,
+    OnlineDeviceCandidates, ReconnectPlan, ReconnectState, browser_connection_failure_message,
+    consume_reconnect, next_reconnect_attempt, reconnect_plan,
 };
 fn transport() -> (RpcClient, mpsc::Receiver<String>, mpsc::Sender<String>) {
     let (out, requests) = mpsc::channel(4);
@@ -275,10 +276,59 @@ fn browser_failure_and_disconnect_copy_is_retryable_and_does_not_replay() {
         browser_connection_failure_message("RPC socket closed during handshake"),
         "Could not connect to your online device: RPC socket closed during handshake. Try again.",
     );
+}
+
+#[test]
+fn timer_consumption_survives_hide_before_dispatch_and_reschedules_on_return() {
+    let mut state = ReconnectState {
+        pending: true,
+        scheduled: false,
+    };
     assert_eq!(
-        BROWSER_DISCONNECTED_MESSAGE,
-        "The remote device disconnected. No changes were retried. Try again to reconnect.",
+        reconnect_plan(true, true, state.scheduled),
+        ReconnectPlan::Schedule
     );
+
+    state.scheduled = true;
+    let (state, start) = consume_reconnect(state, true, false);
+    assert_eq!(
+        state,
+        ReconnectState {
+            pending: true,
+            scheduled: false,
+        }
+    );
+    assert!(!start);
+    assert_eq!(
+        reconnect_plan(state.pending, true, state.scheduled),
+        ReconnectPlan::Schedule
+    );
+
+    let (state, start) = consume_reconnect(state, true, true);
+    assert_eq!(
+        state,
+        ReconnectState {
+            pending: false,
+            scheduled: false,
+        }
+    );
+    assert!(start);
+
+    let stale = ReconnectState {
+        pending: true,
+        scheduled: true,
+    };
+    assert_eq!(consume_reconnect(stale, false, true), (stale, false));
+}
+
+#[test]
+fn immediate_disconnects_are_limited_until_a_connection_stays_stable() {
+    let mut attempts = 0;
+    for expected in 1..=MAX_AUTOMATIC_RECONNECTS {
+        attempts = next_reconnect_attempt(attempts).unwrap();
+        assert_eq!(attempts, expected);
+    }
+    assert_eq!(next_reconnect_attempt(attempts), None);
 }
 
 struct TestSocket;
