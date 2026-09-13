@@ -1,8 +1,56 @@
 //! Browser cookie/session lifecycle for the shared Shell.
 //!
 //! This module deliberately owns no chat reducer. It discovers an authenticated
-//! browser session, lets the user choose a DeviceRoom, and attaches that typed
+//! browser session, selects one eligible online DeviceRoom, and attaches that typed
 //! transport to the one `zeron_ui::state::AppState` rendered by the Shell.
+
+use serde::Deserialize;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceDto {
+    pub id: String,
+    pub online: bool,
+}
+
+#[derive(Debug)]
+pub struct OnlineDeviceCandidates {
+    ids: Vec<String>,
+    next_index: usize,
+}
+
+impl OnlineDeviceCandidates {
+    pub fn from_devices(devices: &[DeviceDto]) -> Self {
+        let mut ids: Vec<_> = devices
+            .iter()
+            .filter(|device| device.online && !device.id.is_empty())
+            .map(|device| device.id.clone())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        Self { ids, next_index: 0 }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    pub fn next(&mut self) -> Option<&str> {
+        let device_id = self.ids.get(self.next_index)?.as_str();
+        self.next_index += 1;
+        Some(device_id)
+    }
+}
+
+pub const NO_ONLINE_DEVICES_MESSAGE: &str =
+    "No online devices are available for this account. Open Zeron on a device and try again.";
+
+pub const BROWSER_DISCONNECTED_MESSAGE: &str =
+    "The remote device disconnected. No changes were retried. Try again to reconnect.";
+
+pub fn browser_connection_failure_message(error: &str) -> String {
+    format!("Could not connect to your online device: {error}. Try again.")
+}
 
 /// Coordinates browser requests without depending on browser APIs, so the
 /// cancellation and activity policy is covered by the lifecycle harness.
@@ -68,6 +116,11 @@ mod browser {
     use zeron_ui::state::{AppState, EngineHandle};
     use zeron_ui::{EngineBootConfig, shell};
 
+    use super::{
+        BROWSER_DISCONNECTED_MESSAGE, DeviceDto, NO_ONLINE_DEVICES_MESSAGE, OnlineDeviceCandidates,
+        browser_connection_failure_message,
+    };
+
     use crate::rpc::connection::{ConnectionEpoch, ConnectionEpochs, connect_client};
 
     #[derive(Clone, Deserialize)]
@@ -80,14 +133,6 @@ mod browser {
         organization_id: Option<String>,
         #[serde(default)]
         csrf_token: Option<String>,
-    }
-
-    #[derive(Clone, Deserialize)]
-    struct DeviceDto {
-        id: String,
-        #[serde(default)]
-        name: Option<String>,
-        online: bool,
     }
 
     #[derive(Deserialize)]
@@ -130,17 +175,14 @@ mod browser {
         Check,
         Login,
         DevLogin,
-        SelectDevice(String),
         Logout,
         Activity,
-        SwitchDevice,
     }
 
     enum Screen {
         Loading,
         SignedOut,
-        Devices(Vec<DeviceDto>),
-        Connecting(String),
+        Connecting,
         Connected,
         Failed(String),
     }
@@ -191,7 +233,6 @@ mod browser {
         /// native-engine runtime transitions.
         pub fn handle_external_lifecycle_action(&self, action: shell::ExternalLifecycleAction) {
             self.queue(match action {
-                shell::ExternalLifecycleAction::SwitchDevice => Action::SwitchDevice,
                 shell::ExternalLifecycleAction::SignOut => Action::Logout,
                 shell::ExternalLifecycleAction::Retry => Action::Check,
             });
@@ -214,11 +255,8 @@ mod browser {
                 Action::Check => self.start_check(cx),
                 Action::Login => self.start_login(cx),
                 Action::DevLogin => self.start_dev_login(cx),
-                Action::SelectDevice(device_id) => self.start_connect(device_id, cx),
                 Action::Logout => self.start_logout(cx),
                 Action::Activity => self.start_activity(cx),
-
-                Action::SwitchDevice => self.start_switch_device(cx),
             }
         }
 
@@ -262,7 +300,7 @@ mod browser {
         }
 
         async fn load_devices(
-            &self,
+            self: &Rc<Self>,
             epoch: ConnectionEpoch,
             request_epoch: u64,
             cx: &mut gpui::AsyncApp,
@@ -272,7 +310,12 @@ mod browser {
                 .await
             {
                 Ok(devices) if self.epochs.borrow().is_current(epoch) => {
-                    self.set_screen(Screen::Devices(devices.devices));
+                    let candidates = OnlineDeviceCandidates::from_devices(&devices.devices);
+                    if candidates.is_empty() {
+                        self.fail(NO_ONLINE_DEVICES_MESSAGE, cx).await;
+                        return;
+                    }
+                    self.start_connect(candidates, cx);
                 }
                 Ok(_) | Err(RequestError::Cancelled) => {}
                 Err(RequestError::Expired) if self.epochs.borrow().is_current(epoch) => {
@@ -307,20 +350,6 @@ mod browser {
             .detach();
         }
 
-        fn start_switch_device(self: &Rc<Self>, cx: &mut gpui::AsyncApp) {
-            let request_epoch = self.begin_request_epoch();
-            let epoch = self.epochs.borrow_mut().begin_auth();
-            self.set_screen(Screen::Loading);
-            let session = self.clone();
-            cx.spawn(async move |cx| {
-                session.detach_engine(cx).await;
-                if session.epochs.borrow().is_current(epoch) {
-                    session.check(epoch, request_epoch, cx).await;
-                }
-            })
-            .detach();
-        }
-
         fn start_dev_login(self: &Rc<Self>, cx: &mut gpui::AsyncApp) {
             if !dev_login_enabled() {
                 return;
@@ -342,70 +371,88 @@ mod browser {
             .detach();
         }
 
-        fn start_connect(self: &Rc<Self>, device_id: String, cx: &mut gpui::AsyncApp) {
+        fn start_connect(
+            self: &Rc<Self>,
+            candidates: OnlineDeviceCandidates,
+            cx: &mut gpui::AsyncApp,
+        ) {
             self.begin_request_epoch();
             let epoch = self.epochs.borrow_mut().begin_socket();
-            self.set_screen(Screen::Connecting(device_id.clone()));
+            self.set_screen(Screen::Connecting);
             let session = self.clone();
-            cx.spawn(async move |cx| session.connect(epoch, device_id, cx).await)
+            cx.spawn(async move |cx| session.connect(epoch, candidates, cx).await)
                 .detach();
         }
 
         async fn connect(
             self: Rc<Self>,
             epoch: ConnectionEpoch,
-            device_id: String,
+            mut candidates: OnlineDeviceCandidates,
             cx: &mut gpui::AsyncApp,
         ) {
             self.detach_engine(cx).await;
             if !self.epochs.borrow().is_current(epoch) {
                 return;
             }
-            let connected = match connect_client(epoch, &device_id).await {
-                Ok(connected) => connected,
-                Err(error) => {
-                    if self.epochs.borrow().is_current(epoch) {
-                        self.set_screen(Screen::Failed(error));
-                    }
+
+            let mut last_error = None;
+            while let Some(device_id) = candidates.next().map(str::to_owned) {
+                if !self.epochs.borrow().is_current(epoch) {
                     return;
                 }
-            };
-            let url = connected.url().to_string();
-            let handle =
-                match EngineHandle::from_connected_client(connected.into_client(), url).await {
-                    Ok(handle) => handle,
+
+                let connected = match connect_client(epoch, &device_id).await {
+                    Ok(connected) => connected,
                     Err(error) => {
-                        if self.epochs.borrow().is_current(epoch) {
-                            self.set_screen(Screen::Failed(error.to_string()));
-                        }
-                        return;
+                        last_error = Some(error);
+                        continue;
                     }
                 };
-            if !self.epochs.borrow().is_current(epoch) {
-                handle.shutdown().await;
+                if !self.epochs.borrow().is_current(epoch) {
+                    return;
+                }
+
+                let url = connected.url().to_string();
+                let handle =
+                    match EngineHandle::from_connected_client(connected.into_client(), url).await {
+                        Ok(handle) => handle,
+                        Err(error) => {
+                            last_error = Some(error.to_string());
+                            continue;
+                        }
+                    };
+                if !self.epochs.borrow().is_current(epoch) {
+                    handle.shutdown().await;
+                    return;
+                }
+                let mut closed = handle.client().watch_closed();
+
+                self.state
+                    .borrow()
+                    .clone()
+                    .update(cx, |state, cx| state.attach_engine(handle, cx));
+                self.set_screen(Screen::Connected);
+
+                let watcher = self.clone();
+                cx.spawn(async move |cx| {
+                    if closed.changed().await.is_ok()
+                        && *closed.borrow()
+                        && watcher.epochs.borrow().is_current(epoch)
+                    {
+                        watcher.detach_engine(cx).await;
+                        watcher.set_screen(Screen::Failed(BROWSER_DISCONNECTED_MESSAGE.into()));
+                    }
+                })
+                .detach();
                 return;
             }
-            let mut closed = handle.client().watch_closed();
 
-            self.state
-                .borrow()
-                .clone()
-                .update(cx, |state, cx| state.attach_engine(handle, cx));
-            self.set_screen(Screen::Connected);
-
-            let watcher = self.clone();
-            cx.spawn(async move |cx| {
-                if closed.changed().await.is_ok()
-                    && *closed.borrow()
-                    && watcher.epochs.borrow().is_current(epoch)
-                {
-                    watcher.detach_engine(cx).await;
-                    watcher.set_screen(Screen::Failed(
-                        "The remote device disconnected. Nothing was retried.".into(),
-                    ));
-                }
-            })
-            .detach();
+            if self.epochs.borrow().is_current(epoch) {
+                let detail = last_error
+                    .as_deref()
+                    .unwrap_or("No online device could be connected");
+                self.set_screen(Screen::Failed(browser_connection_failure_message(detail)));
+            }
         }
 
         fn start_logout(self: &Rc<Self>, cx: &mut gpui::AsyncApp) {
@@ -640,7 +687,7 @@ mod browser {
                         &document,
                         &card,
                         "Sign in",
-                        "Sign in to choose a remote device.",
+                        "Sign in to connect your Comet account.",
                     );
                     self.button(&document, &card, "Sign in", Action::Login, false);
                     if dev_login_enabled() {
@@ -653,43 +700,11 @@ mod browser {
                         );
                     }
                 }
-                Screen::Devices(devices) => {
-                    self.text(
-                        &document,
-                        &card,
-                        "Choose a device",
-                        "Your browser connects only to a remote device.",
-                    );
-                    if devices.is_empty() {
-                        self.note(
-                            &document,
-                            &card,
-                            "No registered devices are available for this account.",
-                        );
-                    }
-                    for device in devices {
-                        let label = device.name.as_deref().unwrap_or(&device.id);
-                        let label = if device.online {
-                            format!("{label} · Online")
-                        } else {
-                            format!("{label} · Offline")
-                        };
-                        self.button(
-                            &document,
-                            &card,
-                            &label,
-                            Action::SelectDevice(device.id.clone()),
-                            !device.online,
-                        );
-                    }
-                    self.button(&document, &card, "Refresh", Action::Check, false);
-                    self.button(&document, &card, "Log out", Action::Logout, false);
-                }
-                Screen::Connecting(device) => self.text(
+                Screen::Connecting => self.text(
                     &document,
                     &card,
                     "Connecting…",
-                    &format!("Opening the remote DeviceRoom for {device}."),
+                    "Opening your Comet session.",
                 ),
                 Screen::Connected => return,
                 Screen::Failed(error) => {

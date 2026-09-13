@@ -13,6 +13,8 @@ debug = 0
 [profile.release]
 strip = "symbols"
 
+opt-level = "s"
+
 [dependencies]
 zeron-ui = { path = "../../crates/ui" }
 zeron-proto = { path = "../../crates/proto" }

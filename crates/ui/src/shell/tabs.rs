@@ -176,7 +176,11 @@ impl Shell {
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
         // session is selected (`render_titlebar_cluster`) — this row budgets
         // one button slot so the title never sits under it.
-        let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
+        let sidebar_now = if is_mobile_width(self.viewport_width) {
+            0.0
+        } else {
+            self.eval_tween(self.sidebar_tween, self.sidebar_target())
+        };
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
 
         // Same glide as the old strip: content starts at the inset card's
@@ -193,7 +197,7 @@ impl Shell {
         // the pane itself would sit under the drag region and never see a
         // click. Closed, it is just the stable open/close toggle. Hidden on
         // the new-session canvas (user request) — nothing to diff yet.
-        let takeover = !on_canvas && self.right_pane_open(cx) && self.right_pane_expanded;
+        let takeover = !on_canvas && self.right_pane_visible(cx) && self.right_pane_expanded;
         // In takeover the title hides and the strip owns the whole band, so
         // the row's left inset pulls back to the sidebar seam — the title
         // inset would push the scope dropdown off the pane's own left gutter
@@ -222,7 +226,7 @@ impl Shell {
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
-            let right_open = self.right_pane_open(cx);
+            let right_open = self.right_pane_visible(cx);
             let mut controls = div()
                 .id("right-titlebar-controls")
                 .flex_none()

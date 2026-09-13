@@ -13,7 +13,10 @@ use crate::browser_connection::{
     ConnectionEpochs, Inbox, MAX_BUFFERED, MAX_OUTBOUND_FRAME, OutboundFramePolicy, Signal,
     SocketState, outbound_frame_policy, pump, signal,
 };
-use crate::browser_session::LifecycleCoordinator;
+use crate::browser_session::{
+    BROWSER_DISCONNECTED_MESSAGE, DeviceDto, LifecycleCoordinator, NO_ONLINE_DEVICES_MESSAGE,
+    OnlineDeviceCandidates, browser_connection_failure_message,
+};
 fn transport() -> (RpcClient, mpsc::Receiver<String>, mpsc::Sender<String>) {
     let (out, requests) = mpsc::channel(4);
     let (responses, inbound) = mpsc::channel(4);
@@ -178,6 +181,104 @@ fn activity_requires_real_input_and_is_throttled() {
     assert!(!coordinator.should_report_activity(1_001.0, INTERVAL_MS));
     assert!(!coordinator.should_report_activity(60_999.0, INTERVAL_MS));
     assert!(coordinator.should_report_activity(61_000.0, INTERVAL_MS));
+}
+
+#[test]
+fn browser_fallback_advances_after_first_candidate_fails() {
+    let devices = vec![
+        DeviceDto {
+            id: "second".into(),
+            online: true,
+        },
+        DeviceDto {
+            id: "first".into(),
+            online: true,
+        },
+        DeviceDto {
+            id: "offline".into(),
+            online: false,
+        },
+    ];
+    let mut candidates = OnlineDeviceCandidates::from_devices(&devices);
+    let mut tried = Vec::new();
+
+    while let Some(device_id) = candidates.next() {
+        tried.push(device_id.to_owned());
+        if device_id == "second" {
+            break;
+        }
+    }
+
+    assert_eq!(tried, ["first", "second"]);
+}
+
+#[test]
+fn browser_fallback_exhausts_online_candidates() {
+    let devices = vec![
+        DeviceDto {
+            id: "second".into(),
+            online: true,
+        },
+        DeviceDto {
+            id: "first".into(),
+            online: true,
+        },
+    ];
+    let mut candidates = OnlineDeviceCandidates::from_devices(&devices);
+
+    assert_eq!(candidates.next(), Some("first"));
+    assert_eq!(candidates.next(), Some("second"));
+    assert_eq!(candidates.next(), None);
+}
+
+#[test]
+fn browser_selection_has_no_candidate_when_all_devices_are_offline() {
+    let devices = vec![
+        DeviceDto {
+            id: "offline".into(),
+            online: false,
+        },
+        DeviceDto {
+            id: "".into(),
+            online: true,
+        },
+    ];
+
+    let candidates = OnlineDeviceCandidates::from_devices(&devices);
+    assert!(candidates.is_empty());
+    assert_eq!(
+        NO_ONLINE_DEVICES_MESSAGE,
+        "No online devices are available for this account. Open Zeron on a device and try again.",
+    );
+}
+
+#[test]
+fn stale_browser_retry_cannot_advance_an_old_fallback() {
+    let mut epochs = ConnectionEpochs::default();
+    let auth = epochs.begin_auth();
+    let first = epochs.begin_socket();
+    assert!(!epochs.is_current(auth));
+    assert!(epochs.is_current(first));
+
+    let retry_auth = epochs.begin_auth();
+    assert!(epochs.is_current(retry_auth));
+    assert!(!epochs.is_current(first));
+
+    let retry = epochs.begin_socket();
+    assert!(!epochs.is_current(first));
+    assert!(epochs.is_current(retry));
+}
+
+#[test]
+fn browser_failure_and_disconnect_copy_is_retryable_and_does_not_replay() {
+    assert_eq!(
+        browser_connection_failure_message("RPC socket closed during handshake"),
+        "Could not connect to your online device: RPC socket closed during handshake. Try again.",
+    );
+    assert_eq!(
+        BROWSER_DISCONNECTED_MESSAGE,
+        "The remote device disconnected. No changes were retried. Try again to reconnect.",
+    );
 }
 
 struct TestSocket;

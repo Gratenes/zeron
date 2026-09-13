@@ -117,7 +117,6 @@ actions!(
 /// teaching the shared Shell about cookies or remote-device transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalLifecycleAction {
-    SwitchDevice,
     SignOut,
     Retry,
 }
@@ -529,6 +528,45 @@ impl SettingsSection {
 pub enum Route {
     Chat,
     Settings(SettingsSection),
+}
+
+/// Narrow windows use transient overlays instead of reserving dock space for either pane.
+const MOBILE_BREAKPOINT: f32 = 768.0;
+/// Keep drawers useful without hiding the whole conversation at phone widths.
+const MOBILE_DRAWER_MAX_WIDTH: f32 = 320.0;
+const MOBILE_DRAWER_VIEWPORT_FRACTION: f32 = 0.85;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MobileDrawer {
+    Sidebar,
+    RightPane,
+}
+
+fn is_mobile_width(viewport: f32) -> bool {
+    viewport < MOBILE_BREAKPOINT
+}
+
+fn mobile_drawer_width(viewport: f32) -> f32 {
+    (viewport.max(0.0) * MOBILE_DRAWER_VIEWPORT_FRACTION).min(MOBILE_DRAWER_MAX_WIDTH)
+}
+
+fn toggle_mobile_drawer(
+    current: Option<MobileDrawer>,
+    requested: MobileDrawer,
+) -> Option<MobileDrawer> {
+    if current == Some(requested) {
+        None
+    } else {
+        Some(requested)
+    }
+}
+
+fn main_layout_width(viewport: f32, sidebar: f32, right: f32, mobile: bool) -> f32 {
+    if mobile {
+        viewport.max(0.0)
+    } else {
+        conversation_width(viewport, sidebar, right)
+    }
 }
 
 /// Maximum width the right pane may occupy while retaining the conversation
@@ -1278,6 +1316,9 @@ pub struct Shell {
     /// the transcript's bottom clearance, and the jump pill's anchor (the
     /// same one-frame lag every fade here rides).
     bottom_stack: std::rc::Rc<std::cell::Cell<f32>>,
+    /// The transient mobile drawer. Desktop pane state remains persisted or
+    /// session-scoped; this is intentionally never written to UiSettings.
+    mobile_drawer: Option<MobileDrawer>,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
@@ -1654,6 +1695,7 @@ impl Shell {
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
+            mobile_drawer: None,
             archived_open: true,
             archived_shown: 0,
             archived_hover: None,
@@ -2087,13 +2129,30 @@ impl Shell {
         !self.active_chat.is_empty() && self.panels.get(&self.panel_key(cx)).changes_open
     }
 
+    /// Whether the persisted desktop right pane is physically mounted.
+    /// Mobile visibility is handled separately by [`MobileDrawer`].
+    fn right_pane_visible(&self, cx: &App) -> bool {
+        !is_mobile_width(self.viewport_width) && self.right_pane_open(cx)
+    }
+
+    /// Whether right-pane content should be mounted for the current layout.
+    /// Mobile uses only the active chat and transient drawer state; desktop
+    /// uses the per-session panel flag.
+    fn right_pane_content_visible(&self, cx: &App) -> bool {
+        if is_mobile_width(self.viewport_width) {
+            !self.active_chat.is_empty() && self.mobile_drawer == Some(MobileDrawer::RightPane)
+        } else {
+            self.right_pane_open(cx)
+        }
+    }
+
     /// The current chat's terminal flag (per-session, in-memory).
     fn terminal_open(&self, cx: &App) -> bool {
         self.panels.get(&self.panel_key(cx)).terminal_open
     }
 
     fn right_target(&self, cx: &App) -> f32 {
-        if !self.right_pane_open(cx) {
+        if !self.right_pane_visible(cx) {
             0.0
         } else {
             // Manual sizing preserves a usable conversation column. Takeover
@@ -2111,6 +2170,11 @@ impl Shell {
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        if is_mobile_width(self.viewport_width) {
+            self.mobile_drawer = toggle_mobile_drawer(self.mobile_drawer, MobileDrawer::Sidebar);
+            cx.notify();
+            return;
+        }
         let from = self.eval_tween(self.sidebar_tween, self.sidebar_target());
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
         self.sidebar_tween = Some(WidthTween::new(from, self.sidebar_target()));
@@ -2119,6 +2183,14 @@ impl Shell {
     }
 
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
+        if is_mobile_width(self.viewport_width) {
+            if self.active_chat.is_empty() {
+                return;
+            }
+            self.mobile_drawer = toggle_mobile_drawer(self.mobile_drawer, MobileDrawer::RightPane);
+            cx.notify();
+            return;
+        }
         // Reverse from the visible width when toggled during an animation.
         let from = self.eval_tween(self.right_tween, self.right_target(cx));
         let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
@@ -2146,6 +2218,13 @@ impl Shell {
         {
             // Reopening onto a diff tab revalidates its watch.
             changes.update(cx, |changes, cx| changes.ensure_content(cx));
+        }
+        cx.notify();
+    }
+
+    fn close_mobile_drawer(&mut self, cx: &mut Context<Self>) {
+        if self.mobile_drawer.take().is_none() {
+            return;
         }
         cx.notify();
     }
@@ -2641,10 +2720,15 @@ impl Shell {
         };
 
         let key = self.panel_key(cx);
-        let was_open = self.panels.get(&key).changes_open;
+        let mobile = is_mobile_width(self.viewport_width);
+        let was_open = self.right_pane_content_visible(cx);
         let from = self.right_target(cx);
-        self.panels.update(&key, |panel| panel.changes_open = true);
-        if !was_open {
+        if mobile {
+            self.mobile_drawer = Some(MobileDrawer::RightPane);
+        } else {
+            self.panels.update(&key, |panel| panel.changes_open = true);
+        }
+        if !mobile && !was_open {
             self.right_tween = Some(WidthTween::new(from, self.right_target(cx)));
         }
         self.add_file_surface(link.path, window, cx);
@@ -2765,7 +2849,7 @@ impl Shell {
     ) {
         // The chip lives in the conversation column — the pane it opens into
         // may still be closed.
-        if !self.right_pane_open(cx) {
+        if !self.right_pane_content_visible(cx) {
             self.toggle_right_pane(cx);
         }
         if let Some((&id, _)) = self
@@ -2963,7 +3047,7 @@ impl Shell {
     /// active surface while the pane is open, or `None` on the picker empty
     /// state / a closed pane / the new-session canvas.
     fn closable_right_surface(&self, cx: &App) -> Option<RightSurface> {
-        if !self.right_pane_open(cx) {
+        if !self.right_pane_content_visible(cx) {
             return None;
         }
         match self.resolved_right_active(cx) {
@@ -3022,11 +3106,17 @@ impl Shell {
         let mut dirty = browser.chain(editors).collect::<Vec<_>>();
         dirty.sort_by_key(|(key, _)| (key != &current, key.clone()));
         if let Some((key, surface)) = dirty.into_iter().next() {
+            let mobile = is_mobile_width(self.viewport_width);
             self.panels.update(&key, |panel| {
-                panel.changes_open = true;
+                if !mobile {
+                    panel.changes_open = true;
+                }
                 panel.right_active = surface;
             });
             self.apply_nav(NavEntry::Chat(key), cx);
+            if mobile {
+                self.mobile_drawer = Some(MobileDrawer::RightPane);
+            }
         }
     }
 
@@ -3647,7 +3737,9 @@ impl Shell {
     /// so an unguarded jump would switch sessions UNDER the open popover,
     /// stranding it over a session the user never picked.
     pub(super) fn overlay_owns_keyboard(&self, cx: &App) -> bool {
-        self.add_space.is_some() || self.composer.read(cx).pickers().read(cx).is_open()
+        self.add_space.is_some()
+            || self.composer.read(cx).pickers().read(cx).is_open()
+            || self.mobile_drawer.is_some()
     }
 
     /// Track held modifiers for sidebar jump hints and the queue's submit hint.
@@ -3721,11 +3813,6 @@ impl Shell {
 
     fn confirm_sign_out(&mut self, cx: &mut Context<Self>) {
         self.start_local_runtime_transition(true, cx);
-    }
-
-    fn request_switch_device(&mut self, cx: &mut Context<Self>) {
-        self.close_user_menu(cx);
-        let _ = dispatch_external_lifecycle_action(ExternalLifecycleAction::SwitchDevice);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -4783,16 +4870,20 @@ impl Shell {
         out
     }
 
+    fn sidebar_content(&self, width: f32) -> AnyElement {
+        self.sidebar_pane
+            .clone()
+            .cached(
+                gpui::StyleRefinement::default()
+                    .w(px(width))
+                    .h_full()
+                    .flex_none(),
+            )
+            .into_any_element()
+    }
+
     fn render_sidebar(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        // The sidebar is part of the resolved theme. A second fixed-Zeron
-        // palette here made imported families look split in half and froze
-        // activity/glyph personality independently of the selected variant.
-        let inner = self.sidebar_pane.clone().cached(
-            gpui::StyleRefinement::default()
-                .w(px(self.settings.sidebar_width))
-                .h_full()
-                .flex_none(),
-        );
+        let width = self.settings.sidebar_width;
         let target = self.sidebar_target();
         // Transparent — the sidebar sits directly on the frost shell; the main
         // card's own border provides the separation. The content row spans the
@@ -4804,7 +4895,21 @@ impl Shell {
             div()
                 .h_full()
                 .pt(px(Theme::TITLEBAR_HEIGHT))
-                .child(inner)
+                .child(self.sidebar_content(width))
+                .into_any_element(),
+        )
+    }
+
+    /// Mobile uses the same sidebar entity and pane clipping, but gives it a
+    /// bounded overlay width and does not consult the persisted collapsed flag.
+    fn render_mobile_sidebar(&self, width: f32) -> AnyElement {
+        self.pane_container(
+            None,
+            width,
+            div()
+                .h_full()
+                .pt(px(Theme::TITLEBAR_HEIGHT))
+                .child(self.sidebar_content(width))
                 .into_any_element(),
         )
     }
@@ -5779,20 +5884,6 @@ impl Shell {
                         .truncate()
                         .child(menu_identity),
                 )
-                .when(browser_lifecycle, |menu| {
-                    menu.child(
-                        popover::menu_row(theme, false, "user-menu-switch-device")
-                            .id("user-menu-switch-device")
-                            .on_click(cx.listener(|this, _, _, cx| this.request_switch_device(cx)))
-                            .child(
-                                icon(icons::SMARTPHONE)
-                                    .size(px(16.0))
-                                    .text_color(theme.text_muted),
-                            )
-                            .child(SharedString::from("Switch device")),
-                    )
-                    .child(popover::menu_separator())
-                })
                 .when_some(action, |menu, action| {
                     let row = match action {
                         AccountMenuAction::EnableSync => {
@@ -6248,7 +6339,7 @@ impl Shell {
     }
 
     fn active_changes(&self, cx: &App) -> Option<Entity<Changes>> {
-        if !self.right_pane_open(cx) {
+        if !self.right_pane_content_visible(cx) {
             return None;
         }
         let RightSurface::Diff(id) = self.resolved_right_active(cx) else {
@@ -6302,8 +6393,17 @@ impl Shell {
         if self.right_plus.get().is_some() {
             return true;
         }
-        self.active_changes(cx)
+        if self
+            .active_changes(cx)
             .is_some_and(|changes| changes.update(cx, |changes, cx| changes.handle_escape(cx)))
+        {
+            return true;
+        }
+        if self.mobile_drawer.is_some() {
+            self.close_mobile_drawer(cx);
+            return true;
+        }
+        false
     }
 
     fn on_key_down_capture(
@@ -6355,6 +6455,9 @@ impl Shell {
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).clone();
         let mut overlays: Vec<AnyElement> = Vec::new();
+        if let Some(drawer) = self.render_mobile_drawer(viewport, cx) {
+            overlays.push(drawer);
+        }
 
         if let Some(menu_state) = self.chat_menu.get().cloned() {
             let chat_id = menu_state.chat_id;
@@ -7179,15 +7282,58 @@ impl Shell {
         }
     }
 
+    fn mobile_drawer_close_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .size(px(28.0))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .role(gpui::Role::Button)
+            .aria_label(label)
+            .bg(motion::hover_blend(
+                id,
+                crate::theme::wash(0.0),
+                theme.glass_hover(),
+            ))
+            .on_hover(motion::hover_listener(id))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.close_mobile_drawer(cx);
+            }))
+            .child(
+                icon(icons::CLOSE)
+                    .size(px(16.0))
+                    .text_color(theme.text_muted),
+            )
+    }
+
     /// Right pane — the surface host (t3code RightPanelTabs): hidden by
     /// default, drag-resizable. Content is the ACTIVE surface — the Diff
     /// page (its options row + the lazy [`Changes`] viewer), workspace Files,
     /// an embedded terminal, or the surface picker when no tabs exist.
-    fn render_right_pane(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_right_pane(
+        &mut self,
+        cx: &mut Context<Self>,
+        overlay_width: Option<f32>,
+    ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let bg = theme.bg;
-        let content: AnyElement = if self.right_pane_open(cx) || self.tween_active(self.right_tween)
-        {
+        let mobile_overlay = overlay_width.is_some();
+        let content_visible =
+            self.right_pane_content_visible(cx) || self.tween_active(self.right_tween);
+        let content: AnyElement = if content_visible {
             match self.resolved_right_active(cx) {
                 RightSurface::Files => {
                     let key = self.panel_key(cx);
@@ -7291,27 +7437,144 @@ impl Shell {
         } else {
             bg
         };
-        let panel = div()
+        let mut panel = div()
             .size_full()
             .flex()
             .flex_col()
             // In takeover the panel's left edge IS the sidebar seam, which
             // already carries the sidebar tone's right hairline — a second
-            // border there doubled up (user report).
-            .when(!self.right_pane_expanded, |el| {
+            // border there doubled up (user report). Mobile drawers always
+            // retain their own divider from the dimmed backdrop.
+            .when(!self.right_pane_expanded || mobile_overlay, |el| {
                 el.border_l_1().border_color(theme.border)
             })
             .bg(panel_bg)
-            .overflow_hidden()
+            .overflow_hidden();
+        if mobile_overlay {
+            let header = div()
+                .id("mobile-right-drawer-header")
+                .h(px(Theme::TITLEBAR_HEIGHT))
+                .flex_none()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .pl(px(8.0))
+                .pr(px(6.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(self.render_right_tab_strip(cx)),
+                )
+                .child(self.mobile_drawer_close_button(
+                    "mobile-right-drawer-close",
+                    "Close changes panel",
+                    &theme,
+                    cx,
+                ));
+            panel = panel
+                .child(header)
+                .child(div().flex_1().min_h_0().child(content));
+        } else {
             // The titlebar is a glass overlay over the full-height content
             // row; the panel's own chrome starts below it.
-            .pt(px(Theme::TITLEBAR_HEIGHT))
-            .child(content);
-        let target = self.right_target(cx);
+            panel = panel.pt(px(Theme::TITLEBAR_HEIGHT)).child(content);
+        }
+        let target = overlay_width.unwrap_or_else(|| self.right_target(cx));
+        let tween = if mobile_overlay {
+            None
+        } else {
+            self.right_tween
+        };
         self.right_pane_container(
-            self.right_tween,
+            tween,
             target,
             div().h_full().relative().child(panel).into_any_element(),
+        )
+    }
+
+    /// Render the active mobile drawer above the full-width conversation.
+    /// Neither pane is mounted in the base flex row at mobile widths, so the
+    /// backdrop and drawer are the only elements that can capture those
+    /// pointer regions.
+    fn render_mobile_drawer(
+        &mut self,
+        viewport: gpui::Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let drawer = self.mobile_drawer?;
+        if !is_mobile_width(f32::from(viewport.width)) {
+            return None;
+        }
+        let width = mobile_drawer_width(f32::from(viewport.width));
+        let theme = Theme::of(cx).clone();
+        let panel: AnyElement = match drawer {
+            MobileDrawer::Sidebar => {
+                let close = self
+                    .mobile_drawer_close_button(
+                        "mobile-sidebar-drawer-close",
+                        "Close sidebar",
+                        &theme,
+                        cx,
+                    )
+                    .absolute()
+                    .top(px(5.0))
+                    .right(px(8.0));
+                div()
+                    .id("mobile-sidebar-drawer")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .w(px(width))
+                    .bg(theme.surface)
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.render_mobile_sidebar(width))
+                    .child(close)
+                    .into_any_element()
+            }
+            MobileDrawer::RightPane => {
+                if !matches!(self.route, Route::Chat) || !self.right_pane_content_visible(cx) {
+                    self.mobile_drawer = None;
+                    return None;
+                }
+                div()
+                    .id("mobile-right-drawer")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .w(px(width))
+                    .bg(theme.surface)
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.render_right_pane(cx, Some(width)))
+                    .into_any_element()
+            }
+        };
+        let backdrop = div()
+            .id("mobile-drawer-backdrop")
+            .absolute()
+            .inset_0()
+            .bg(theme.scrim().opacity(0.35 / 0.6))
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.close_mobile_drawer(cx)),
+            );
+        Some(
+            div()
+                .id("mobile-drawer-overlay")
+                .absolute()
+                .inset_0()
+                .child(backdrop)
+                .child(panel)
+                .into_any_element(),
         )
     }
 
@@ -8621,6 +8884,12 @@ impl Render for Shell {
         }
         crate::transcript::record_view_frame("shell");
         self.viewport_width = f32::from(window.viewport_size().width);
+        if !is_mobile_width(self.viewport_width) {
+            // Drawer visibility is transient: desktop immediately returns to
+            // the persisted docked panes, and a later mobile resize must not
+            // resurrect a stale overlay.
+            self.mobile_drawer = None;
+        }
         // Appearance actions persist independently of the shell. Mirror the
         // globals before any later debounced settings save can overwrite them.
         self.settings.appearance = crate::appearance::mode(cx);
@@ -8661,12 +8930,12 @@ impl Render for Shell {
         let browser_active = matches!(gate, GatePhase::Ready)
             && !restart_required
             && matches!(self.route, Route::Chat)
-            && (self.right_pane_open(cx) || self.tween_active(self.right_tween));
+            && (self.right_pane_content_visible(cx) || self.tween_active(self.right_tween));
         // Native clipping follows the animated GPUI mask. Drags only transfer
         // pointer ownership; the browser continues rendering and reflowing.
         let browser_dragging = cx.has_active_drag();
         #[cfg(target_os = "macos")]
-        let browser_resize_inset = if self.right_pane_open(cx)
+        let browser_resize_inset = if self.right_pane_visible(cx)
             && !self.right_pane_expanded
             && !self.tween_active(self.right_tween)
         {
@@ -8776,7 +9045,7 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
-                if matches!(this.route, Route::Chat) && this.right_pane_open(cx) {
+                if matches!(this.route, Route::Chat) && this.right_pane_content_visible(cx) {
                     let file = match this.resolved_right_active(cx) {
                         RightSurface::Files => this.files.get(&this.panel_key(cx)).cloned(),
                         RightSurface::File(id) => this.file_surfaces.get(&id).cloned(),
@@ -8803,7 +9072,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
                 if matches!(this.route, Route::Chat) {
                     this.toggle_right_pane(cx);
-                    if !this.right_pane_open(cx) {
+                    if !this.right_pane_content_visible(cx) {
                         // The hidden editor can retain a focus handle after unmounting.
                         // Restore a mounted target so the next shortcut can reopen it.
                         window.focus(&this.composer.focus_handle(cx), cx);
@@ -8887,12 +9156,19 @@ impl Render for Shell {
                 }
                 // MessageRail width gate: hide below 48rem of main-panel width.
                 let viewport = f32::from(window.viewport_size().width);
+                let mobile = is_mobile_width(viewport);
                 // Stamped for `right_target` — the expanded changes panel
                 // sizes itself to the viewport.
                 self.viewport_width = viewport;
-                let main_target_width =
-                    conversation_width(viewport, self.sidebar_target(), self.right_target(cx));
-                let main_transition = self.active_tween_endpoints(self.main_takeover_tween);
+                let main_target_width = main_layout_width(
+                    viewport,
+                    if mobile { 0.0 } else { self.sidebar_target() },
+                    if mobile { 0.0 } else { self.right_target(cx) },
+                    mobile,
+                );
+                let main_transition = (!mobile)
+                    .then(|| self.active_tween_endpoints(self.main_takeover_tween))
+                    .flatten();
                 let main_content_width =
                     stable_panel_content_width(main_target_width, main_transition);
                 let main_width = (main_content_width - 10.0).max(0.0);
@@ -8909,20 +9185,26 @@ impl Render for Shell {
                     t.set_bottom_clearance(stack_h, cx);
                 });
 
-                let sidebar = self.render_sidebar(cx);
-                let sidebar_handle = self.resize_handle(
-                    "sidebar-resize",
-                    || SidebarResize,
-                    |shell, _| shell.settings.sidebar_width = SIDEBAR_DEFAULT,
-                    cx,
-                );
+                let sidebar = if mobile {
+                    Empty.into_any_element()
+                } else {
+                    self.render_sidebar(cx)
+                };
+                let sidebar_handle = (!mobile).then(|| {
+                    self.resize_handle(
+                        "sidebar-resize",
+                        || SidebarResize,
+                        |shell, _| shell.settings.sidebar_width = SIDEBAR_DEFAULT,
+                        cx,
+                    )
+                });
                 let main = self.render_main(window, cx);
                 // The Changes pane is chat-scoped chrome: the Settings route
                 // never renders it (zeron __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
                 // intact for the return trip.
                 let on_chat = matches!(self.route, Route::Chat);
-                let right_open = on_chat && self.right_pane_open(cx);
+                let right_open = !mobile && on_chat && self.right_pane_visible(cx);
                 // Takeover mode derives its width from the viewport, so a
                 // manual drag handle would fight the expanded target.
                 let right_handle = (right_open
@@ -8939,8 +9221,8 @@ impl Render for Shell {
                     // seam; the panel's 1px border remains the visual divider.
                     .left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))
                 });
-                let right: AnyElement = if on_chat {
-                    self.render_right_pane(cx)
+                let right: AnyElement = if on_chat && !mobile {
+                    self.render_right_pane(cx, None)
                 } else {
                     Empty.into_any_element()
                 };
@@ -8978,12 +9260,17 @@ impl Render for Shell {
                 // (zero layout width, same idiom as the changes-pane grabber)
                 // so the sidebar's right gutter stays exactly as wide as its
                 // left one — a 5px flex child here read as lopsided spacing.
-                let sidebar_seam = div()
-                    .w(px(0.0))
-                    .h_full()
-                    .flex_none()
-                    .relative()
-                    .child(sidebar_handle.left(px(-6.0)));
+                let sidebar_seam = if let Some(sidebar_handle) = sidebar_handle {
+                    div()
+                        .w(px(0.0))
+                        .h_full()
+                        .flex_none()
+                        .relative()
+                        .child(sidebar_handle.left(px(-6.0)))
+                        .into_any_element()
+                } else {
+                    Empty.into_any_element()
+                };
                 // Keep the right resize target outside the pane's
                 // overflow-hidden width container. This mirrors the sidebar
                 // seam and lets the target straddle both adjacent panes.
@@ -9119,6 +9406,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mobile_layout_uses_full_width_for_the_conversation() {
+        assert!(is_mobile_width(767.0));
+        assert!(!is_mobile_width(768.0));
+        assert_eq!(main_layout_width(390.0, 256.0, 520.0, true), 390.0);
+        assert_eq!(main_layout_width(1200.0, 256.0, 520.0, false), 424.0);
+    }
+
+    #[test]
+    fn mobile_drawer_width_is_bounded_and_leaves_a_backdrop() {
+        for viewport in [240.0, 320.0, 390.0, 767.0] {
+            let width = mobile_drawer_width(viewport);
+            assert!(width > 0.0 && width < viewport);
+            assert!(width <= MOBILE_DRAWER_MAX_WIDTH);
+        }
+        assert_eq!(mobile_drawer_width(0.0), 0.0);
+        assert_eq!(mobile_drawer_width(-1.0), 0.0);
+        assert_eq!(mobile_drawer_width(768.0), MOBILE_DRAWER_MAX_WIDTH);
+    }
+
+    #[test]
+    fn mobile_drawer_toggle_keeps_one_overlay_at_a_time() {
+        assert_eq!(
+            toggle_mobile_drawer(None, MobileDrawer::Sidebar),
+            Some(MobileDrawer::Sidebar)
+        );
+        assert_eq!(
+            toggle_mobile_drawer(Some(MobileDrawer::Sidebar), MobileDrawer::Sidebar),
+            None
+        );
+        assert_eq!(
+            toggle_mobile_drawer(Some(MobileDrawer::Sidebar), MobileDrawer::RightPane),
+            Some(MobileDrawer::RightPane)
+        );
+        assert_eq!(
+            toggle_mobile_drawer(Some(MobileDrawer::RightPane), MobileDrawer::Sidebar),
+            Some(MobileDrawer::Sidebar)
+        );
+    }
+
+    #[test]
     fn external_lifecycle_relay_routes_browser_actions_without_runtime_rpc() {
         let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut relay = ExternalLifecycleRelay::default();
@@ -9129,13 +9456,11 @@ mod tests {
             observed.borrow_mut().push(action);
         })));
         assert!(relay.dispatch(ExternalLifecycleAction::SignOut));
-        assert!(relay.dispatch(ExternalLifecycleAction::SwitchDevice));
         assert!(relay.dispatch(ExternalLifecycleAction::Retry));
         assert_eq!(
             *seen.borrow(),
             vec![
                 ExternalLifecycleAction::SignOut,
-                ExternalLifecycleAction::SwitchDevice,
                 ExternalLifecycleAction::Retry,
             ]
         );
@@ -10028,6 +10353,81 @@ mod exit_regressions {
     use gpui::{AppContext, TestAppContext};
 
     #[gpui::test]
+    fn mobile_right_drawer_preserves_docked_panel_state(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            Shell::new(
+                state,
+                EngineBootConfig {
+                    data_dir: dir.path().into(),
+                    ipc_port: 0,
+                    edge_url: "http://127.0.0.1:1".into(),
+                    edge_token: None,
+                    org_id: None,
+                    workos_client_id: None,
+                    default_harness: zeron_proto::HarnessId::Mock,
+                },
+                cx,
+            )
+        });
+        window
+            .update(cx, |shell, _, cx| {
+                shell.active_chat = "session".into();
+                shell.viewport_width = 1200.0;
+                shell.toggle_right_pane(cx);
+                assert!(shell.right_pane_open(cx));
+                shell.right_pane_expanded = true;
+
+                shell.viewport_width = 390.0;
+                shell.toggle_right_pane(cx);
+                assert_eq!(shell.mobile_drawer, Some(MobileDrawer::RightPane));
+                assert!(shell.right_pane_open(cx));
+
+                assert!(shell.right_pane_content_visible(cx));
+                assert!(!shell.right_pane_visible(cx));
+                assert_eq!(
+                    main_layout_width(390.0, 256.0, right_pane_takeover_width(390.0, 0.0), true,),
+                    390.0,
+                    "an expanded desktop pane must not reduce mobile chat width"
+                );
+
+                shell.close_mobile_drawer(cx);
+                assert!(shell.mobile_drawer.is_none());
+                assert!(shell.right_pane_open(cx));
+                shell.viewport_width = 1200.0;
+                assert!(shell.right_pane_open(cx));
+
+                shell.toggle_right_pane(cx);
+                assert!(!shell.right_pane_open(cx));
+                shell.viewport_width = 390.0;
+                shell.toggle_right_pane(cx);
+                assert_eq!(shell.mobile_drawer, Some(MobileDrawer::RightPane));
+
+                assert!(shell.right_pane_content_visible(cx));
+                shell.close_mobile_drawer(cx);
+                assert!(shell.mobile_drawer.is_none());
+                assert!(!shell.right_pane_open(cx));
+                shell.viewport_width = 1200.0;
+                assert!(!shell.right_pane_open(cx));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
     fn pane_geometry_uses_one_animation_time_per_frame(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -10562,7 +10962,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (u64, Entity<crate::browser::BrowserSurface>) {
-        if !self.right_pane_open(cx) {
+        if !self.right_pane_content_visible(cx) {
             self.toggle_right_pane(cx);
         }
         // Hosted Macs can expose only a 1024px desktop. Use the app's

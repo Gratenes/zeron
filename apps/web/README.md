@@ -1,6 +1,6 @@
 # Zeron web client
 
-The browser client renders the shared `zeron_ui` application and connects to a signed-in remote device through the edge browser-session and DeviceRoom APIs. It does not start an engine, use local IPC, or connect to a loopback gateway.
+The browser client renders the shared `zeron_ui` application and automatically selects one online account device for its initial transport through the edge browser-session and DeviceRoom APIs. The shared app still routes device-targeted work to other account devices. It does not start an engine, use local IPC, or connect to a loopback gateway.
 
 ## Local rendering versus full integration
 
