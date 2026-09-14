@@ -138,6 +138,15 @@ impl Transcript {
             .pb(px(12.0));
         for (ix, top) in tree.blocks.iter().enumerate() {
             let opts = RenderOptions {
+                workspace_root: {
+                    let state = self.state.read(cx);
+                    self.chat_id
+                        .as_deref()
+                        .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+                        .or_else(|| state.selected_chat_row())
+                        .and_then(|chat| chat.cwd.as_deref())
+                        .map(SharedString::from)
+                },
                 tasks: None, // Read-only; ACP exposes no plan approval/edit API.
                 media: None,
                 row_key: row.id.clone(),
