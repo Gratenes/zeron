@@ -133,6 +133,7 @@ func TestManagedAdapterExitsWithParent(t *testing.T) {
 				} else if adapter.Address == "" {
 					t.Fatal("missing server readiness")
 				}
+				deadline := time.Now().Add(5 * time.Second)
 				if crash {
 					_ = owner.Process.Kill()
 				} else {
@@ -141,15 +142,24 @@ func TestManagedAdapterExitsWithParent(t *testing.T) {
 				select {
 				case <-exited:
 					cleanExit = true
-				case <-time.After(5 * time.Second):
+				case <-time.After(time.Until(deadline)):
 					t.Fatal("adapter survived owner exit")
 				}
 				if mode == "connect" {
-					listener, err := net.Listen("tcp4", strings.TrimPrefix(adapter.URL, "http://"))
-					if err != nil {
-						t.Fatalf("adapter left loopback port occupied: %v", err)
+					// stderr EOF can precede kernel socket teardown on Windows.
+					// Keep the same overall exit deadline: require an actual
+					// successful exclusive bind, not just a dead process/closed pipe.
+					for {
+						listener, err := net.Listen("tcp4", strings.TrimPrefix(adapter.URL, "http://"))
+						if err == nil {
+							listener.Close()
+							break
+						}
+						if time.Now().After(deadline) {
+							t.Fatalf("adapter left loopback port occupied after exit deadline: %v", err)
+						}
+						time.Sleep(10 * time.Millisecond)
 					}
-					listener.Close()
 				}
 			})
 		}
