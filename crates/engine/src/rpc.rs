@@ -260,6 +260,8 @@ fn tool_file_path(call: &ToolCall) -> Option<&str> {
         | ToolCall::WebSearch { .. }
         | ToolCall::Todo { .. }
         | ToolCall::Document { .. }
+        | ToolCall::Answer { .. }
+        | ToolCall::Report { .. }
         | ToolCall::Mcp { .. }
         | ToolCall::Unknown { .. } => None,
     }

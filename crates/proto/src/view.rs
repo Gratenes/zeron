@@ -423,6 +423,8 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
         ToolCall::WebFetch { url, .. } => ("Fetch", url.clone()),
         ToolCall::WebSearch { query } => ("Web", query.clone()),
         ToolCall::Document { title } => ("Document", title.clone()),
+        ToolCall::Answer { title } => ("Answer", title.clone()),
+        ToolCall::Report { title } => ("Report", title.clone()),
 
         ToolCall::Todo { items } => {
             let done = items.iter().filter(|i| i.done).count();
@@ -478,9 +480,11 @@ pub fn tool_group_summary(tools: &[(crate::ToolCall, bool)]) -> String {
             }
             ToolCall::WebFetch { .. } => fetches += 1,
             ToolCall::Todo { .. } => todos += 1,
-            ToolCall::Document { .. } | ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => {
-                other += 1
-            }
+            ToolCall::Document { .. }
+            | ToolCall::Answer { .. }
+            | ToolCall::Report { .. }
+            | ToolCall::Mcp { .. }
+            | ToolCall::Unknown { .. } => other += 1,
         }
     }
     let mut segments: Vec<String> = Vec::new();

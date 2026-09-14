@@ -986,6 +986,23 @@ mod tests {
         assert_eq!(sanitize_tool_call(&clean), clean);
     }
 
+    #[test]
+    fn sanitize_preserves_semantic_markdown_kind_without_input_json() {
+        for call in [
+            ToolCall::Answer {
+                title: "Answered".into(),
+            },
+            ToolCall::Report {
+                title: "Report findings".into(),
+            },
+        ] {
+            assert_eq!(sanitize_tool_call(&call), call);
+            let wire = serde_json::to_string(&call).unwrap();
+            assert!(!wire.contains("full_answer"));
+            assert!(!wire.contains("payload"));
+        }
+    }
+
     /// A spawn keeps the two short identifiers its chip names the child by and
     /// drops the prompt — the whole point of the whitelist. Still a fixpoint.
     #[test]

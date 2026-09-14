@@ -41,6 +41,12 @@ checked-in bundle is reproducibly generated from `connectivity/tailcat/go.mod`,
 `go.sum`, and the corresponding verified Go module-cache files by
 `connectivity/tailcat/licenses/generate.py`; license text is not inferred from
 or fetched through repository URLs.
+## Symbols
+
+Zeron bundles the SVG icon set and filename/folder associations from
+[Symbols](https://github.com/miguelsolorio/vscode-symbols/tree/296ef1b62287fb2315cb5651e552e09e8c8e1de8).
+Symbols is MIT licensed. The complete upstream license and copyright notice is
+retained at `crates/ui/assets/file-icons/LICENSE.symbols`.
 
 ## Bundled theme palette adaptations
 

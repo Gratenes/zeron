@@ -204,6 +204,34 @@ fn arg_from_title(title: &str) -> Option<String> {
 /// in how much structure they put in `rawInput`, so every arm has a fallback.
 /// Title is only used when it looks like a real arg — never a placeholder
 /// label or markdown-escaped summary.
+const SEMANTIC_CONTENT_META_KEY: &str = "mimir.dev/tool-content";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticContent {
+    Answer,
+    Report,
+}
+
+/// Mimir's public, versioned ACP extension is the sole semantic-content signal.
+/// Its small exact shape survives bounded raw input, sparse completion, and replay.
+fn semantic_content(update: &Value) -> Option<SemanticContent> {
+    let marker = update
+        .get("_meta")?
+        .get(SEMANTIC_CONTENT_META_KEY)?
+        .as_object()?;
+    if marker.len() != 3
+        || marker.get("version").and_then(Value::as_u64) != Some(1)
+        || marker.get("format").and_then(Value::as_str) != Some("markdown")
+    {
+        return None;
+    }
+    match marker.get("kind").and_then(Value::as_str)? {
+        "answer" => Some(SemanticContent::Answer),
+        "report" => Some(SemanticContent::Report),
+        _ => None,
+    }
+}
+
 fn typed_call(update: &Value) -> ToolCall {
     let kind = update
         .get("kind")
@@ -217,6 +245,22 @@ fn typed_call(update: &Value) -> ToolCall {
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
     };
+    if let Some(semantic) = semantic_content(update) {
+        let title = if title.is_empty() {
+            match semantic {
+                SemanticContent::Answer => "Answer",
+                SemanticContent::Report => "Report",
+            }
+            .into()
+        } else {
+            title
+        };
+        return match semantic {
+            SemanticContent::Answer => ToolCall::Answer { title },
+            SemanticContent::Report => ToolCall::Report { title },
+        };
+    }
+
     match kind {
         "execute" => ToolCall::Exec {
             command: raw_str("command")
@@ -479,7 +523,7 @@ fn bounded_input(input: &Value) -> Value {
 fn map_tool_update(update: &Value, snapshot: &mut ToolSnapshot) -> Vec<AgentEvent> {
     let id = str_field(update, "toolCallId");
     let has_shape = update.get("sessionUpdate").and_then(Value::as_str) == Some("tool_call")
-        || ["kind", "title", "rawInput", "locations"]
+        || ["kind", "title", "rawInput", "locations", "_meta"]
             .iter()
             .any(|key| update.get(*key).is_some_and(|v| !v.is_null()))
         || tool_diff(update).is_some();
@@ -711,6 +755,116 @@ mod tests {
             "content": { "type": "image", "data": "...", "mimeType": "image/png" },
         });
         assert_eq!(map_update(&image), Vec::new());
+    }
+
+    #[test]
+    fn semantic_marker_survives_truncated_input_and_sparse_completion() {
+        let markdown = "### Findings\n\n- **Owner:** Mimir";
+        let marker = json!({
+            "mimir.dev/tool-content": {"version": 1, "format": "markdown", "kind": "report"}
+        });
+        let mut normalizer = UpdateNormalizer::default();
+        let started = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "report-1",
+            "kind": "other",
+            "title": "Report findings",
+            "rawInput": {"padding": "x".repeat(SHAPE_FIELD_CAP * 2)},
+            "_meta": marker
+        }));
+        assert!(matches!(
+            started.as_slice(),
+            [AgentEvent::ToolCall {
+                call: ToolCall::Report { .. },
+                ..
+            }]
+        ));
+
+        let completed = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "report-1",
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": markdown}}]
+        }));
+        assert!(matches!(
+            completed.as_slice(),
+            [AgentEvent::ToolResult { is_error: false, output: Some(output), .. }] if output == markdown
+        ));
+    }
+
+    #[test]
+    fn semantic_answer_uses_public_markdown_without_input_schema_inference() {
+        let answer = "### Result\n\nUse **bold** and `code`.";
+        let events = map_update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "answer-1",
+            "kind": "think",
+            "title": "Answered",
+            "status": "completed",
+            "rawInput": {"not_the_answer_schema": true},
+            "_meta": {"mimir.dev/tool-content": {"version": 1, "format": "markdown", "kind": "answer"}},
+            "content": [{"type": "content", "content": {"type": "text", "text": answer}}]
+        }));
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AgentEvent::ToolCall { call: ToolCall::Answer { .. }, .. },
+                AgentEvent::ToolResult { is_error: false, output: Some(output), .. }
+            ] if output == answer
+        ));
+    }
+
+    #[test]
+    fn failed_semantic_report_preserves_the_actual_diagnostic() {
+        let mut normalizer = UpdateNormalizer::default();
+        normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "report-failed",
+            "kind": "other",
+            "title": "Report findings",
+            "rawInput": {"summary": "Submitted content must not be rendered"},
+            "_meta": {"mimir.dev/tool-content": {"version": 1, "format": "markdown", "kind": "report"}}
+        }));
+        let events = normalizer.map_update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "report-failed",
+            "status": "failed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "Invalid subagent report: missing field `payload`"}}]
+        }));
+        assert!(matches!(
+            events.as_slice(),
+            [AgentEvent::ToolResult { is_error: true, output: Some(output), .. }]
+                if output == "Invalid subagent report: missing field `payload`"
+        ));
+    }
+
+    #[test]
+    fn absent_or_future_semantic_markers_remain_unknown() {
+        for marker in [
+            Value::Null,
+            json!({"mimir.dev/tool-content": {"version": 2, "format": "markdown", "kind": "report"}}),
+            json!({"mimir.dev/tool-content": {"version": 1, "format": "markdown", "kind": "future"}}),
+            json!({"mimir.dev/tool-content": {"version": 1, "format": "markdown", "kind": "report", "extra": true}}),
+        ] {
+            let mut update = json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "ordinary",
+                "kind": "other",
+                "title": "Report findings",
+                "rawInput": {"role": "explore", "payload": {"kind": "investigation"}}
+            });
+            if !marker.is_null() {
+                update["_meta"] = marker;
+            }
+            let events = map_update(&update);
+            assert!(matches!(
+                events.as_slice(),
+                [AgentEvent::ToolCall {
+                    call: ToolCall::Unknown { .. },
+                    ..
+                }]
+            ));
+        }
     }
 
     #[test]

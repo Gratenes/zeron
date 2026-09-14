@@ -199,6 +199,16 @@ pub enum ToolCall {
     Document {
         title: String,
     },
+    /// Public Markdown returned by a schema-identified answer tool.
+    /// The body remains in ToolResult/output storage, never in tool input.
+    Answer {
+        title: String,
+    },
+    /// Field-oriented Markdown generated from a validated structured report.
+    /// Raw report JSON is deliberately absent from this durable semantic call.
+    Report {
+        title: String,
+    },
 
     Todo {
         #[serde(default)]
@@ -573,6 +583,28 @@ mod tests {
             crate::view::tool_chip_content(&call),
             ("Document", "Implementation plan".into())
         );
+    }
+
+    #[test]
+    fn semantic_markdown_calls_round_trip_without_input_json() {
+        for (call, expected) in [
+            (
+                ToolCall::Answer {
+                    title: "Answered".into(),
+                },
+                serde_json::json!({"kind":"answer","title":"Answered"}),
+            ),
+            (
+                ToolCall::Report {
+                    title: "Report findings".into(),
+                },
+                serde_json::json!({"kind":"report","title":"Report findings"}),
+            ),
+        ] {
+            let wire = serde_json::to_value(&call).unwrap();
+            assert_eq!(wire, expected);
+            assert_eq!(serde_json::from_value::<ToolCall>(wire).unwrap(), call);
+        }
     }
 
     #[test]
