@@ -1265,9 +1265,13 @@ mod tests {
             },
             escape_stops_active_agent: true,
             composer_send_behavior: ComposerSendBehavior::ModEnter,
-            appshots_enabled: false,
-            appshot_sound_enabled: true,
-            appshot_destination: crate::appshots::AppshotDestination::NewSession,
+            appshots_enabled: cfg!(any(target_os = "macos", target_os = "linux")),
+            appshot_sound_enabled: !cfg!(any(target_os = "macos", target_os = "linux")),
+            appshot_destination: if cfg!(any(target_os = "macos", target_os = "linux")) {
+                crate::appshots::AppshotDestination::NewSession
+            } else {
+                crate::appshots::AppshotDestination::Automatic
+            },
             appearance: crate::appearance::AppearanceMode::Light,
             git_history_columns: GitHistoryColumns {
                 author: false,
@@ -1309,6 +1313,36 @@ mod tests {
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""codeFencesFitContent": true"#));
     }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn unsupported_platform_omits_appshot_settings_and_loads_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = UiSettings {
+            appshots_enabled: true,
+            appshot_sound_enabled: false,
+            appshot_destination: crate::appshots::AppshotDestination::NewSession,
+            ..UiSettings::default()
+        };
+        settings.save(dir.path()).unwrap();
+        let path = UiSettings::path(dir.path());
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for key in ["appshotsEnabled", "appshotSoundEnabled", "appshotDestination"] {
+            assert!(json.get(key).is_none(), "unsupported setting {key} must be omitted");
+        }
+        assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
+
+        // Settings copied from a supported desktop must also be ignored.
+        let mut json = json;
+        json["appshotsEnabled"] = serde_json::json!(true);
+        json["appshotSoundEnabled"] = serde_json::json!(false);
+        json["appshotDestination"] =
+            serde_json::to_value(crate::appshots::AppshotDestination::NewSession).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
+    }
+
 
     #[test]
     fn stale_revision_cannot_be_considered_the_latest_save() {
