@@ -1,0 +1,107 @@
+{
+  // Zeron edge: per-session + per-workspace Loro sync DOs, per-device
+  // relay DOs, R2 blobs, and the absorbed WorkOS auth routes.
+  // Design: loro-sessions §2 (topology), §3 (persistence), §6.1 (diff
+  // sidecar), §8 (device-room streams), §1.2 (R2 attachments), §3.3 (R2
+  // backups); ARCHITECTURE.md §6.
+  // NOTE: the worker name and R2 bucket names keep the historical "comet"
+  // prefix on purpose — Durable Object storage is bound to the script name,
+  // so renaming the worker would orphan every session/registry/chat room.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Deployed by .github/workflows/deploy.yml on pushes to main that touch
+  // edge/ or web build inputs (CLOUDFLARE_API_TOKEN repo secret).
+  "name": "comet-native-edge",
+  "main": "src/production.ts",
+  "compatibility_date": "2026-07-01",
+  "account_id": "b57dde68ee5964dccc025437b5478a5b",
+  "workers_dev": true,
+  // Public hostname on the zeron.sh zone, plus the install surface carved out
+  // of the landing host: path routes beat the landing worker's custom
+  // domain, so `curl -fsSL https://zeron.sh/install.sh | sh` installs Zeron
+  // while the rest of zeron.sh serves the landing page.
+  "routes": [
+    { "pattern": "web.zeron.sh", "custom_domain": true },
+    { "pattern": "edge.zeron.sh", "custom_domain": true },
+    { "pattern": "preview.edge.zeron.sh", "custom_domain": true },
+
+    { "pattern": "*.preview.edge.zeron.sh/*", "zone_name": "zeron.sh" },
+    { "pattern": "zeron.sh/install.sh", "zone_name": "zeron.sh" },
+    { "pattern": "zeron.sh/releases/*", "zone_name": "zeron.sh" },
+    // Legacy comet hostnames — keep until 0.1.x clients are gone.
+    { "pattern": "edge.comet.zeron.sh", "custom_domain": true },
+    { "pattern": "comet.zeron.sh/install.sh", "zone_name": "zeron.sh" },
+    { "pattern": "comet.zeron.sh/releases/*", "zone_name": "zeron.sh" }
+  ],
+  // Worker-first is essential: these assets must never be served on preview
+  // or native API hostnames. production.ts restricts them to the web origin.
+  "assets": {
+    "directory": "../apps/web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "none",
+    "run_worker_first": true
+  },
+  // Serve src/install.sh as a string (the /install.sh route).
+  "rules": [{ "type": "Text", "globs": ["**/*.sh"], "fallthrough": true }],
+  // loro-crdt's default entry loads its WASM via URL fetch, which workerd
+  // cannot do at runtime; the base64 entry inlines the module instead.
+  "alias": {
+    "loro-crdt": "loro-crdt/base64"
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_ROOMS", "class_name": "SessionRoom" },
+      { "name": "DEVICE_ROOMS", "class_name": "DeviceRoom" },
+      { "name": "BROWSER_SESSIONS", "class_name": "BrowserSessionStore" },
+      { "name": "PREVIEW_ROOMS", "class_name": "PreviewRoom" },
+      { "name": "REGISTRY_ROOMS", "class_name": "RegistryRoom" },
+      { "name": "CHAT_ROOMS", "class_name": "ChatRoom" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SessionRoom", "DeviceRoom"]
+    },
+    {
+      // Workspace registry (docs/registry-sync.md) — the row-table sidebar
+      // sync that replaces the Loro workspace doc rooms.
+      "tag": "v2",
+      "new_sqlite_classes": ["RegistryRoom"]
+    },
+    {
+      // chat2 session rooms (docs/chat2-sync.md) — dumb log relays that
+      // replace SessionRoom's loro-aware s2 rooms.
+      "tag": "v3",
+      "new_sqlite_classes": ["ChatRoom"]
+    },
+    { "tag": "v4", "new_sqlite_classes": ["PreviewRoom"] },
+    { "tag": "v5", "new_sqlite_classes": ["BrowserSessionStore"] }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BLOBS",
+      "bucket_name": "comet-native-blobs"
+    },
+    {
+      // Release artifacts for /releases/* (curl-install + dmg downloads).
+      "binding": "RELEASES",
+      "bucket_name": "comet-native-releases"
+    }
+  ],
+  "vars": {
+    // Preserve the production WorkOS app used by existing native clients.
+    // Before rollout, verify these trust anchors and register the web callback.
+    // WORKOS_API_KEY and BROWSER_SESSION_KEY are remote Worker secrets.
+    "WORKOS_CLIENT_ID": "client_01KWD0EAKZKD50YCQJNYSRE4BY",
+    "AUTH_MODE": "workos",
+    "WORKOS_BROWSER_ORIGIN": "https://web.zeron.sh",
+    "WORKOS_ISSUER": "https://api.workos.com/user_management/client_01KWD0EAKZKD50YCQJNYSRE4BY",
+    "WORKOS_JWKS_URL": "https://api.workos.com/sso/jwks/client_01KWD0EAKZKD50YCQJNYSRE4BY",
+    "BROWSER_PREVIEW_ORIGIN": "https://preview.edge.zeron.sh"
+  },
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  }
+}

@@ -430,10 +430,21 @@ impl EngineCore {
                 }
             }
         });
-        zeron_rpc::HostRelay::spawn(
+        let previews = self.previews.clone();
+        let on_frame: zeron_rpc::FrameHandler = Arc::new(move |kind, frame| {
+            let previews = previews.clone();
+            Box::pin(async move {
+                if kind != zeron_preview::remote::KIND {
+                    return None;
+                }
+                previews.relay_request(&frame).await.ok()
+            })
+        });
+        zeron_rpc::HostRelay::spawn_with_frame(
             config,
             Arc::new(rpc::RemoteEngineRpc(self.rpc_service())),
             on_nudge,
+            Some(on_frame),
         )
     }
 
