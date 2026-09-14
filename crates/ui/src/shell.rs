@@ -1137,6 +1137,16 @@ async fn stop_synced_runtime(
     }
 }
 
+// Paired profiles deliberately have no cloud-account name or email. Keep the
+// primary row nonempty so its avatar and secondary label retain their layout.
+fn paired_identity_label<'a>(name: Option<&'a str>, email: &'a str) -> &'a str {
+    [name.unwrap_or(""), email]
+        .into_iter()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .unwrap_or("Paired workspace")
+}
+
 fn account_menu_action(scope: Option<WorkspaceScope>, flow: SyncFlow) -> Option<AccountMenuAction> {
     match scope {
         Some(WorkspaceScope::Local) => match flow {
@@ -5454,11 +5464,17 @@ impl Shell {
             Some(WorkspaceScope::Synced) | None => {
                 let line: SharedString = user
                     .as_ref()
-                    .map(|u| u.name.clone().unwrap_or_else(|| u.email.clone()).into())
+                    .map(|u| {
+                        paired_identity_label(u.name.as_deref(), &u.email)
+                            .to_owned()
+                            .into()
+                    })
                     .unwrap_or_else(|| SharedString::from("Not signed in"));
                 let email = user
                     .as_ref()
-                    .map(|u| SharedString::from(u.email.clone()))
+                    .map(|u| u.email.trim())
+                    .filter(|email| !email.is_empty())
+                    .map(|email| SharedString::from(email.to_owned()))
                     .unwrap_or_else(|| line.clone());
                 (line, Some("Alpha".into()), email)
             }
@@ -9042,6 +9058,25 @@ impl Render for Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paired_sidebar_identity_never_has_an_empty_primary_line() {
+        assert_eq!(paired_identity_label(None, ""), "Paired workspace");
+        assert_eq!(paired_identity_label(Some(""), ""), "Paired workspace");
+        assert_eq!(paired_identity_label(Some("  "), " \t"), "Paired workspace");
+        assert_eq!(
+            paired_identity_label(Some("  Ada  "), "ada@example.com"),
+            "Ada"
+        );
+        assert_eq!(
+            paired_identity_label(Some(" "), " ada@example.com "),
+            "ada@example.com"
+        );
+        assert_eq!(
+            paired_identity_label(None, "ada@example.com"),
+            "ada@example.com"
+        );
+    }
 
     #[test]
     fn every_default_shortcut_binds_on_this_platform() {
