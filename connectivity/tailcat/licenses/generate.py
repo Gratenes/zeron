@@ -52,6 +52,7 @@ def run(go: str, *args: str, env: dict[str, str] | None = None) -> str:
         check=True,
         stdout=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
     ).stdout
 
 
