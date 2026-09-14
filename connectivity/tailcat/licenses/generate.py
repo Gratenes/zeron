@@ -157,7 +157,7 @@ def generate(go: str, destination: Path) -> None:
         go_outputs.append(output)
     manifest.append(f"Go standard library/runtime\t{goversion}\t{','.join(go_outputs)}")
     dependencies = destination / "DEPENDENCIES.txt"
-    dependencies.write_text("\n".join(manifest) + "\n")
+    dependencies.write_text("\n".join(manifest) + "\n", encoding="utf-8", newline="\n")
     dependencies.chmod(0o644)
     targets = ", ".join(f"{goos}/{goarch}" for goos, goarch in TARGETS)
     readme = destination / "README.md"
@@ -169,7 +169,9 @@ def generate(go: str, destination: Path) -> None:
         f"Generated for `{PACKAGE}` on {targets} with {goversion}. The generator resolves the "
         "dependency closure from the checked-in `go.mod`/`go.sum` and copies bytes from the "
         "corresponding verified Go module-cache directories. It does not download license text "
-        "from repository URLs.\n"
+        "from repository URLs.\n",
+        encoding="utf-8",
+        newline="\n",
     )
     readme.chmod(0o644)
 

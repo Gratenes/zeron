@@ -1,0 +1,2 @@
+# Preserve the exact upstream license bytes; --check compares byte-for-byte.
+bundle/** -text
