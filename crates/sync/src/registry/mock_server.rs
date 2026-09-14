@@ -1,9 +1,8 @@
-//! In-process registry server speaking the same JSON WS protocol as
-//! `edge/src/registry-room.ts`, built on the SAME merge fn the client uses
-//! (`zeron_doc::apply_op`). Test infrastructure only (`mock-server` feature):
-//! zeron-sync's client tests and zeron-engine's two-engine integration tests
-//! run against this; TS↔Rust interop is proven separately against a real DO
-//! by the `--ignored` live-edge tests and scripts/e2e-smoke.sh.
+//! In-process registry server speaking the durable peer's JSON WebSocket
+//! protocol and using the same [`zeron_doc::apply_op`] merge function as clients.
+//! Test infrastructure only (`mock-server` feature): client and engine tests use
+//! this for deterministic fault injection; real adapter/peer coverage lives in
+//! `real_tailcat`, `peer_preservation`, and `peer_clients`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

@@ -6,12 +6,8 @@
 // client-minted message id until the host writes the real entry with the
 // same id.
 //
-// The registry names the room generation (M2): the store connects only once
-// the chat row says roomGen 2. A gen-1 chat renders nothing and waits for
-// the host's migration sweep to flip it — the local doc is always the chat2
-// lineage; a cached pre-chat2 snapshot is never imported (unrelated Loro
-// histories would duplicate every message), only mined for our own pending
-// commands (M3) and left on disk as rollback.
+// The registry names the room generation: the store connects only once the
+// chat row says roomGen 2. Fresh local state catches up from the paired peer.
 
 import Foundation
 import Loro
@@ -71,11 +67,14 @@ final class SessionStore {
     @ObservationIgnored private var cursor: UInt64 = 0
     private var chatRoom: ChatRoomClient?
     private var subscriptions: [Subscription] = []
-    private let config: AppConfig
+    private var config: AppConfig
     /// Registry roomGen for this chat (M2): connect only at >= 2. One-way —
     /// the registry never walks a chat back to s2.
     @ObservationIgnored private var roomGen = 1
     @ObservationIgnored private var started = false
+
+    private(set) var attachedPeerURL: URL?
+    @ObservationIgnored private var hydrated = false
     /// Preload holds the dial (AppModel staggers the release) so a cold
     /// launch doesn't stampede N TLS handshakes against the registry dial
     /// on a thin link. The disk snapshot still hydrates immediately —
@@ -92,6 +91,7 @@ final class SessionStore {
         self.config = config
         self.offline = offline
         AttachmentImageCache.shared.configure(config: config)
+        hydrateFromDisk()
     }
 
     // MARK: Attachments (uploads target the chat's host device)
@@ -145,30 +145,18 @@ final class SessionStore {
 
     @ObservationIgnored private var saver: DocSaver?
 
-    func start(holdDial: Bool = false) {
-        guard !started, !offline else { return }
-        started = true
-        self.holdDial = holdDial
-        // Local-first: the last-synced chat2 snapshot renders instantly (even
-        // when the host device is offline); the join backfills incrementally
-        // from its cursor.
+    private func hydrateFromDisk() {
+        guard !hydrated, !offline else { return }
+        hydrated = true
         if let saved = DocDisk.loadChat2(into: doc, id: chatId) {
             cursor = saved
             project()
-        } else if DocDisk.legacySnapshotExists(id: chatId) {
-            // M3 discard-and-adopt: this device's cached doc predates the
-            // chat2 lineage. Carry over OUR OWN unresolved commands as fresh
-            // entries; the chat2 catch-up repopulates the transcript.
-            adoptLegacyCommands()
         }
+        // Local persistence exists while offline; transport is attached later.
         saver = DocSaver { [weak self] in
             guard let self else { return }
             DocDisk.saveChat2(doc: self.doc, id: self.chatId, cursor: self.cursor)
         }
-        // Subscription BEFORE any connect: every local commit lands in the
-        // client when it exists; commits made earlier are covered by the
-        // first-contact full-log push below (cursor 0 whenever no client has
-        // ever acked — see connectIfReady).
         let localSub = doc.subscribeLocalUpdate { [weak self] update in
             let bytes = Data(update)
             Task { @MainActor [weak self] in
@@ -180,6 +168,24 @@ final class SessionStore {
             }
         }
         subscriptions.append(localSub)
+    }
+
+    func attachNetwork(config: AppConfig, holdDial: Bool = false) {
+        precondition(config.profileId == self.config.profileId && config.deviceId == self.config.deviceId)
+        self.config = config
+
+        hostRelay = nil
+        AttachmentImageCache.shared.configure(config: config)
+        start(holdDial: holdDial)
+    }
+
+    func start(holdDial: Bool = false) {
+        guard !started, !offline else { return }
+        started = true
+
+        attachedPeerURL = config.peerURL
+        self.holdDial = holdDial
+        hydrateFromDisk()
         connectIfReady()
         project()
         // A relaunch mid-send: re-arm the attachment escorts for any of our
@@ -198,6 +204,14 @@ final class SessionStore {
 
     /// Still holding the preload dial (never connected) — the kick sweep
     /// skips these so a foreground/path flap can't stampede held sockets.
+    /// Cache preloads reserve their eventual dial slot without creating a
+    /// client against the restore-only loopback endpoint.
+    func holdNetworkUntilReleased() {
+        guard !started else { return }
+        holdDial = true
+    }
+
+
     var isDialHeld: Bool { holdDial }
 
     /// End a preload dial-hold: an open view (or the stagger timer) wants
@@ -308,42 +322,6 @@ final class SessionStore {
         Task { await client.start() }
     }
 
-    /// Mine the retired s2 snapshot for OUR OWN still-pending commands and
-    /// re-queue them into the fresh lineage (doc_host.rs M3 requeue: same
-    /// command ids — the host's processed_commands ledger guards double
-    /// execution; basedOn is dropped, its turn ids don't exist here).
-    private func adoptLegacyCommands() {
-        let legacy = LoroDoc()
-        guard DocDisk.load(into: legacy, id: chatId),
-              let root = legacy.getDeepValue().mapValue,
-              let commands = root["commands"]?.listValue, !commands.isEmpty else { return }
-        let now = nowMs()
-        var carried = 0
-        let fresh = doc.getList(id: "commands")
-        for value in commands {
-            guard let m = value.mapValue,
-                  m["status"]?.stringValue == "pending",
-                  m["issuedBy"]?.stringValue == config.deviceId,
-                  let id = m["id"]?.stringValue,
-                  let kind = m["kind"]?.stringValue,
-                  let payload = m["payload"] else { continue }
-            if let expires = m["expiresAt"]?.i64Value, expires <= now { continue }
-            do {
-                let map = try fresh.pushContainer(child: LoroMap())
-                try map.insert(key: "id", v: id)
-                try map.insert(key: "kind", v: kind)
-                try map.insert(key: "payload", v: payload)
-                try map.insert(key: "issuedBy", v: config.deviceId)
-                try map.insert(key: "issuedAt", v: m["issuedAt"]?.i64Value ?? now)
-                try map.insert(key: "expiresAt", v: m["expiresAt"]?.i64Value ?? (now + commandDefaultTtlMs))
-                try map.insert(key: "status", v: "pending")
-                carried += 1
-            } catch {}
-        }
-        guard carried > 0 else { return }
-        doc.commit()
-        roomLog.info("chat2 \(self.chatId, privacy: .public): adopt carried \(carried) pending command(s) from the s2 lineage")
-    }
 
     /// Backgrounding hook: persist immediately.
     func flushToDisk() {
@@ -706,15 +684,14 @@ final class SessionStore {
                 do {
                     while let transfer = pending.first {
                         let doneBytes = totalBytes - pending.reduce(0) { $0 + $1.data.count }
-                        _ = try await uploadAttachmentChunked(
-                            relay: self.relayToHost(),
-                            name: transfer.name, data: transfer.data,
-                            uploadId: transfer.uploadId) { [weak self] fraction in
+                        try await CustodyUploader.upload(
+                            config: self.config, targetDevice: self.hostDeviceId ?? "",
+                            uploadId: transfer.uploadId, name: transfer.name,
+                            data: transfer.data) { [weak self] fraction in
                             self?.transferProgress = min(
                                 (Double(doneBytes) + fraction * Double(transfer.data.count))
                                     / Double(totalBytes), 0.99)
                         }
-                        UploadStash.delete(uploadId: transfer.uploadId)
                         pending.removeFirst()
                     }
                     self.nudgeHost()

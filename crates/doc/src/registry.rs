@@ -9,10 +9,9 @@
 //!   reconnect (idempotent by strict-`>` clock compare);
 //! - an HLC clock stamping every local write.
 //!
-//! The merge function [`apply_op`] mirrors `edge/src/registry-core.ts` 1:1 —
-//! the shared test vectors live in both files; change them together. The
-//! typed API mirrors the old `WorkspaceDoc` surface so `WorkspaceHost` is a
-//! drop-in swap.
+//! [`apply_op`] is the shared client/peer merge rule; test vectors exercise both
+//! optimistic replicas and durable peer state. The typed API mirrors the old
+//! `WorkspaceDoc` surface so `WorkspaceHost` remains a drop-in swap.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -75,7 +74,7 @@ impl HlcClock {
     }
 }
 
-// ── rows and ops (wire-compatible with edge/src/registry-core.ts) ───────────
+// ── rows and operations ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -160,9 +159,8 @@ impl RowOp {
     }
 }
 
-/// Apply one op to a row — the 1:1 mirror of `applyOp` in
-/// `edge/src/registry-core.ts`. Returns the new row (`None` only for an
-/// `update` on a missing row) and whether anything changed.
+/// Apply one operation to a durable registry row. Returns the merged row
+/// (`None` only for an `update` on a missing row) and whether it changed.
 pub fn apply_op(row: Option<&RegistryRow>, op: &RowOp) -> (Option<RegistryRow>, bool) {
     if op.op == OpKind::Delete {
         return match row {
@@ -1189,129 +1187,6 @@ impl RegistryDoc {
             sessions: self.read_sessions()?,
         })
     }
-
-    // ── migration ───────────────────────────────────────────────────────────
-
-    /// Seed from the legacy Loro workspace doc's materialized state (first
-    /// boot after the update). Every row becomes a pending upsert whose HLC
-    /// derives from the row's own newest timestamp — historical, so any
-    /// genuinely newer live write beats the migrated value; identical across
-    /// devices, so N devices seeding the same converged doc is idempotent
-    /// (equal values, deterministic device tie-break).
-    pub fn seed_from_workspace(&mut self, state: &WorkspaceState) -> Result<usize, DocError> {
-        let mut ops: Vec<RowOp> = Vec::new();
-        let mut seed = |kind: &str, id: &str, ms: i64, set: BTreeMap<String, Value>| {
-            ops.push(RowOp {
-                kind: kind.to_string(),
-                id: id.to_string(),
-                op: OpKind::Upsert,
-                set: Some(set),
-                hlc: encode_hlc(ms.max(1), 0, "migration"),
-                clocks: None,
-            });
-        };
-        for device in &state.devices {
-            let ms = newest(&[device.last_seen_at, device.created_at]);
-            seed(
-                KIND_DEVICES,
-                &device.id,
-                ms,
-                fields([
-                    ("id", json!(device.id)),
-                    ("name", json!(device.name)),
-                    ("platform", json!(device.platform)),
-                    ("lastSeenAt", opt_ms(device.last_seen_at)),
-                    ("createdAt", opt_ms(device.created_at)),
-                    ("version", opt_str(device.version.as_deref())),
-                    ("capabilities", json!(device.capabilities)),
-                ]),
-            );
-        }
-        for space in &state.spaces {
-            let ms = newest(&[space.git_checked_at, Some(space.created_at)]);
-            seed(
-                KIND_SPACES,
-                &space.id,
-                ms,
-                fields([
-                    ("id", json!(space.id)),
-                    ("deviceId", json!(space.device_id)),
-                    ("path", json!(space.path)),
-                    ("name", opt_str(space.name.as_deref())),
-                    ("gitDetected", json!(space.git_detected)),
-                    ("gitCheckedAt", opt_ms(space.git_checked_at)),
-                    ("checkoutId", opt_str(space.checkout_id.as_deref())),
-                    ("createdAt", json!(space.created_at.timestamp_millis())),
-                ]),
-            );
-        }
-        for chat in &state.chats {
-            let ms = newest(&[
-                chat.last_message_at,
-                chat.last_seen_at,
-                Some(chat.created_at),
-            ]);
-            let config = match &chat.config {
-                Some(config) => serde_json::to_value(config)?,
-                None => Value::Null,
-            };
-            seed(
-                KIND_CHATS,
-                &chat.id,
-                ms,
-                fields([
-                    ("id", json!(chat.id)),
-                    ("deviceId", json!(chat.device_id)),
-                    ("title", opt_str(chat.title.as_deref())),
-                    ("archived", json!(chat.archived)),
-                    ("cwd", opt_str(chat.cwd.as_deref())),
-                    ("branch", opt_str(chat.branch.as_deref())),
-                    ("checkoutId", opt_str(chat.checkout_id.as_deref())),
-                    ("config", config),
-                    (
-                        "lastMessagePreview",
-                        opt_str(chat.last_message_preview.as_deref()),
-                    ),
-                    ("lastMessageAt", opt_ms(chat.last_message_at)),
-                    ("createdAt", json!(chat.created_at.timestamp_millis())),
-                    (
-                        "harnessSessionId",
-                        opt_str(chat.harness_session_id.as_deref()),
-                    ),
-                    (
-                        "harnessSessionCwd",
-                        opt_str(chat.harness_session_cwd.as_deref()),
-                    ),
-                    ("spaceId", opt_str(chat.space_id.as_deref())),
-                    ("lastSeenAt", opt_ms(chat.last_seen_at)),
-                ]),
-            );
-        }
-        for session in &state.sessions {
-            let ms = newest(&[Some(session.updated_at), session.started_at]);
-            seed(
-                KIND_SESSIONS,
-                &session.chat_id,
-                ms,
-                fields([
-                    ("chatId", json!(session.chat_id)),
-                    ("deviceId", json!(session.device_id)),
-                    ("status", serde_json::to_value(session.status)?),
-                    ("goal", serde_json::to_value(&session.goal)?),
-                    ("goalControl", json!(session.goal_control)),
-                    ("lastCompletedTurn", json!(session.last_completed_turn)),
-                    ("startedAt", opt_ms(session.started_at)),
-                    ("updatedAt", json!(session.updated_at.timestamp_millis())),
-                ]),
-            );
-        }
-        let count = ops.len();
-        // Chunk so a huge legacy workspace never exceeds the server's batch cap.
-        for chunk in ops.chunks(400) {
-            self.enqueue_ops(chunk.to_vec());
-        }
-        Ok(count)
-    }
 }
 
 // ── field helpers ───────────────────────────────────────────────────────────
@@ -1335,15 +1210,6 @@ fn opt_ms(value: Option<DateTime<Utc>>) -> Value {
         Some(at) => json!(at.timestamp_millis()),
         None => Value::Null,
     }
-}
-
-fn newest(candidates: &[Option<DateTime<Utc>>]) -> i64 {
-    candidates
-        .iter()
-        .flatten()
-        .map(|at| at.timestamp_millis())
-        .max()
-        .unwrap_or(1)
 }
 
 fn row_to<T: serde::de::DeserializeOwned>(row: &RegistryRow) -> Option<T> {

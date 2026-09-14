@@ -1,13 +1,11 @@
-// Device-room relay RPC client — dials a device's room on the edge as a
-// `client` peer and speaks ControlRpc to the HOST engine over a virtual
-// socket (crates/rpc/src/device_room.rs + edge/src/device-room.ts).
+// Durable-peer relay RPC client: dials a paired device and speaks ControlRpc to
+// its host engine over a virtual socket matching crates/rpc/src/device_room.rs.
 //
-// Frame codec (binary WS messages): uleb128(headerLen) ‖ headerJSON ‖ payload.
-// Header key order MUST be {"s","k","to","from"} (byte parity with both
-// implementations); clients never set `to`/`from` — the DO stamps `from`.
-// RPC payloads are ndjson ControlRpc frames: {id, method, params} out,
-// {id, ok|err|item|done} back. Relay control frames (kind " relay" — leading
-// space is part of the constant) signal host_offline/host_closed.
+// Binary frames use uleb128(headerLen) ‖ headerJSON ‖ payload. Header key order
+// is stable as {"s","k","to","from"}; clients do not set routing identities,
+// which the authenticated peer stamps. RPC payloads are NDJSON ControlRpc frames.
+// Relay control frames (kind " relay", including the leading space) report host
+// and client availability.
 
 import Foundation
 
@@ -226,7 +224,7 @@ actor DeviceRelayClient {
             }
         }
         guard let token = await config.currentToken() else { throw RelayError.notConnected }
-        var components = URLComponents(url: config.edgeURL.appending(path: "device/\(deviceId)/ws"),
+        var components = URLComponents(url: config.peerURL.appending(path: "device/\(deviceId)/ws"),
                                        resolvingAgainstBaseURL: false)!
         components.scheme = components.scheme == "http" ? "ws" : "wss"
         components.queryItems = [

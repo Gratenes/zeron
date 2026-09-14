@@ -1,9 +1,7 @@
-// chat2 wire frames — the Swift twin of crates/sync/src/chat_frames.rs and
-// edge/src/chat-frames.ts. Binary WS frames:
-// `[type u8][headerLen u32 LE][header JSON][payload]`. Headers are tiny JSON;
-// payloads are opaque bytes (Loro updates, the checkpoint frontier). The
-// layout tests in ZeronTests pin the same vectors as the Rust/TS suites —
-// change all three together.
+// Stable chat wire frames shared by the Swift client and Rust durable peer.
+// Binary WS frames are `[type u8][headerLen u32 LE][header JSON][payload]`.
+// Headers are tiny JSON; payloads are opaque bytes (Loro updates and checkpoint
+// frontiers). Swift and Rust layout tests pin the same vectors.
 
 import Foundation
 

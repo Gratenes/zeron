@@ -1,6 +1,5 @@
-// App session root: sign-in state machine, workspace connection, and the
-// per-chat session store cache. Also hosts demo mode — an offline in-memory
-// dataset so the UI can be exercised without an edge deployment.
+// App session root: secure pairing, embedded Tailcat connectivity, workspace
+// connection, and the per-chat session-store cache. Demo data stays offline.
 
 import Foundation
 import Network
@@ -8,31 +7,69 @@ import Observation
 import SwiftUI
 import os
 
+struct AuthTransitionGate {
+    private(set) var generation = 0
+
+    mutating func begin() -> Int {
+        generation += 1
+        return generation
+    }
+
+    mutating func cancel() { generation += 1 }
+    func accepts(_ attempt: Int) -> Bool { attempt == generation }
+}
+
+
 @MainActor
 @Observable
 final class AppModel {
-    enum Phase {
-        case signedOut
-        case pickingOrg(AuthTokens, [AuthOrg])
-        case ready
-    }
+    enum Phase { case signedOut, ready }
 
     var phase: Phase = .signedOut
     var workspace: WorkspaceStore?
     var demo: DemoDataset?
-    /// Graced connectivity truth — one stream every consumer inherits calm
-    /// from (home pill, composer notice, Queued/Failed badges).
+    var readinessError: String?
+
+    var authBusy = false
     let connectivity = ConnectivityCenter()
     private var sessionStores: [String: SessionStore] = [:]
     private var config: AppConfig?
+    @ObservationIgnored private var tailcat: (any TailcatClient)?
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var lastPathKey: String?
+    @ObservationIgnored private var restored = false
 
-    // Persisted connection settings.
-    @ObservationIgnored @AppStorage("edgeURL") var edgeURLString = "https://edge.zeron.sh"
-    @ObservationIgnored @AppStorage("authMode") var authModeRaw = AppConfig.Mode.workos.rawValue
-    @ObservationIgnored @AppStorage("userId") var storedUserId = ""
-    @ObservationIgnored @AppStorage("orgId") var storedOrgId = ""
+    @ObservationIgnored private var authGate = AuthTransitionGate()
+
+    typealias NativeFactory = @Sendable (String, URL, String?) throws -> any TailcatClient
+    typealias SessionRenewer = (URL, DeviceIdentity) async throws -> PairingSession
+    typealias InvitationRedeemer = (URL, PairingInvitation, DeviceIdentity, String) async throws -> Void
+    typealias IdentityLoader = (String) -> DeviceIdentity?
+    @ObservationIgnored private let nativeFactory: NativeFactory
+    @ObservationIgnored private let sessionRenewer: SessionRenewer
+    @ObservationIgnored private let invitationRedeemer: InvitationRedeemer
+    @ObservationIgnored private let identityLoader: IdentityLoader
+
+    init(nativeFactory: @escaping NativeFactory = { address, directory, derpMap in
+             try NativeTailcatClient(address: address, stateDirectory: directory, derpMap: derpMap)
+         },
+         sessionRenewer: @escaping SessionRenewer = { url, identity in
+             try await AuthClient(baseURL: url).renew(identity: identity)
+         },
+         invitationRedeemer: @escaping InvitationRedeemer = { url, invitation, identity, deviceName in
+             try await AuthClient(baseURL: url).redeem(invitation: invitation, identity: identity,
+                                                        deviceName: deviceName)
+         },
+         identityLoader: @escaping IdentityLoader = { DeviceIdentity.load(profileId: $0) }) {
+        self.nativeFactory = nativeFactory
+        self.sessionRenewer = sessionRenewer
+        self.invitationRedeemer = invitationRedeemer
+        self.identityLoader = identityLoader
+    }
+
+    @ObservationIgnored @AppStorage("pairedProfileId") var storedProfileId = ""
+    @ObservationIgnored @AppStorage("pairedPeerAddress") var peerAddressString = ""
+    @ObservationIgnored @AppStorage("pairedDERPMap") var storedDERPMap = ""
     @ObservationIgnored @AppStorage("deviceId") var storedDeviceId = ""
 
     var deviceId: String {
@@ -42,40 +79,17 @@ final class AppModel {
         return storedDeviceId
     }
 
-    var deviceName: String {
-        UIDevice.current.name
-    }
+    var deviceName: String { UIDevice.current.name }
 
-    /// Deep-link target applied by HomeView on first appearance (set by launch
-    /// args in demo mode; simulator-driven screenshots use it).
     var launchRoute: Route?
-    /// Screenshot rig: "newsession" / "newspace" presents that sheet on arrival.
     var launchSheet: String?
-    /// Screenshot rig: auto-send a canned prompt from the new-session canvas.
     var launchAutosend = false
-    /// Screenshot rig: the session composer takes keyboard focus after ~1.5s,
-    /// to drive the keyboard-up transcript states headless.
     var launchFocusComposer = false
 
     func restore() {
-        if demo != nil { return }
-        DocDisk.prune(keep: 80)
+        guard !restored, demo == nil else { return }
+        restored = true
         let args = ProcessInfo.processInfo.arguments
-        // Debug-rig config overrides (cfprefsd caching defeats external
-        // defaults writes; the app applying them itself always sticks).
-        func override(_ flag: String, _ apply: (String) -> Void) {
-            if let ix = args.firstIndex(of: flag), ix + 1 < args.count {
-                apply(args[ix + 1])
-            }
-        }
-        override("-setedge") { edgeURLString = $0 }
-        override("-setmode") { authModeRaw = $0 }
-        override("-setuser") { storedUserId = $0 }
-        override("-setorg") { storedOrgId = $0 }
-        // Simulator rig: seed WorkOS tokens straight into the keychain (the
-        // ASWebAuthenticationSession flow can't be driven headlessly).
-        override("-setaccess") { Keychain.save($0, key: "accessToken") }
-        override("-setrefresh") { Keychain.save($0, key: "refreshToken") }
         if args.contains("-bench") {
             Task { await BenchRunner.run() }
             return
@@ -84,182 +98,272 @@ final class AppModel {
             Task { await E2ERunner.run(model: self) }
             return
         }
-        if args.contains("-e2e-live") {
-            // Reuse the signed-in session, then probe the live relay paths.
-            Task {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                await E2ERunner.runLive(model: self)
-            }
-            // fall through to the normal restore below
-        }
         if args.contains("-demo") {
             enterDemoMode()
-            if let ix = args.firstIndex(of: "-route"), ix + 1 < args.count {
-                let spec = args[ix + 1]
-                if spec.hasPrefix("chat:") {
-                    let chatId = String(spec.dropFirst("chat:".count))
-                    launchRoute = .chat(chatId)
-                    if args.contains("-big"), let demo {
-                        // Scroll-settle stress. Injected BEFORE the transcript
-                        // appears, which is the warm-session case: rows are
-                        // already there at first layout, so neither the
-                        // rows-arrived nor the streamed-growth anchor ever
-                        // fires and `.task` is the only thing holding the
-                        // bottom — against hundreds of lazily-estimated rows.
-                        demo.sessionStore(for: chatId)
-                            .setEntries(BenchRunner.syntheticEntries(turns: 120))
-                    }
-                    if args.contains("-huge"), let demo {
-                        // Warm-reopen stress at real-conversation scale — the
-                        // estimated-height error grows with row count, and the
-                        // settle must converge against it.
-                        demo.sessionStore(for: chatId)
-                            .setEntries(BenchRunner.syntheticEntries(turns: 600))
-                    }
-                    if args.contains("-stream"), let demo {
-                        // Screenshot rig: kick off the scripted streaming reply.
-                        let store = demo.sessionStore(for: chatId)
-                        Task { @MainActor in
-                            try? await Task.sleep(nanoseconds: 2_000_000_000)
-                            store.demoResponder?("Show me the streamed reply path.")
-                        }
-                    }
-                } else if spec.hasPrefix("space:") {
-                    launchRoute = .space(String(spec.dropFirst("space:".count)))
-                }
-            }
-            if let ix = args.firstIndex(of: "-sheet"), ix + 1 < args.count {
-                launchSheet = args[ix + 1]
-            }
-            launchAutosend = args.contains("-autosend")
-            launchFocusComposer = args.contains("-focuscomposer")
-            // Rig: open with an EMPTY transcript that lands in bulk 2.5s
-            // later — the live checkpoint-backfill shape (loader → reveal).
-            if args.contains("-hydrate-late"), case .chat(let lateId)? = launchRoute, let demo {
-                let store = demo.sessionStore(for: lateId)
-                let full = store.entries
-                store.setEntries([])
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 2_500_000_000)
-                    store.setEntries(full)
-                }
-            }
-            // Animation rig: "-archive-after chatId:secs" / "-unarchive-after
-            // chatId:secs" fire the same animated mutation the swipe actions
-            // use, so the list hand-off can be recorded headless.
-            func scheduledToggle(_ flag: String, archived: Bool) {
-                guard let ix = args.firstIndex(of: flag), ix + 1 < args.count else { return }
-                let parts = args[ix + 1].split(separator: ":")
-                guard parts.count == 2, let secs = Double(parts[1]) else { return }
-                let chatId = String(parts[0])
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
-                    withAnimation(Motion.resort) {
-                        if archived { self.archive(chatId: chatId) }
-                        else { self.unarchive(chatId: chatId) }
-                    }
-                }
-            }
-            scheduledToggle("-archive-after", archived: true)
-            scheduledToggle("-unarchive-after", archived: false)
+            configureDemo(arguments: args)
             return
         }
         startPathMonitor()
-        guard let url = URL(string: edgeURLString), !storedUserId.isEmpty, !storedOrgId.isEmpty else {
-            return
+        guard !storedProfileId.isEmpty, !peerAddressString.isEmpty,
+              let identity = identityLoader(storedProfileId) else { return }
+        // Project the profile cache immediately; network authentication upgrades
+        // these same stores when available without forcing a new invitation.
+        DocDisk.activate(profileId: identity.profileId)
+        let offline = AppConfig(peerURL: URL(string: "http://127.0.0.1:1")!,
+                                profileId: identity.profileId, deviceId: identity.deviceId,
+                                deviceName: deviceName, bearer: "")
+        config = offline
+        workspace = WorkspaceStore(config: offline)
+        phase = .ready
+        retrySavedIdentity()
+    }
+
+    private func configureDemo(arguments args: [String]) {
+        if let ix = args.firstIndex(of: "-route"), ix + 1 < args.count {
+            let spec = args[ix + 1]
+            if spec.hasPrefix("chat:") {
+                let chatId = String(spec.dropFirst("chat:".count))
+                launchRoute = .chat(chatId)
+                if args.contains("-big") { demo?.sessionStore(for: chatId)
+                    .setEntries(BenchRunner.syntheticEntries(turns: 120)) }
+                if args.contains("-huge") { demo?.sessionStore(for: chatId)
+                    .setEntries(BenchRunner.syntheticEntries(turns: 600)) }
+                if args.contains("-stream"), let store = demo?.sessionStore(for: chatId) {
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        store.demoResponder?("Show me the streamed reply path.")
+                    }
+                }
+            } else if spec.hasPrefix("space:") {
+                launchRoute = .space(String(spec.dropFirst("space:".count)))
+            }
         }
-        let mode = AppConfig.Mode(rawValue: authModeRaw) ?? .workos
-        switch mode {
-        case .dev:
-            connect(url: url, mode: .dev, userId: storedUserId, orgId: storedOrgId,
-                    tokens: nil, devBearer: devBearer(userId: storedUserId, orgId: storedOrgId))
-        case .workos:
-            guard let access = Keychain.load(key: "accessToken"),
-                  let refresh = Keychain.load(key: "refreshToken") else { return }
-            connect(url: url, mode: .workos, userId: storedUserId, orgId: storedOrgId,
-                    tokens: AuthTokens(accessToken: access, refreshToken: refresh), devBearer: nil)
+        if let ix = args.firstIndex(of: "-sheet"), ix + 1 < args.count {
+            launchSheet = args[ix + 1]
+        }
+        launchAutosend = args.contains("-autosend")
+        launchFocusComposer = args.contains("-focuscomposer")
+        if args.contains("-hydrate-late"), case .chat(let id)? = launchRoute,
+           let store = demo?.sessionStore(for: id) {
+            let full = store.entries
+            store.setEntries([])
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                store.setEntries(full)
+            }
+        }
+        func scheduledToggle(_ flag: String, archived: Bool) {
+            guard let ix = args.firstIndex(of: flag), ix + 1 < args.count else { return }
+            let parts = args[ix + 1].split(separator: ":")
+            guard parts.count == 2, let seconds = Double(parts[1]) else { return }
+            let chatId = String(parts[0])
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                withAnimation(Motion.resort) {
+                    if archived { self.archive(chatId: chatId) }
+                    else { self.unarchive(chatId: chatId) }
+                }
+            }
+        }
+        scheduledToggle("-archive-after", archived: true)
+        scheduledToggle("-unarchive-after", archived: false)
+    }
+
+    private func restorePaired(identity: DeviceIdentity, generation: Int) async {
+        var native: (any TailcatClient)?
+        do {
+            native = try await startTailcat(profileId: identity.profileId,
+                                            address: peerAddressString,
+                                            derpMap: storedDERPMap)
+            guard let native else { return }
+
+            guard authGate.accepts(generation), demo == nil else { native.close(); return }
+            let session = try await sessionRenewer(native.url, identity)
+            guard authGate.accepts(generation), demo == nil else { native.close(); return }
+            connect(native: native, identity: identity, session: session, generation: generation)
+            authBusy = false
+            readinessError = nil
+        } catch PairingError.revoked {
+            native?.close()
+            guard authGate.accepts(generation) else { return }
+            authBusy = false
+            handleRevoked(profileId: identity.profileId, deviceId: identity.deviceId,
+                          generation: generation)
+        } catch {
+            native?.close()
+            guard authGate.accepts(generation) else { return }
+            authBusy = false
+            readinessError = error.localizedDescription
         }
     }
 
-    // MARK: Sign-in flows
+    func retrySavedIdentity() {
+        guard !storedProfileId.isEmpty, !peerAddressString.isEmpty, !authBusy,
+              let identity = identityLoader(storedProfileId) else { return }
+        let generation = authGate.begin()
+        authBusy = true
+        Task { await restorePaired(identity: identity, generation: generation) }
+    }
 
-    /// WorkOS paste-code exchange. Returns the org list for the picker (or
-    /// connects straight away when exactly one org exists).
-    func signIn(edgeURL: URL, code: String) async throws {
-        let client = AuthClient(baseURL: edgeURL)
-        let (user, tokens) = try await client.exchange(code: code)
-        edgeURLString = edgeURL.absoluteString
-        authModeRaw = AppConfig.Mode.workos.rawValue
-        storedUserId = user.id
-        let orgs = try await client.orgs(accessToken: tokens.accessToken)
-        if let only = orgs.first, orgs.count == 1 {
-            try await selectOrg(only, tokens: tokens)
-        } else if orgs.isEmpty {
-            throw AuthError.http(403, "No organizations for this account")
-        } else {
-            phase = .pickingOrg(tokens, orgs)
+    func pair(invitationText: String) async throws {
+        readinessError = nil
+
+        guard !authBusy else { throw PairingError.invalidResponse }
+        let generation = authGate.begin()
+        authBusy = true
+        defer { if authGate.accepts(generation) { authBusy = false } }
+        let invitation = try PairingInvitation.parse(invitationText)
+        let pending = pendingTailcatDirectory()
+        try? FileManager.default.removeItem(at: pending)
+        let bootstrap = try await makeNative(address: invitation.address,
+                                             stateDirectory: pending,
+                                             derpMap: invitation.derpMap)
+
+        guard authGate.accepts(generation), demo == nil else { bootstrap.close(); return }
+        let pendingIdentity = DeviceIdentity.createPending()
+        let candidate = try pendingIdentity.bound(profileId: invitation.invite.profileId)
+        do {
+            try await invitationRedeemer(bootstrap.url, invitation, candidate, deviceName)
+        } catch {
+            bootstrap.close()
+            try? FileManager.default.removeItem(at: pending)
+            throw error
         }
-    }
+        let identity = try candidate.persist()
 
-    func selectOrg(_ org: AuthOrg, tokens: AuthTokens) async throws {
-        guard let url = URL(string: edgeURLString) else { return }
-        // Re-scope the access token to the org (adds the org_id claim).
-        let client = AuthClient(baseURL: url)
-        let scoped = try await client.refresh(refreshToken: tokens.refreshToken,
-                                              organizationId: org.organizationId)
-        Keychain.save(scoped.accessToken, key: "accessToken")
-        Keychain.save(scoped.refreshToken, key: "refreshToken")
-        storedOrgId = org.organizationId
-        connect(url: url, mode: .workos, userId: storedUserId, orgId: org.organizationId,
-                tokens: scoped, devBearer: nil)
-    }
+        // Redeem is single-use. Persist the address, key and Tailcat state before
+        // authentication so a transient challenge failure can resume on launch.
+        bootstrap.close()
+        let destination = tailcatDirectory(profileId: identity.profileId)
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: pending, to: destination)
+        storedProfileId = identity.profileId
+        peerAddressString = invitation.address
+        storedDERPMap = invitation.derpMap ?? ""
 
-    /// Dev-mode edge (AUTH_MODE=dev): bearer = "userId@orgId".
-    func signInDev(edgeURL: URL, userId: String, orgId: String) {
-        edgeURLString = edgeURL.absoluteString
-        authModeRaw = AppConfig.Mode.dev.rawValue
-        storedUserId = userId
-        storedOrgId = orgId
-        connect(url: edgeURL, mode: .dev, userId: userId, orgId: orgId,
-                tokens: nil, devBearer: devBearer(userId: userId, orgId: orgId))
+        let native = try await makeNative(address: invitation.address,
+                                          stateDirectory: destination,
+                                          derpMap: invitation.derpMap)
+
+        guard authGate.accepts(generation), demo == nil else { native.close(); return }
+        do {
+            let session = try await sessionRenewer(native.url, identity)
+            guard authGate.accepts(generation), demo == nil else { native.close(); return }
+
+            connect(native: native, identity: identity, session: session, generation: generation)
+        } catch {
+            native.close()
+            throw error
+        }
     }
 
     func enterDemoMode() {
+        guard !authBusy else { return }
+        authGate.cancel()
+        DocDisk.activate(profileId: "demo")
         demo = DemoDataset.standard()
         phase = .ready
     }
 
     func signOut() {
+
+        authGate.cancel()
+        authBusy = false
         workspace?.stop()
         workspace = nil
         sessionStores.values.forEach { $0.stop() }
         sessionStores.removeAll()
         config = nil
+        tailcat?.close()
+        tailcat = nil
         demo = nil
-        Keychain.delete(key: "accessToken")
-        Keychain.delete(key: "refreshToken")
-        DocDisk.wipeAll()  // local doc state belongs to the signed-in identity
-        storedUserId = ""
-        storedOrgId = ""
+        if !storedProfileId.isEmpty { DeviceIdentity.delete(profileId: storedProfileId) }
+        DocDisk.closeProfile()
+        storedProfileId = ""
+        peerAddressString = ""
+        storedDERPMap = ""
+        readinessError = nil
         phase = .signedOut
     }
 
-    private func devBearer(userId: String, orgId: String) -> String {
-        orgId.isEmpty ? userId : "\(userId)@\(orgId)"
-    }
-
-    private func connect(url: URL, mode: AppConfig.Mode, userId: String, orgId: String,
-                         tokens: AuthTokens?, devBearer: String?) {
-        let config = AppConfig(edgeURL: url, mode: mode, userId: userId, orgId: orgId,
+    private func connect(native: any TailcatClient, identity: DeviceIdentity,
+                         session: PairingSession, generation: Int) {
+        guard session.profileId == identity.profileId,
+              session.deviceId == identity.deviceId,
+              authGate.accepts(generation) else {
+            readinessError = "Pairing response profile did not match the saved device key."
+            native.close()
+            return
+        }
+        DocDisk.activate(profileId: identity.profileId)
+        DocDisk.prune(keep: 80)
+        tailcat?.close()
+        tailcat = native
+        let profileId = identity.profileId
+        let deviceId = session.deviceId
+        let config = AppConfig(peerURL: native.url, profileId: profileId,
                                deviceId: deviceId, deviceName: deviceName,
-                               tokens: tokens, devBearer: devBearer)
+                               identity: identity, session: session) { [weak self] in
+            Task { @MainActor in
+                self?.handleRevoked(profileId: profileId, deviceId: deviceId,
+                                    generation: generation)
+            }
+        }
         self.config = config
-        let store = WorkspaceStore(config: config)
-        workspace = store
-        store.start()
+        if let workspace,
+           workspace.profileId == profileId, workspace.deviceId == deviceId {
+            workspace.attachNetwork(config: config)
+        } else {
+            let store = WorkspaceStore(config: config)
+            workspace = store
+            store.start()
+        }
+        for store in sessionStores.values where store.deviceId == deviceId {
+            store.attachNetwork(config: config, holdDial: store.isDialHeld)
+        }
         startConnectivity()
         phase = .ready
     }
+
+    private func handleRevoked(profileId: String, deviceId: String, generation: Int) {
+        guard authGate.accepts(generation), config?.profileId == profileId,
+              config?.deviceId == deviceId, storedProfileId == profileId else { return }
+        signOut()
+        readinessError = "This device was revoked. Pair it again to continue."
+    }
+
+    private func startTailcat(profileId: String, address: String,
+                              derpMap: String) async throws -> any TailcatClient {
+        try await makeNative(address: address, stateDirectory: tailcatDirectory(profileId: profileId),
+                             derpMap: derpMap.isEmpty ? nil : derpMap)
+    }
+
+    private func makeNative(address: String, stateDirectory: URL,
+                            derpMap: String?) async throws -> any TailcatClient {
+        let factory = nativeFactory
+        return try await Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let native = try factory(address, stateDirectory, derpMap)
+            if Task.isCancelled {
+                native.close()
+                throw CancellationError()
+            }
+            return native
+        }.value
+    }
+
+    private func tailcatDirectory(profileId: String) -> URL {
+        DocDisk.directory(profileId: profileId).appendingPathComponent("Tailcat", isDirectory: true)
+    }
+
+    private func pendingTailcatDirectory() -> URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ZeronPairing", isDirectory: true)
+            .appendingPathComponent(deviceId, isDirectory: true)
+    }
+
 
     /// Wire the graced-connectivity recompute over the live stores (the
     /// engine's 1s compute_connectivity, phone edition).
@@ -534,10 +638,12 @@ final class AppModel {
     /// a suspension the workspace room in particular stayed dead while chat
     /// views reconnected on open, freezing sidebar rows and Working
     /// indicators against perfectly live transcripts (2026-08-04). Also the
-    /// focus fast path (PR #168): probe {edge}/health (3s) and broadcast the
+    /// focus fast path probes the peer through Tailcat (3s) and broadcasts the
     /// online event on success, so every PARKED backoff (not just the rooms
     /// the kick reaches) lands a redial in ~1 RTT.
     func foregrounded() {
+
+        if tailcat == nil { retrySavedIdentity() }
         kickAllRooms()
         probeEdgeHealth()
     }
@@ -545,7 +651,7 @@ final class AppModel {
     private func probeEdgeHealth() {
         guard let config, demo == nil else { return }
         Task.detached {
-            var request = URLRequest(url: config.edgeURL.appending(path: "health"))
+            var request = URLRequest(url: config.peerURL.appending(path: "health"))
             request.timeoutInterval = 3
             guard let (_, response) = try? await URLSession.shared.data(for: request),
                   (response as? HTTPURLResponse)?.statusCode == 200 else { return }
@@ -611,6 +717,11 @@ final class AppModel {
             OnlineBus.shared.setPathOnline(path.status != .unsatisfied)
             if path.status == .satisfied {
                 OnlineBus.shared.notifyOnline()
+
+                Task { @MainActor [weak self] in
+                    guard let self, self.tailcat == nil else { return }
+                    self.retrySavedIdentity()
+                }
             }
             // Interface set is part of the key: a satisfied→satisfied hop
             // (wifi→cellular) silently kills established sockets too.
@@ -656,7 +767,7 @@ final class AppModel {
             self?.workspace?.peerLiveness(deviceId) ?? .unknown
         }
         sessionStores[chat.id] = store
-        store.start()
+        if tailcat != nil { store.start() }
         store.updateRoomGen(chat.roomGen)
         return store
     }
@@ -761,7 +872,11 @@ final class AppModel {
                 self?.workspace?.peerLiveness(deviceId) ?? .unknown
             }
             sessionStores[chat.id] = store
-            store.start(holdDial: true)
+            if tailcat != nil {
+                store.start(holdDial: true)
+            } else {
+                store.holdNetworkUntilReleased()
+            }
             store.updateRoomGen(chat.roomGen)
             guard released < Self.warmDialCap else { continue }
             released += 1

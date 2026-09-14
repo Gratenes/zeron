@@ -4,10 +4,9 @@
 //! relay, probe/redial liveness, and reconnect with exponential backoff.
 //!
 //! The client owns no CRDT semantics: update bytes flow through a
-//! [`ChatDocSink`] the engine implements over its `ChatDocHandle` (import +
-//! persist doc AND cursor in one transaction — the C2 rule). Wire frames are
-//! the binary chat2 codec ([`crate::chat_frames`]), byte-compatible with
-//! `edge/src/chat-frames.ts`.
+//! [`ChatDocSink`] the engine implements over its `ChatDocHandle` (import and
+//! atomic doc/cursor persistence). Wire frames use the stable binary codec in
+//! [`crate::chat_frames`], shared with the durable Rust peer.
 //!
 //! Liveness discipline is inherited from `registry.rs` and its incidents:
 //! transport pings prove nothing about the DO; room health is judged only by
@@ -429,11 +428,15 @@ pub struct ChatClient {
     events: broadcast::Sender<ChatEvent>,
     shutdown: watch::Sender<bool>,
     nudge: mpsc::Sender<()>,
+    /// Independent HTTPS sync signal. This must not share the WebSocket
+    /// actor's event loop: a stalled WS dial must not block durable sends.
+    offline_nudge: Option<mpsc::Sender<()>>,
     probe: mpsc::Sender<()>,
     redial: mpsc::Sender<()>,
     presence_out: mpsc::Sender<(i64, Vec<u8>)>,
     flags: Arc<Flags>,
     task: Option<tokio::task::JoinHandle<()>>,
+    offline_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Default)]
@@ -569,6 +572,25 @@ impl ChatClient {
         }));
         let flags = Arc::new(Flags::default());
 
+        // HTTPS pull/push runs independently from the socket actor. Tailcat
+        // can keep a TCP/WebSocket dial pending while ordinary HTTP requests
+        // remain usable; coupling both paths to one actor used to strand
+        // commits made during that dial until its timeout elapsed.
+        let (offline_nudge, offline_task) = if let Some(transport) = transport {
+            let (tx, rx) = mpsc::channel(1);
+            let task = tokio::spawn(offline_sync_loop(
+                rx,
+                transport,
+                shared.clone(),
+                sink.clone(),
+                fetcher.clone(),
+                events.clone(),
+            ));
+            (Some(tx), Some(task))
+        } else {
+            (None, None)
+        };
+
         let actor = Actor {
             shared: shared.clone(),
             sink: sink.clone(),
@@ -585,8 +607,7 @@ impl ChatClient {
             flags: flags.clone(),
             resumed: false,
             cursor_amnesty_done: std::sync::atomic::AtomicBool::new(false),
-            transport,
-            sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            offline_nudge: offline_nudge.clone(),
         };
         let task = tokio::spawn(actor.run(ready_tx));
 
@@ -597,18 +618,26 @@ impl ChatClient {
                 events,
                 shutdown: shutdown_tx,
                 nudge: nudge_tx,
+                offline_nudge,
                 probe: probe_tx,
                 redial: redial_tx,
                 presence_out: presence_tx,
                 flags,
                 task: Some(task),
+                offline_task,
             }),
             Ok(Err(err)) => {
                 task.abort();
+                if let Some(task) = offline_task {
+                    task.abort();
+                }
                 Err(err)
             }
             Err(_) => {
                 task.abort();
+                if let Some(task) = offline_task {
+                    task.abort();
+                }
                 Err(SyncError::Closed)
             }
         }
@@ -661,6 +690,9 @@ impl ChatClient {
             }
         }
         let _ = self.nudge.try_send(());
+        if let Some(nudge) = &self.offline_nudge {
+            let _ = nudge.try_send(());
+        }
     }
 
     /// Publish this device's presence beat with an opaque payload (cursor
@@ -672,6 +704,9 @@ impl ChatClient {
     /// Liveness hint: probe the room now (deadline-checked).
     pub fn probe(&self) {
         let _ = self.probe.try_send(());
+        if let Some(nudge) = &self.offline_nudge {
+            let _ = nudge.try_send(());
+        }
     }
 
     /// Escalation: tear the session down and dial a fresh socket.
@@ -732,12 +767,19 @@ impl ChatClient {
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
+        if let Some(task) = self.offline_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
     }
 }
 
 impl Drop for ChatClient {
     fn drop(&mut self) {
         if let Some(task) = &self.task {
+            task.abort();
+        }
+        if let Some(task) = &self.offline_task {
             task.abort();
         }
     }
@@ -762,10 +804,8 @@ struct Actor {
     /// Once-per-actor cursor amnesty (see run_session): a cursor above the
     /// room's checkpoint is re-verified by refetching the rows above it.
     cursor_amnesty_done: std::sync::atomic::AtomicBool,
-    /// Plain-HTTPS pull/push (None = socket-only: tests, dev bearers).
-    transport: Option<Arc<dyn ChatTransport>>,
-    /// One offline sync in flight at a time.
-    sync_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// Signal for the independent HTTPS sync worker (None = socket-only).
+    offline_nudge: Option<mpsc::Sender<()>>,
     /// False until the first backfill of THIS client instance completes.
     /// (Continuity is instance-scoped: a host that restores an older doc
     /// snapshot must construct a fresh `ChatClient` — C3 wiring contract.)
@@ -800,11 +840,11 @@ impl Actor {
         // Pull-first bootstrap (see registry.rs run): with an HTTPS
         // transport, construction resolves immediately and an HTTP pull
         // converges the doc in ~1 RTT while the socket spends its 4+.
-        if self.transport.is_some() {
+        if self.offline_nudge.is_some() {
             if let Some(ready) = ready.take() {
                 let _ = ready.send(Ok(()));
             }
-            self.spawn_offline_sync();
+            self.request_offline_sync();
         }
         // Suspend/resume and sibling-dial successes are EVENTS that end a
         // backoff wait immediately (see room.rs) — without them a recovered
@@ -829,7 +869,7 @@ impl Actor {
                         return; // first join failed: caller owns the retry
                     }
                     tracing::warn!(error = %err, attempt, "chat2 dial failed; backing off");
-                    self.spawn_offline_sync();
+                    self.request_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
                         Waited::Woke => backoff = BACKOFF_BASE,
@@ -843,7 +883,7 @@ impl Actor {
                         return;
                     }
                     tracing::warn!(attempt, "chat2 dial timed out; backing off");
-                    self.spawn_offline_sync();
+                    self.request_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
                         Waited::Woke => backoff = BACKOFF_BASE,
@@ -876,7 +916,7 @@ impl Actor {
                     if joined && session_started.elapsed() >= STABLE_RESET {
                         backoff = BACKOFF_BASE;
                     }
-                    self.spawn_offline_sync();
+                    self.request_offline_sync();
                     match self.wait_backoff(&mut wake, &mut online, backoff).await {
                         Waited::Shutdown => return,
                         Waited::Woke => backoff = BACKOFF_BASE,
@@ -1301,161 +1341,11 @@ impl Actor {
         pipe.tx.send(frame).await.is_ok()
     }
 
-    /// One HTTPS sync cycle off the critical path: flush pending batches
-    /// (POST — batchId dedupe), then pull rows (GET) and apply them exactly
-    /// as the WS backfill would, fetching the checkpoint first when the
-    /// state says the local doc lacks its frontier. Single-flight; failures
-    /// retry on the next backoff cycle.
-    fn spawn_offline_sync(&self) {
-        use std::sync::atomic::Ordering::Relaxed;
-        let Some(transport) = self.transport.clone() else {
-            return;
-        };
-        if self.sync_busy.swap(true, Relaxed) {
-            return;
+    /// Ask the independent HTTPS worker for one coalesced push/pull cycle.
+    fn request_offline_sync(&self) {
+        if let Some(nudge) = &self.offline_nudge {
+            let _ = nudge.try_send(());
         }
-        let shared = self.shared.clone();
-        let sink = self.sink.clone();
-        let fetcher = self.fetcher.clone();
-        let events = self.events.clone();
-        let busy = self.sync_busy.clone();
-        tokio::spawn(async move {
-            let batches: Vec<PendingPush> = lock(&shared).pending.iter().cloned().collect();
-            for push in batches {
-                if !ensure_durable(&shared, sink.as_ref(), &push) {
-                    break;
-                }
-                match transport.push(push.batch_id, push.bytes).await {
-                    Ok(ack) => {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ack) {
-                            if let (Some(b), Some(seq)) = (v["batchId"].as_str(), v["seq"].as_u64())
-                            {
-                                let mut sh = lock(&shared);
-                                if sink.acknowledge_update(b).is_ok() {
-                                    sh.pending.retain(|p| p.batch_id != b);
-                                }
-                                // Contiguity rule (see handle_frame ACK): an
-                                // own-push ack proves the server has rows up
-                                // to `seq`, not that WE have the interleaved
-                                // ones. The pull below starts at the honest
-                                // cursor and walks the gap.
-                                if seq <= sh.cursor + 1 {
-                                    sh.cursor = sh.cursor.max(seq);
-                                }
-                                let cursor = sh.cursor;
-                                drop(sh);
-                                sink.advance_cursor(cursor);
-                                let _ = events.send(ChatEvent::Applied);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(error = %err, "chat2: http push failed; will retry");
-                        break;
-                    }
-                }
-            }
-            let cursor = lock(&shared).cursor;
-            let body = match transport.fetch_rows(cursor).await {
-                Ok(body) => body,
-                Err(err) => {
-                    tracing::warn!(error = %err, "chat2: http pull failed; will retry");
-                    busy.store(false, Relaxed);
-                    return;
-                }
-            };
-            // u32-LE length-prefixed frames: state first, rows, rowsDone.
-            let mut frames: Vec<wire::WireFrame> = Vec::new();
-            let mut off = 0usize;
-            while off + 4 <= body.len() {
-                let len =
-                    u32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]])
-                        as usize;
-                off += 4;
-                if off + len > body.len() {
-                    break;
-                }
-                if let Some(frame) = wire::decode(&body[off..off + len]) {
-                    frames.push(frame);
-                }
-                off += len;
-            }
-            let mut iter = frames.into_iter();
-            let Some(state_frame) = iter.next() else {
-                busy.store(false, Relaxed);
-                return;
-            };
-            if state_frame.kind == frame_type::STATE {
-                if let Ok(state) =
-                    serde_json::from_value::<wire::StateHeader>(state_frame.header.clone())
-                {
-                    lock(&shared).server = Some(state);
-                    let (repair_causal_history, repair_generation) = {
-                        let shared = lock(&shared);
-                        (shared.needs_checkpoint, shared.causal_gap_generation)
-                    };
-                    let contained = state.checkpoint_size == 0
-                        || (!repair_causal_history && sink.contains_frontier(&state_frame.payload));
-                    let plan = plan_catch_up(cursor, &state, contained);
-                    if let CatchUpPlan::CheckpointThenRows { .. } = plan {
-                        let fetched =
-                            tokio::time::timeout(CHECKPOINT_FETCH_DEADLINE, fetcher.fetch()).await;
-                        match fetched {
-                            Ok(Ok(bytes)) => {
-                                if sink.apply_checkpoint(&bytes, state.checkpoint_seq).is_err() {
-                                    busy.store(false, Relaxed);
-                                    return;
-                                }
-                                let _ = events.send(ChatEvent::Applied);
-                            }
-                            _ => {
-                                busy.store(false, Relaxed);
-                                return;
-                            }
-                        }
-                    }
-                    let after = match plan {
-                        CatchUpPlan::RowsOnly { after }
-                        | CatchUpPlan::CheckpointThenRows { after } => after,
-                    };
-                    // A contained checkpoint covers the trimmed rows too;
-                    // otherwise the first post-checkpoint row looks like a
-                    // permanent sequence gap in the HTTPS fallback.
-                    let mut sh = lock(&shared);
-                    sh.cursor = if sh.cursor > state.head_seq {
-                        after
-                    } else {
-                        sh.cursor.max(after)
-                    };
-                    if sh.causal_gap_generation == repair_generation {
-                        sh.needs_checkpoint = false;
-                    }
-                }
-            }
-            let mut applied = false;
-            for frame in iter {
-                match frame.kind {
-                    frame_type::ROW => {
-                        let Ok(row) = serde_json::from_value::<wire::RowHeader>(frame.header)
-                        else {
-                            continue;
-                        };
-                        // Pulls request `after = cursor`, so rows arrive
-                        // contiguous — but hold the rule anyway: a jump
-                        // (trimmed log, server surprise) must not stamp the
-                        // cursor over rows the doc never saw.
-                        apply_remote_row(&shared, sink.as_ref(), &frame.payload, row.seq);
-                        applied = true;
-                    }
-                    frame_type::ROWS_DONE => {}
-                    _ => {}
-                }
-            }
-            if applied {
-                let _ = events.send(ChatEvent::Applied);
-            }
-            busy.store(false, Relaxed);
-        });
     }
 
     /// If a row/ack gap was flagged, request a backfill from the honest
@@ -1637,6 +1527,156 @@ impl Actor {
             }
         }
         true
+    }
+}
+
+/// Independent HTTPS fallback supervisor. A capacity-one signal coalesces
+/// bursts while preserving one follow-up cycle if a commit lands during an
+/// in-flight bootstrap. This worker is intentionally separate from the WS
+/// actor so a pending socket dial cannot starve durable HTTP push/pull.
+async fn offline_sync_loop(
+    mut nudges: mpsc::Receiver<()>,
+    transport: Arc<dyn ChatTransport>,
+    shared: Arc<Mutex<Shared>>,
+    sink: Arc<dyn ChatDocSink>,
+    fetcher: Arc<dyn CheckpointFetcher>,
+    events: broadcast::Sender<ChatEvent>,
+) {
+    while nudges.recv().await.is_some() {
+        offline_sync_once(
+            transport.as_ref(),
+            &shared,
+            sink.as_ref(),
+            fetcher.as_ref(),
+            &events,
+        )
+        .await;
+    }
+}
+
+async fn offline_sync_once(
+    transport: &dyn ChatTransport,
+    shared: &Arc<Mutex<Shared>>,
+    sink: &dyn ChatDocSink,
+    fetcher: &dyn CheckpointFetcher,
+    events: &broadcast::Sender<ChatEvent>,
+) {
+    let batches: Vec<PendingPush> = lock(shared).pending.iter().cloned().collect();
+    for push in batches {
+        if !ensure_durable(shared, sink, &push) {
+            break;
+        }
+        match transport.push(push.batch_id, push.bytes).await {
+            Ok(ack) => {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&ack)
+                    && let (Some(batch), Some(seq)) =
+                        (value["batchId"].as_str(), value["seq"].as_u64())
+                {
+                    let mut state = lock(shared);
+                    if sink.acknowledge_update(batch).is_ok() {
+                        state.pending.retain(|pending| pending.batch_id != batch);
+                    }
+                    // An own-push ack cannot skip interleaved remote rows.
+                    if seq <= state.cursor + 1 {
+                        state.cursor = state.cursor.max(seq);
+                    }
+                    let cursor = state.cursor;
+                    drop(state);
+                    sink.advance_cursor(cursor);
+                    let _ = events.send(ChatEvent::Applied);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "chat2: http push failed; will retry");
+                break;
+            }
+        }
+    }
+
+    let cursor = lock(shared).cursor;
+    let body = match transport.fetch_rows(cursor).await {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(%error, "chat2: http pull failed; will retry");
+            return;
+        }
+    };
+
+    // u32-LE length-prefixed frames: state first, rows, rowsDone.
+    let mut frames = Vec::new();
+    let mut offset = 0usize;
+    while offset + 4 <= body.len() {
+        let len = u32::from_le_bytes([
+            body[offset],
+            body[offset + 1],
+            body[offset + 2],
+            body[offset + 3],
+        ]) as usize;
+        offset += 4;
+        if offset + len > body.len() {
+            return;
+        }
+        if let Some(frame) = wire::decode(&body[offset..offset + len]) {
+            frames.push(frame);
+        }
+        offset += len;
+    }
+
+    let mut frames = frames.into_iter();
+    let Some(state_frame) = frames.next() else {
+        return;
+    };
+    if state_frame.kind == frame_type::STATE
+        && let Ok(server) = serde_json::from_value::<wire::StateHeader>(state_frame.header.clone())
+    {
+        lock(shared).server = Some(server);
+        let (repair_causal_history, repair_generation) = {
+            let state = lock(shared);
+            (state.needs_checkpoint, state.causal_gap_generation)
+        };
+        let contained = server.checkpoint_size == 0
+            || (!repair_causal_history && sink.contains_frontier(&state_frame.payload));
+        let plan = plan_catch_up(cursor, &server, contained);
+        if let CatchUpPlan::CheckpointThenRows { .. } = plan {
+            let fetched = tokio::time::timeout(CHECKPOINT_FETCH_DEADLINE, fetcher.fetch()).await;
+            let Ok(Ok(bytes)) = fetched else {
+                return;
+            };
+            if sink
+                .apply_checkpoint(&bytes, server.checkpoint_seq)
+                .is_err()
+            {
+                return;
+            }
+            let _ = events.send(ChatEvent::Applied);
+        }
+        let after = match plan {
+            CatchUpPlan::RowsOnly { after } | CatchUpPlan::CheckpointThenRows { after } => after,
+        };
+        let mut state = lock(shared);
+        state.cursor = if state.cursor > server.head_seq {
+            after
+        } else {
+            state.cursor.max(after)
+        };
+        if state.causal_gap_generation == repair_generation {
+            state.needs_checkpoint = false;
+        }
+    }
+
+    let mut applied = false;
+    for frame in frames {
+        if frame.kind != frame_type::ROW {
+            continue;
+        }
+        let Ok(row) = serde_json::from_value::<wire::RowHeader>(frame.header) else {
+            continue;
+        };
+        apply_remote_row(shared, sink, &frame.payload, row.seq);
+        applied = true;
+    }
+    if applied {
+        let _ = events.send(ChatEvent::Applied);
     }
 }
 

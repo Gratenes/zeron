@@ -9,6 +9,8 @@ on:
       - 'crates/**'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/run-macos-browser-fixture.sh'
+
+      - 'scripts/fixtures/preview-server/**'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
       - '.github/workflows/ui-tests.yml'
@@ -21,6 +23,8 @@ on:
       - 'crates/**'
       - 'scripts/test-linux-browser.sh'
       - 'scripts/run-macos-browser-fixture.sh'
+
+      - 'scripts/fixtures/preview-server/**'
       - 'dist/macos/Info.plist'
       - 'apps/ios/**'
       - '.github/workflows/ui-tests.yml'
@@ -113,13 +117,13 @@ jobs:
         with:
           node-version: 24
       - name: Install preview fixture server
-        run: npm ci --prefix edge
+        run: npm ci --prefix scripts/fixtures/preview-server
       - name: Project discovery, stable URLs and HMR in native WebKit
         timeout-minutes: 3
         env:
           ZERON_PREVIEW_AUTO_OPEN: 1
         run: |
-          VITE_BINARY="$GITHUB_WORKSPACE/edge/node_modules/vite/bin/vite.js" bash scripts/run-macos-browser-fixture.sh target/release/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
+          VITE_BINARY="$GITHUB_WORKSPACE/scripts/fixtures/preview-server/node_modules/vite/bin/vite.js" bash scripts/run-macos-browser-fixture.sh target/release/examples/preview-fixture "$RUNNER_TEMP/preview-captures"
           test -f "$RUNNER_TEMP/preview-captures/result.txt"
       - name: Upload preview screenshots
         if: always()
@@ -137,6 +141,18 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: connectivity/tailcat/go.sum
+      - name: Build pinned Tailcat XCFramework
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260908204917-8b95e45f8d3e
+          go install golang.org/x/mobile/cmd/gobind@v0.0.0-20260908204917-8b95e45f8d3e
+          GOMOBILE="$(go env GOPATH)/bin/gomobile" scripts/build-tailcat.sh xcframework
+          test -d target/tailcat/KratosTailcat.xcframework
       - name: Select an available iPhone simulator
         run: |
           python3 - <<'PYTHON'
@@ -152,10 +168,43 @@ jobs:
       - name: Run iOS unit tests
         working-directory: apps/ios
         run: |
+          set -euo pipefail
+          DERIVED_DATA="$RUNNER_TEMP/ios-derived-data"
+          CI_ENTITLEMENTS="$GITHUB_WORKSPACE/apps/ios/CI/Simulator.entitlements"
+          # An ad-hoc signature has no Apple team identity. Keep its entitlement
+          # identity exact and self-consistent so taskgated accepts the test host.
+          EXPECTED_APP_ID="sh.zeron.ios"
+          SIGNING_ARGS=(
+            CODE_SIGN_IDENTITY="-"
+            CODE_SIGN_STYLE=Manual
+            CODE_SIGNING_ALLOWED=YES
+            CODE_SIGNING_REQUIRED=NO
+          )
           xcodebuild -project Zeron.xcodeproj -scheme Zeron \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -derivedDataPath "$DERIVED_DATA" \
+            -only-testing:ZeronTests "${SIGNING_ARGS[@]}" build-for-testing
+
+          APP="$DERIVED_DATA/Build/Products/Debug-iphonesimulator/Zeron.app"
+          SIGNED_ENTITLEMENTS="$RUNNER_TEMP/zeron-simulator-entitlements.plist"
+          codesign --force --sign - --timestamp=none --generate-entitlement-der \
+            --entitlements "$CI_ENTITLEMENTS" "$APP"
+          codesign --verify --verbose=2 "$APP"
+          codesign --display --entitlements - --xml "$APP" > "$SIGNED_ENTITLEMENTS"
+          test "$(plutil -extract application-identifier raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_APP_ID"
+
+          if plutil -extract 'com\.apple\.developer\.team-identifier' raw "$SIGNED_ENTITLEMENTS" >/dev/null 2>&1; then
+            echo "Ad-hoc simulator host must not claim an Apple team identity" >&2
+            exit 1
+          fi
+          test "$(plutil -extract get-task-allow raw "$SIGNED_ENTITLEMENTS")" = "true"
+          test "$(plutil -extract keychain-access-groups.0 raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_APP_ID"
+
+          xcodebuild -project Zeron.xcodeproj -scheme Zeron \
+            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -derivedDataPath "$DERIVED_DATA" \
             -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
-            -only-testing:ZeronTests CODE_SIGNING_ALLOWED=NO test
+            -only-testing:ZeronTests test-without-building
       - name: Upload iOS test results
         if: always()
         uses: actions/upload-artifact@v4

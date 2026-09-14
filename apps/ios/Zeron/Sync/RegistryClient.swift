@@ -1,8 +1,7 @@
-// Registry room client — a Swift port of crates/sync/src/registry.rs, the
-// text-frame sibling of RoomClient (which still carries the Loro session
-// docs). JSON text frames over one WebSocket to /registry/{orgId}/ws:
-// hello/cursor handshake, push/ack for pending op batches, merged-row
-// broadcasts, presence beats, probe/redial liveness, reconnect with backoff.
+// Registry client matching crates/sync/src/registry.rs. Stable JSON text frames
+// over one authenticated durable-peer WebSocket provide hello/cursor handshake,
+// push/ack for pending batches, merged-row broadcasts, presence, probe/redial
+// liveness, and reconnect with backoff.
 //
 // The client owns no row semantics: everything applies through the
 // WorkspaceStore's RegistryDoc on the main actor (the Swift stand-in for the
@@ -10,10 +9,9 @@
 // order is preserved — the server sends the rows broadcast BEFORE the ack for
 // your own push (apply rows, then retire the pending batch).
 //
-// Liveness discipline is inherited from room.rs and its incidents: the text
-// "ping" elicits a runtime auto-pong that proves NOTHING about the DO
-// (2026-07-30), so room health is judged only by protocol frames — a probe
-// unanswered past its deadline tears the session down for a fresh dial.
+// Transport ping/pong alone does not prove application-level health, so the
+// client judges the room by protocol frames. A probe unanswered past its deadline
+// tears the session down for a fresh dial.
 
 import Foundation
 import os
@@ -377,7 +375,7 @@ actor RegistryClient {
     }
 }
 
-// MARK: - Wire frames (JSON text; mirror edge/src/registry-room.ts)
+// MARK: - Stable JSON wire frames
 
 private struct HelloFrame: Encodable {
     var t = "hello"

@@ -472,22 +472,38 @@ pub async fn exercise(
     capture(output, "browser-blur-baseline-dark")?;
     window.update(cx, |s, _, cx| s.fixture_browser_menu(true, cx))?;
     pause(cx, 700).await;
-    let presses = eval(&page, "window.pagePresses||0", cx).await?;
+    let presses = eval(&page, "window.pagePresses||0", cx)
+        .await?
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("page press counter was not numeric"))?;
     let outside =
         page.read_with(cx, |b, _| b.fixture_linux_bounds().origin) + point(px(350.), px(300.));
     click(window, outside, cx)?;
     pause(cx, 150).await;
     anyhow::ensure!(
-        eval(&page, "window.pagePresses||0", cx).await? == presses,
+        eval(&page, "window.pagePresses||0", cx).await?.as_u64() == Some(presses),
         "outside menu click leaked into browser"
     );
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while window.update(cx, |s, _, _| s.fixture_browser_menu_mounted())? {
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "outside click did not finish dismissing browser menu"
+        );
+        pause(cx, 20).await;
+    }
     click(window, outside, cx)?;
-    pause(cx, 150).await;
-    anyhow::ensure!(
-        eval(&page, "window.pagePresses||0", cx).await?.as_u64()
-            == Some(presses.as_u64().unwrap() + 1),
-        "browser input did not return after menu dismissal"
-    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if eval(&page, "window.pagePresses||0", cx).await?.as_u64() == Some(presses + 1) {
+            break;
+        }
+        anyhow::ensure!(
+            std::time::Instant::now() < deadline,
+            "browser input did not return after menu dismissal"
+        );
+        pause(cx, 20).await;
+    }
     window.update(cx, |s, _, cx| s.fixture_browser_menu(true, cx))?;
     pause(cx, 500).await;
     capture(output, "browser-blur-dark")?;

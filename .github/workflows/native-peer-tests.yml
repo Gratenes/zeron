@@ -1,0 +1,60 @@
+name: Native durable peer
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'connectivity/tailcat/**'
+      - 'crates/doc/**'
+      - 'crates/engine/**'
+      - 'crates/sync/**'
+      - '.github/workflows/native-peer-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'connectivity/tailcat/**'
+      - 'crates/doc/**'
+      - 'crates/engine/**'
+      - 'crates/sync/**'
+      - '.github/workflows/native-peer-tests.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-peer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  peer-regressions:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.1'
+          cache-dependency-path: connectivity/tailcat/go.sum
+      - name: Real Tailcat transport and platform contracts
+        working-directory: connectivity/tailcat
+        run: go test ./...
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Durable sync, restart and attachment custody
+        run: cargo test --locked -p zeron-sync --test peer_clients --test peer_attachments --test peer_http
+      - name: Peer authorization, backup/restore and engine recovery
+        run: cargo test --locked -p zeron-engine --test peer_auth --test peer_backup --test peer_preservation --test queued_attachments --test relay_delivery
+      - name: Managed authentication and concurrent re-pairing
+        if: runner.os == 'macOS'
+        run: cargo test --locked -p zeron-engine --test auth

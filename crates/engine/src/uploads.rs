@@ -21,7 +21,8 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::EngineError;
 
@@ -94,15 +95,23 @@ pub struct AttachmentChunk {
     pub done: bool,
 }
 
+/// Durable peer identity retained beside a host cache file. The metadata
+/// survives cache eviction so an async caller can rehydrate history safely.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustodyIdentity {
+    pub upload_id: String,
+    pub file_name: String,
+    pub sender_device: String,
+    pub target_device: String,
+    pub digest: String,
+}
+
 struct UploadsInner {
     /// Profile-scoped durable home for new committed attachments.
     dir: PathBuf,
     /// Chunk staging (`{uploads_root}/tmp/{uploadId}/`).
     tmp: PathBuf,
-    /// Historical roots accepted for reads only. Writes and staging never use
-    /// them. RwLock: a local-profile import adds its source root at runtime so
-    /// imported transcripts resolve without an engine restart.
-    read_only_roots: std::sync::RwLock<Vec<PathBuf>>,
 }
 
 #[derive(Clone)]
@@ -118,21 +127,10 @@ impl Uploads {
 
     /// Use an already-resolved profile uploads directory.
     pub fn from_root(dir: &Path) -> Self {
-        Self::from_root_with_fallback(dir, None)
-    }
-
-    /// Use a profile root for all writes and an optional legacy read-only root.
-    pub fn from_root_with_fallback(dir: &Path, legacy_read_root: Option<&Path>) -> Self {
         Self {
             inner: Arc::new(UploadsInner {
                 tmp: dir.join("tmp"),
                 dir: dir.to_path_buf(),
-                read_only_roots: std::sync::RwLock::new(
-                    legacy_read_root
-                        .into_iter()
-                        .map(Path::to_path_buf)
-                        .collect(),
-                ),
             }),
         }
     }
@@ -140,20 +138,6 @@ impl Uploads {
     /// The durable uploads dir (a path-jail root).
     pub fn dir(&self) -> &Path {
         &self.inner.dir
-    }
-
-    /// Accept `root` for reads from now on (idempotent). Profile import calls
-    /// this so transcripts that embed absolute paths under the local profile's
-    /// uploads root keep resolving after the switch to a synced profile.
-    pub fn add_read_only_root(&self, root: &Path) {
-        let mut roots = self
-            .inner
-            .read_only_roots
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !roots.iter().any(|r| r == root) {
-            roots.push(root.to_path_buf());
-        }
     }
 
     /// Stage one base64 chunk. Positional (`seq`) writes are IDEMPOTENT: a client
@@ -238,6 +222,44 @@ impl Uploads {
         target
             .is_file()
             .then(|| target.to_string_lossy().to_string())
+    }
+
+    /// Install bytes fetched from durable peer custody, validating identity
+    /// before an atomic move into the ordinary uploads jail.
+    pub fn install_custody(
+        &self,
+        identity: &CustodyIdentity,
+        bytes: &[u8],
+    ) -> Result<String, EngineError> {
+        self.staging_dir(&identity.upload_id)?;
+        if bytes.len() as u64 > MAX_BYTES
+            || format!("{:x}", Sha256::digest(bytes)) != identity.digest
+        {
+            return Err(EngineError::Other(
+                "attachment custody digest mismatch".into(),
+            ));
+        }
+        std::fs::create_dir_all(&self.inner.dir)?;
+        let target = self.pending_target(&identity.upload_id, &identity.file_name);
+        let temp = target.with_extension(format!("incoming-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&temp, bytes)?;
+        std::fs::rename(&temp, &target)?;
+        let metadata = serde_json::to_vec(identity)
+            .map_err(|e| EngineError::Other(format!("custody metadata: {e}")))?;
+        std::fs::write(custody_metadata_path(&target), metadata)?;
+        Ok(target.to_string_lossy().to_string())
+    }
+
+    /// Recover the peer identity for a committed history path even if its
+    /// cached data file was evicted. Paths outside the uploads jail never
+    /// participate, preserving the existing arbitrary-path boundary.
+    pub fn custody_identity(&self, path: &str) -> Option<CustodyIdentity> {
+        let path = PathBuf::from(path);
+        if path.parent() != Some(self.inner.dir.as_path()) {
+            return None;
+        }
+        let bytes = std::fs::read(custody_metadata_path(&path)).ok()?;
+        serde_json::from_slice(&bytes).ok()
     }
 
     /// Read one 45KB chunk of an attachment. `extra_roots` are the workspace's
@@ -333,14 +355,7 @@ impl Uploads {
         };
         // Canonicalize BOTH sides so `..` segments and symlinks can't escape.
         let resolved = std::fs::canonicalize(path).map_err(|_| outside())?;
-        let read_roots = self
-            .inner
-            .read_only_roots
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
         let allowed = std::iter::once(&self.inner.dir)
-            .chain(read_roots.iter())
             .chain(extra_roots.iter())
             .filter_map(|root| std::fs::canonicalize(root).ok())
             .any(|root| resolved.starts_with(&root) && resolved != root);
@@ -431,6 +446,14 @@ fn sanitize(file_name: &str) -> String {
     } else {
         tail
     }
+}
+
+fn custody_metadata_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "attachment".into());
+    path.with_file_name(format!(".{name}.custody.json"))
 }
 
 fn mime_by_ext(path: &Path) -> Option<&'static str> {

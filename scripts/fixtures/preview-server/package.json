@@ -1,0 +1,9 @@
+{
+  "name": "zeron-macos-preview-fixture",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned Vite runtime for the native macOS preview regression",
+  "devDependencies": {
+    "vite": "8.3.0"
+  }
+}

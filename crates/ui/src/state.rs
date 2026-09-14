@@ -51,14 +51,6 @@ pub struct EngineBootConfig {
     pub data_dir: PathBuf,
     /// Localhost IPC port to probe / serve.
     pub ipc_port: u16,
-    /// Edge base URL for the embedded engine.
-    pub edge_url: String,
-    /// Bearer for edge room joins; `None` runs offline.
-    pub edge_token: Option<String>,
-    /// Workspace org override for explicit dev-mode runs.
-    pub org_id: Option<String>,
-    /// WorkOS client id for production authentication.
-    pub workos_client_id: Option<String>,
     /// Harness for doc-command runs until per-chat config lands (M4).
     pub default_harness: HarnessId,
 }
@@ -127,9 +119,9 @@ enum DeferredEngineState {
     Failed(String),
 }
 
-/// Serves engine identity and AuthRpc immediately, then holds data calls only
-/// while a captured synced profile still needs organization onboarding.
-/// Existing subscriptions attach to the assembled service without reconnecting.
+/// Serves engine identity and AuthRpc immediately, then holds data calls while
+/// a captured paired profile is still being selected. Existing subscriptions
+/// attach to the assembled service without reconnecting.
 struct DeferredEngineRpc {
     auth: AuthRpc,
     engine_info: EngineInfo,
@@ -243,12 +235,8 @@ impl EngineHandle {
         tracing::info!(data_dir = %config.data_dir.display(), "no daemon on port; embedding engine");
         let engine_config = EngineConfig {
             data_dir: config.data_dir,
-            edge_url: config.edge_url,
-            edge_token: config.edge_token,
             ipc_port: config.ipc_port,
             default_harness: config.default_harness,
-            org_id: config.org_id,
-            workos_client_id: config.workos_client_id,
         };
 
         // Own the data dir before opening anything under it or binding IPC —
@@ -273,7 +261,7 @@ impl EngineHandle {
             }
         };
 
-        let auth = Engine::build_auth(&engine_config).await;
+        let auth = Engine::build_auth(&engine_config).await?;
         let workspace_scope = Engine::initial_workspace_scope(&auth);
         let initial_profile = Engine::resolve_profile(&engine_config, &auth, workspace_scope)?;
         let profile_is_resolved = initial_profile.is_some();
@@ -292,7 +280,7 @@ impl EngineHandle {
         // Serve the same service on the IPC port so a terminal viewport can
         // attach to this window's engine with no setup. Deliberately the
         // *deferred* service, not the assembled one: a viewport that connects
-        // during cloud onboarding gets EngineInfo and AuthRpc immediately, and
+        // during peer onboarding gets EngineInfo and AuthRpc immediately, and
         // its data subscriptions wait exactly as this window's do.
         //
         // Best-effort — losing the bind race with another engine costs other
@@ -312,7 +300,7 @@ impl EngineHandle {
         let runtime_for_boot = runtime.clone();
         let service_for_boot = assembled_service.clone();
         // The instance lock rides into the boot task and is consumed by
-        // assembly — held through sign-in onboarding too, because this process
+        // assembly — held through peer onboarding too, because this process
         // owns the data dir from the moment it decided to embed.
         let boot_task = tokio::spawn(async move {
             let profile = match initial_profile {
@@ -331,7 +319,7 @@ impl EngineHandle {
                         Ok(Some(profile)) => profile,
                         Ok(None) => {
                             state_tx.send_replace(DeferredEngineState::Failed(
-                                "workspace onboarding completed without an organization".into(),
+                                "peer onboarding completed without a storage profile".into(),
                             ));
                             return;
                         }
@@ -511,43 +499,6 @@ pub use zeron_proto::view::{
     chat_location, display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
     parse_auth_state, project_label, sort_active, sort_chats, sort_spaces, sort_tabs,
 };
-
-// ---------------------------------------------------------------------------
-// Org gate (pure)
-// ---------------------------------------------------------------------------
-
-/// One org membership row (tolerant local mirror of the engine's ListOrgs
-/// reply — `{orgs: [{id, organizationId, name}]}`).
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OrgRow {
-    pub organization_id: String,
-    pub name: String,
-}
-
-/// Parse a ListOrgs reply tolerantly (accepts a bare array too).
-pub fn parse_orgs(value: &serde_json::Value) -> Vec<OrgRow> {
-    let list = value.get("orgs").unwrap_or(value);
-    serde_json::from_value(list.clone()).unwrap_or_default()
-}
-
-/// Workspace names must be non-empty (trimmed) and reasonably short.
-pub fn org_name_valid(name: &str) -> bool {
-    let trimmed = name.trim();
-    !trimmed.is_empty() && trimmed.chars().count() <= 64
-}
-
-/// Memberships sorted by name (case-insensitive), deduped by organization id.
-pub fn sort_memberships(mut orgs: Vec<OrgRow>) -> Vec<OrgRow> {
-    orgs.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    orgs.dedup_by(|a, b| a.organization_id == b.organization_id);
-    orgs
-}
 
 // ---------------------------------------------------------------------------
 // AppState entity
@@ -2534,10 +2485,6 @@ mod tests {
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -2564,10 +2511,6 @@ mod tests {
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: free_port().await,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None, // offline
-            org_id: None,
-            workos_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -2602,10 +2545,6 @@ mod tests {
         let error = match EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: Some("client_test".into()),
             default_harness: HarnessId::Mock,
         })
         .await
@@ -2658,10 +2597,6 @@ mod tests {
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -2696,10 +2631,6 @@ mod tests {
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None, // offline
-            org_id: None,
-            workos_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -2738,10 +2669,6 @@ mod tests {
         let config = EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None, // offline
-            org_id: None,
-            workos_client_id: None,
             default_harness: HarnessId::Mock,
         };
         let (a, b) = tokio::join!(
@@ -2798,10 +2725,6 @@ mod tests {
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -2820,98 +2743,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_bootstrap_opens_local_data_without_sign_in() {
+    async fn fresh_install_opens_local_data_and_exposes_pairing_status() {
         let dir = tempfile::tempdir().unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: free_port().await,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: Some("client_test".into()),
             default_harness: HarnessId::Mock,
         })
         .await
         .unwrap();
 
         assert_eq!(handle.engine_info().workspace_scope, WorkspaceScope::Local);
-        let info: EngineInfo = handle
-            .client()
-            .call_as(methods::ENGINE_INFO, serde_json::json!({}))
-            .await
-            .unwrap();
-        assert_eq!(info, *handle.engine_info());
-
-        let mut auth = handle
-            .client()
-            .subscribe(methods::AUTH_STATUS, serde_json::json!({}))
-            .await
-            .unwrap();
         assert_eq!(
-            parse_auth_state(&auth.recv().await.unwrap()),
+            parse_auth_state(
+                &handle
+                    .client()
+                    .subscribe(methods::AUTH_STATUS, serde_json::json!({}))
+                    .await
+                    .unwrap()
+                    .recv()
+                    .await
+                    .unwrap()
+            ),
             Some(AuthState::SignedOut)
         );
-        let harnesses = handle
+        let peer = handle
             .client()
-            .call(methods::LIST_HARNESSES, serde_json::json!({}))
+            .call(methods::PEER_STATUS, serde_json::json!({}))
             .await
-            .expect("local data RPC is immediately available");
-        assert!(harnesses.as_array().is_some_and(|items| !items.is_empty()));
+            .expect("fresh local installs expose IPC-only peer setup");
+        assert_eq!(
+            peer.get("signedIn").and_then(|value| value.as_bool()),
+            Some(false)
+        );
         assert!(
-            !dir.path().join("orgs/dev-org/dev-user").exists(),
-            "production boot must not create dev-user data"
+            handle
+                .client()
+                .call(methods::LIST_HARNESSES, serde_json::json!({}))
+                .await
+                .is_ok()
         );
         assert!(dir.path().join("profiles/local").is_dir());
         handle.shutdown().await;
     }
 
     #[tokio::test]
-    async fn engine_info_is_available_while_cloud_onboarding_is_deferred() {
+    async fn legacy_provider_session_is_not_treated_as_a_peer_profile() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("session.json"),
-            r#"{"refreshToken":"saved","user":{"id":"user_1","email":"u@example.com"}}"#,
+            r#"{"refreshToken":"legacy","user":{"id":"user_1","email":"u@example.com"}}"#,
         )
         .unwrap();
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: dir.path().to_path_buf(),
             ipc_port: free_port().await,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: Some("client_test".into()),
             default_harness: HarnessId::Mock,
         })
         .await
         .unwrap();
 
-        assert!(matches!(
-            handle
-                .deferred_state()
-                .expect("embedded lifecycle")
-                .borrow()
-                .clone(),
-            DeferredEngineState::Waiting
-        ));
-
-        let info: EngineInfo = handle
+        assert_eq!(handle.engine_info().workspace_scope, WorkspaceScope::Local);
+        let status = handle
             .client()
-            .call_as(methods::ENGINE_INFO, serde_json::json!({}))
+            .call(methods::PEER_STATUS, serde_json::json!({}))
             .await
-            .expect("EngineInfo bypasses deferred cloud stores");
-        assert_eq!(info.workspace_scope, WorkspaceScope::Synced);
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                handle
-                    .client()
-                    .call(methods::LIST_HARNESSES, serde_json::json!({})),
-            )
-            .await
-            .is_err(),
-            "cloud data waits for organization onboarding"
+            .unwrap();
+        assert_eq!(
+            status.get("signedIn").and_then(|value| value.as_bool()),
+            Some(false)
         );
-        assert!(!dir.path().join("orgs").exists());
+        assert!(
+            handle
+                .client()
+                .call(methods::LIST_HARNESSES, serde_json::json!({}))
+                .await
+                .is_ok()
+        );
         handle.shutdown().await;
     }
 
@@ -2934,10 +2842,6 @@ mod tests {
         let handle = EngineHandle::bootstrap(EngineBootConfig {
             data_dir: ui_dir.path().to_path_buf(),
             ipc_port: port,
-            edge_url: "http://127.0.0.1:1".into(),
-            edge_token: None,
-            org_id: None,
-            workos_client_id: None,
             default_harness: HarnessId::Mock,
         })
         .await
@@ -3952,36 +3856,6 @@ mod tests {
         assert_eq!(chat_location(&c), None);
         c.branch = None;
         assert_eq!(chat_location(&c), None);
-    }
-
-    #[test]
-    fn org_gate_reducers() {
-        assert!(org_name_valid("Acme"));
-        assert!(org_name_valid("  padded  "));
-        assert!(!org_name_valid(""));
-        assert!(!org_name_valid("   "));
-        assert!(!org_name_valid(&"x".repeat(65)));
-
-        let rows = parse_orgs(&serde_json::json!({ "orgs": [
-            { "id": "m2", "organizationId": "o2", "name": "beta" },
-            { "id": "m1", "organizationId": "o1", "name": "Alpha" },
-            { "id": "m3", "organizationId": "o1", "name": "Alpha" },
-        ]}));
-        assert_eq!(rows.len(), 3);
-        let sorted = sort_memberships(rows);
-        let names: Vec<&str> = sorted.iter().map(|o| o.name.as_str()).collect();
-        assert_eq!(
-            names,
-            ["Alpha", "beta"],
-            "case-insensitive sort + dedupe by org id"
-        );
-        // Bare-array replies parse too; garbage yields empty.
-        assert_eq!(
-            parse_orgs(&serde_json::json!([{ "id": "m", "organizationId": "o", "name": "n" }]))
-                .len(),
-            1
-        );
-        assert!(parse_orgs(&serde_json::json!("nope")).is_empty());
     }
 
     #[test]

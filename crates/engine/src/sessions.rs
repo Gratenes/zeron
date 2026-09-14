@@ -1997,10 +1997,7 @@ async fn drive_run(
             // retirement or replacement cannot interleave and leave stale
             // capability on a successor (or resurrect it after retirement).
             let mut runs = lock(&inner.runs);
-            let Some(run) = runs
-                .get_mut(&chat_id)
-                .filter(|run| run.run_id == run_id)
-            else {
+            let Some(run) = runs.get_mut(&chat_id).filter(|run| run.run_id == run_id) else {
                 continue;
             };
             run.goal_control = true;

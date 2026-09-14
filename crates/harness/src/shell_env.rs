@@ -155,6 +155,21 @@ mod unix {
     /// never closes it — can't hang us on EOF.
     fn run_and_capture(shell: &Path, flags: &[&str], script: &str, timeout: Duration) -> Vec<u8> {
         let mut cmd = std::process::Command::new(shell);
+
+        // An interactive shell performs job-control setup against /dev/tty.
+        // When Zeron itself belongs to a background process group (detached
+        // daemon/test runner), bash sends SIGTTIN to that entire group before
+        // our timeout can run. Put only the probe in a fresh session: it has
+        // no controlling terminal, so shell job control cannot stop Zeron.
+        use std::os::unix::process::CommandExt as _;
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

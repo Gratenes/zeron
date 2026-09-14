@@ -1,5 +1,11 @@
 # chat2: dumb-relay session sync + thin docs
 
+
+> **Historical design record.** This investigation explains the chat2 protocol
+> and the incidents that shaped it. Cloudflare/DO/R2 deployment details below are
+> retired; the active protocol is served and persisted by the Rust durable peer
+> described in `ARCHITECTURE.md`.
+
 Status: PLANNED · Author: 2026-08-09 investigation (whale-doc dissection + t3code comparison)
 Prior art: `docs/registry-sync.md` (the same argument, applied to the workspace index).
 

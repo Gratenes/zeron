@@ -4,8 +4,8 @@
 //! reconnect with exponential backoff.
 //!
 //! The client owns no row semantics: everything applies through the shared
-//! [`zeron_doc::RegistryDoc`] under a lock. Wire frames are JSON text —
-//! byte-compatible with `edge/src/registry-room.ts`.
+//! [`zeron_doc::RegistryDoc`] under a lock. Wire frames are stable JSON text
+//! shared with the durable Rust peer.
 //!
 //! Liveness discipline is inherited from `room.rs` and its incidents: the
 //! transport-level text ping elicits a runtime auto-pong that proves NOTHING
@@ -88,7 +88,7 @@ pub enum RegistryEvent {
     Presence,
 }
 
-// ── wire frames (JSON text; mirror edge/src/registry-room.ts) ───────────────
+// ── stable JSON wire frames ────────────────────────────────────────────────
 
 #[derive(Serialize)]
 #[serde(tag = "t", rename_all = "lowercase")]

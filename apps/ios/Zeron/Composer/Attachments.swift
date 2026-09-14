@@ -86,9 +86,9 @@ func parseUserMessageImages(_ content: String) -> ParsedUserMessage {
 
 /// use-attachments.ts `MAX_ATTACHMENT_BYTES`.
 let maxAttachmentBytes = 24 * 1024 * 1024
-/// Base64 chars per `UploadChunk` (attachments.rs UPLOAD_CHUNK_B64_CHARS,
-/// PR #164): ≈510KB binary — sized to clear Cloudflare's 1MiB WS message cap
-/// with envelope headroom, and % 4 == 0 so every slice decodes independently.
+/// Base64 chars per `UploadChunk` (attachments.rs UPLOAD_CHUNK_B64_CHARS):
+/// ≈510KB binary, bounded below the application's 1MiB relay-frame ceiling with
+/// envelope headroom, and % 4 == 0 so every slice decodes independently.
 /// The old 60k (~45KB) sequential chunks made a 5MB photo 112 round trips.
 let uploadChunkB64Chars = 680_000
 /// Chunks in flight at once (attachments.rs UPLOAD_CONCURRENCY): order is

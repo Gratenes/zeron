@@ -296,8 +296,13 @@ impl Mux {
             tokio::spawn(async move {
                 let cancel = stream.cancel.clone();
                 tokio::select! { _ = cancel.cancelled() => {}, _ = async {
-                    if let Ok(Ok(mut socket)) = tokio::time::timeout(std::time::Duration::from_secs(5), connector.connect(&service)).await {
-                        if mux.send(Frame::new(READY, id, Vec::new())).await.is_ok() { let _ = tokio::io::copy_bidirectional(&mut stream, &mut socket).await; }
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), connector.connect(&service)).await {
+                        Ok(Ok(mut socket)) => {
+                            if mux.send(Frame::new(READY, id, Vec::new())).await.is_ok() {
+                                let _ = tokio::io::copy_bidirectional(&mut stream, &mut socket).await;
+                            }
+                        }
+                        _ => { let _ = mux.send(Frame::new(CANCEL, id, Vec::new())).await; }
                     }
                 } => {} }
             });
@@ -403,7 +408,7 @@ impl AsyncWrite for Stream {
 }
 
 pub fn local(connector: Arc<dyn Connector>, stop: CancellationToken) -> Mux {
-    // An actual local socket keeps the framing/flow-control path identical to P2P.
+    // An actual local socket keeps framing/flow control identical to remote relay Muxes.
     #[cfg(unix)]
     let (a, b) = tokio::net::UnixStream::pair().expect("local preview socket pair");
     #[cfg(not(unix))]

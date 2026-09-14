@@ -67,8 +67,7 @@ const MAX_WATCH_DIRS: usize = 8_000;
 /// `git hash-object -t tree /dev/null` — diff base for repos with no commits yet.
 const EMPTY_TREE_SHA: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-/// Latest-only diff sidecar published to each chat's session DO slot
-/// (`POST /diff/{chatId}`; shape: edge/src/session-doc/sidecar.ts).
+/// Latest-only diff sidecar published with each chat's peer session state.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffSidecar {

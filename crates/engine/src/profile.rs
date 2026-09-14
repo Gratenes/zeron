@@ -15,8 +15,6 @@ use crate::EngineError;
 
 const LOCAL_PROFILE_FILE: &str = "local-profile.json";
 const LOCAL_ORG_ID: &str = "local";
-const LEGACY_UPLOADS_DIR: &str = "uploads";
-const LEGACY_UPLOADS_OWNER_FILE: &str = "legacy-uploads-owner.json";
 
 /// A resolved, immutable identity and storage boundary for one engine runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +39,27 @@ impl EngineProfile {
             store_root,
             org_id: LOCAL_ORG_ID.to_string(),
             user_id: profile_id,
+        })
+    }
+
+    /// Resolve a trusted peer profile. Durable docs, journals, and uploads
+    /// live only at `profiles/<opaque-profile-uuid>`.
+    pub fn paired(data_dir: &Path, profile_id: &str) -> Result<Self, EngineError> {
+        let parsed = Uuid::parse_str(profile_id)
+            .map_err(|_| EngineError::Other("invalid authenticated profile id".into()))?;
+        if parsed.to_string() != profile_id {
+            return Err(EngineError::Other(
+                "invalid authenticated profile id".into(),
+            ));
+        }
+        let store_root = data_dir.join("profiles").join(profile_id);
+        Ok(Self {
+            scope: WorkspaceScope::Synced,
+            device_root: data_dir.to_path_buf(),
+            uploads_root: store_root.join("uploads"),
+            store_root,
+            org_id: profile_id.to_string(),
+            user_id: profile_id.to_string(),
         })
     }
 
@@ -92,61 +111,12 @@ impl EngineProfile {
     pub fn user_id(&self) -> &str {
         &self.user_id
     }
-
-    /// Claim the historical device-global uploads cache for one account.
-    ///
-    /// Legacy transcript entries persist absolute paths under `{data_dir}/uploads`,
-    /// so moving the directory would break them. The first account opened after
-    /// upgrade becomes its durable owner and may read it as a compatibility
-    /// fallback. New writes always use [`Self::uploads_root`], and other accounts
-    /// never receive the fallback root.
-    pub(crate) fn claim_legacy_uploads_root(&self) -> Result<Option<PathBuf>, EngineError> {
-        if self.scope == WorkspaceScope::Local {
-            return Ok(None);
-        }
-
-        let legacy_root = self.device_root.join(LEGACY_UPLOADS_DIR);
-        let metadata = match std::fs::metadata(&legacy_root) {
-            Ok(metadata) => metadata,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
-        if !metadata.is_dir() {
-            return Err(EngineError::Other(format!(
-                "invalid legacy uploads cache {}: expected a directory",
-                legacy_root.display()
-            )));
-        }
-
-        let owner_path = self.device_root.join(LEGACY_UPLOADS_OWNER_FILE);
-        let expected = LegacyUploadsOwner {
-            org_id: self.org_id.clone(),
-            user_id: self.user_id.clone(),
-        };
-        let owner = match read_legacy_uploads_owner(&owner_path) {
-            Ok(owner) => owner,
-            Err(ProfileReadError::Missing) => {
-                publish_legacy_uploads_owner(&owner_path, &expected)?;
-                read_legacy_uploads_owner(&owner_path).map_err(ProfileReadError::into_engine)?
-            }
-            Err(ProfileReadError::Engine(err)) => return Err(err),
-        };
-
-        Ok((owner == expected).then_some(legacy_root))
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalProfileFile {
     id: Uuid,
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyUploadsOwner {
-    org_id: String,
-    user_id: String,
 }
 
 fn load_or_create_local_profile_id(data_dir: &Path) -> Result<String, EngineError> {
@@ -232,62 +202,7 @@ fn read_local_profile_id(path: &Path) -> Result<String, ProfileReadError> {
     Ok(profile.id.to_string())
 }
 
-fn read_legacy_uploads_owner(path: &Path) -> Result<LegacyUploadsOwner, ProfileReadError> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ProfileReadError::Missing);
-        }
-        Err(err) => return Err(ProfileReadError::Engine(err.into())),
-    };
-    serde_json::from_slice(&bytes).map_err(|err| {
-        ProfileReadError::Engine(EngineError::Other(format!(
-            "invalid legacy uploads owner {}: {err}",
-            path.display()
-        )))
-    })
-}
-
-fn publish_legacy_uploads_owner(
-    path: &Path,
-    owner: &LegacyUploadsOwner,
-) -> Result<(), EngineError> {
-    let mut bytes = serde_json::to_vec_pretty(owner)
-        .map_err(|err| EngineError::Other(format!("serialize legacy uploads owner: {err}")))?;
-    bytes.push(b'\n');
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(LEGACY_UPLOADS_OWNER_FILE);
-    let temp_path = path.with_file_name(format!(
-        ".{file_name}.tmp-{}-{}",
-        std::process::id(),
-        Uuid::new_v4()
-    ));
-    let write_result = (|| -> Result<(), EngineError> {
-        let mut temp = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
-        temp.write_all(&bytes)?;
-        temp.sync_all()?;
-        Ok(())
-    })();
-    if let Err(err) = write_result {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(err);
-    }
-
-    let publish_result = std::fs::hard_link(&temp_path, path);
-    let _ = std::fs::remove_file(&temp_path);
-    match publish_result {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(err) => Err(err.into()),
-    }
-}
-
-/// Filesystem-safe form of an org/user id used by the historical synced layout.
+/// Filesystem-safe form used by the explicit development profile.
 fn sanitize_path_id(id: &str) -> String {
     id.chars()
         .map(|c| {
@@ -339,6 +254,19 @@ mod tests {
     }
 
     #[test]
+    fn paired_profile_uses_only_its_fresh_profile_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile_id = Uuid::new_v4().to_string();
+        let profile = EngineProfile::paired(dir.path(), &profile_id).unwrap();
+
+        assert_eq!(
+            profile.store_root(),
+            dir.path().join("profiles").join(&profile_id)
+        );
+        assert_eq!(profile.uploads_root(), profile.store_root().join("uploads"));
+    }
+
+    #[test]
     fn synced_profile_uses_account_scoped_roots() {
         let dir = tempfile::tempdir().unwrap();
         let profile = EngineProfile::synced(dir.path(), "org/example", "user@example.com");
@@ -351,24 +279,6 @@ mod tests {
         assert_eq!(
             profile.uploads_root(),
             dir.path().join("orgs/org_example/user_example_com/uploads")
-        );
-    }
-
-    #[test]
-    fn legacy_uploads_are_claimed_by_only_one_account() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("uploads")).unwrap();
-        let first = EngineProfile::synced(dir.path(), "org-a", "user-a");
-        let second = EngineProfile::synced(dir.path(), "org-b", "user-b");
-
-        assert_eq!(
-            first.claim_legacy_uploads_root().unwrap(),
-            Some(dir.path().join("uploads"))
-        );
-        assert_eq!(second.claim_legacy_uploads_root().unwrap(), None);
-        assert_eq!(
-            first.claim_legacy_uploads_root().unwrap(),
-            Some(dir.path().join("uploads"))
         );
     }
 

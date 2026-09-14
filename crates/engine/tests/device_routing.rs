@@ -429,7 +429,7 @@ async fn checkout_change_request_stream_matches_locally_and_through_device_routi
         .expect("local change request subscribe");
     let local_frame = local.recv().await.expect("local initial frame");
 
-    let _host = core_b.start_host_relay(&relay_url);
+    let _host = core_b.start_host_relay(&relay_url, Arc::new(StaticToken("test-user".into())));
     let core_a = assemble(&dirs.path().join("a"), "device-a");
     let mut link_config =
         LinkCacheConfig::new(relay_url.clone(), Arc::new(StaticToken("test-user".into())));
@@ -586,7 +586,7 @@ async fn target_device_id_routes_over_the_relay() {
 
     // Engine B hosts its device room on the fake relay.
     let core_b = assemble(&dirs.path().join("b"), "device-b");
-    let _host = core_b.start_host_relay(&relay_url);
+    let _host = core_b.start_host_relay(&relay_url, Arc::new(StaticToken("test-user".into())));
 
     // Engine A dials peers through the same relay.
     let core_a = assemble(&dirs.path().join("a"), "device-a");
@@ -754,7 +754,7 @@ async fn terminal_stream_proxies_over_the_relay() {
         .workspace
         .create_chat("chat-term", Some("space-term"), None, None, None)
         .expect("chat row on B");
-    let _host = core_b.start_host_relay(&relay_url);
+    let _host = core_b.start_host_relay(&relay_url, Arc::new(StaticToken("test-user".into())));
 
     let core_a = assemble(&dirs.path().join("a"), "device-a");
     let mut link_config =
@@ -866,7 +866,7 @@ async fn workspace_file_surface_proxies_over_the_relay() {
         .workspace
         .create_chat("chat-files", Some("space-files"), None, None, None)
         .expect("chat on B");
-    let _host = core_b.start_host_relay(&relay_url);
+    let _host = core_b.start_host_relay(&relay_url, Arc::new(StaticToken("test-user".into())));
 
     let core_a = assemble(&dirs.path().join("a-files"), "device-a");
     let mut link_config =
@@ -1142,7 +1142,7 @@ async fn queue_watch_and_single_consumption_route_to_the_remote_chat_host() {
             true,
         )
         .expect("seed held queue row");
-    let _host = core_b.start_host_relay(&relay_url);
+    let _host = core_b.start_host_relay(&relay_url, Arc::new(StaticToken("test-user".into())));
 
     let core_a = assemble(&dirs.path().join("a"), "device-a");
     let mut link_config =

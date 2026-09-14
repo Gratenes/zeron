@@ -1,42 +1,48 @@
-// On-device Loro doc persistence — the old mobile app's snapshot cache
-// (kv.ts/loro-room.ts) and the engine's DocsStore, in file form: one snapshot
-// per doc under Application Support. Docs load BEFORE the room join, so the
-// UI renders instantly from local state (offline included) and the join's
-// version vector turns the backfill incremental instead of a full snapshot.
+// Profile-scoped on-device Loro persistence. Each paired identity starts in
+// its own namespace and only reads snapshots written inside that namespace.
 
 import Foundation
 import Loro
 
 enum DocDisk {
+    private static let lock = NSLock()
+    private static var activeProfileId: String?
+
+    private static var support: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory,
+                                 in: .userDomainMask)[0]
+    }
+
+
+    static func activate(profileId: String) {
+        precondition(!profileId.isEmpty)
+        lock.withLock { activeProfileId = profileId }
+        _ = directory
+    }
+
+    static func deactivate() {
+        lock.withLock { activeProfileId = nil }
+    }
+
     static var directory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                            in: .userDomainMask)[0]
-            .appendingPathComponent("ZeronDocs", isDirectory: true)
+        guard let profile = lock.withLock({ activeProfileId }) else {
+            preconditionFailure("DocDisk used before a profile was activated")
+        }
+        return directory(profileId: profile)
+    }
+
+    static func directory(profileId: String) -> URL {
+        let safe = profileId.data(using: .utf8)!.base64URLEncodedString()
+        let base = support.appendingPathComponent("ZeronProfiles", isDirectory: true)
+            .appendingPathComponent(safe, isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
     }
 
-    static func url(for id: String) -> URL {
-        let safe = id.replacingOccurrences(of: "/", with: "_")
-        return directory.appendingPathComponent("\(safe).loro")
-    }
 
-    /// Import the saved snapshot, if any. Returns whether anything loaded.
-    @discardableResult
-    static func load(into doc: LoroDoc, id: String) -> Bool {
-        guard let data = try? Data(contentsOf: url(for: id)), !data.isEmpty else { return false }
-        return (try? doc.importWith(bytes: data, origin: "disk")) != nil
-    }
-
-    /// Atomically persist the doc's snapshot.
-    static func save(doc: LoroDoc, id: String) {
-        guard let data = try? doc.export(mode: .snapshot) else { return }
-        try? data.write(to: url(for: id), options: .atomic)
-    }
 
     /// The workspace registry's persisted blob ({rows, cursor, gcFloor,
-    /// clock, pending} JSON — RegistryDoc.toData). Replaces the old `ws3_`
-    /// Loro workspace snapshot; session docs stay Loro snapshots unchanged.
+    /// clock, pending} JSON; session docs use chat2 Loro snapshots.
     static func registryURL(orgId: String, userId: String) -> URL {
         directory.appendingPathComponent("registry1_\(orgId)_\(userId).json")
     }
@@ -44,12 +50,7 @@ enum DocDisk {
     // MARK: chat2 lineage snapshots (docs/chat2-sync.md C2)
 
     /// `c2_<id>.loro` = 8-byte magic + UInt64 LE room cursor + snapshot,
-    /// written atomically in ONE file so doc content and cursor can never
-    /// diverge (a restored/copied doc that disagreed with its own cursor was
-    /// the root of the s2 redownload-forever class). The un-prefixed
-    /// `<id>.loro` files are the retired s2 lineage — never loaded into a
-    /// chat2 doc (unrelated Loro histories would duplicate every message),
-    /// kept on disk for rollback until LRU pruning ages them out.
+    /// written atomically so doc content and cursor cannot diverge.
     private static let chat2Magic = Data("C2SNAP01".utf8)
 
     static func chat2URL(for id: String) -> URL {
@@ -57,9 +58,6 @@ enum DocDisk {
         return directory.appendingPathComponent("c2_\(safe).loro")
     }
 
-    static func legacySnapshotExists(id: String) -> Bool {
-        FileManager.default.fileExists(atPath: url(for: id).path)
-    }
 
     /// Import the chat2 snapshot; returns its cursor, or nil when absent or
     /// unreadable (caller starts fresh at cursor 0 — the room re-serves).
@@ -86,17 +84,14 @@ enum DocDisk {
         try? data.write(to: chat2URL(for: id), options: .atomic)
     }
 
-    /// LRU-prune session snapshots (the workspace registry blob is always
-    /// kept; a leftover `ws3_` Loro snapshot is retained for rollback).
+    /// LRU-prune active chat2 session snapshots; registry and unrelated files stay untouched.
     static func prune(keep: Int) {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(at: directory,
                                                       includingPropertiesForKeys: [.contentModificationDateKey])
         else { return }
         let sessions = files.filter {
-            $0.pathExtension == "loro"  // never the registry blob or uploads/
-                && !$0.lastPathComponent.hasPrefix("ws3_")
-                && !$0.lastPathComponent.hasPrefix("registry1_")
+            $0.pathExtension == "loro" && $0.lastPathComponent.hasPrefix("c2_")
         }
         guard sessions.count > keep else { return }
         let sorted = sessions.sorted {
@@ -109,9 +104,10 @@ enum DocDisk {
         }
     }
 
-    /// Sign-out hygiene: local doc state belongs to the signed-in identity.
-    static func wipeAll() {
-        try? FileManager.default.removeItem(at: directory)
+    /// Sign-out closes this profile without deleting it. A later re-pair to
+    /// the same profile can reopen its cache; unrelated profiles cannot.
+    static func closeProfile() {
+        deactivate()
     }
 }
 

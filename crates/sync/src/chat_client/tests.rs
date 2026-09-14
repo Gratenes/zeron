@@ -1531,3 +1531,93 @@ async fn http_catchup_crosses_a_contained_checkpoint_and_repairs_causal_gaps() {
         client.shutdown().await;
     }
 }
+struct PendingConnector;
+
+impl BinConnector for PendingConnector {
+    fn connect(&self) -> BoxFuture<'static, Result<BinPipe, SyncError>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+struct RecordingHttpTransport {
+    fetches: Arc<std::sync::atomic::AtomicU64>,
+    pushes: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+
+impl ChatTransport for RecordingHttpTransport {
+    fn fetch_rows(&self, _after: u64) -> BoxFuture<'static, Result<Vec<u8>, SyncError>> {
+        self.fetches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let frames = [
+            encode(
+                frame_type::STATE,
+                &serde_json::json!({"headSeq":0,"seqFloor":0,"checkpointSeq":0,"checkpointSize":0,"rowCount":0,"rowBytes":0}),
+                &[],
+            ),
+            encode(
+                frame_type::ROWS_DONE,
+                &serde_json::json!({"headSeq":0}),
+                &[],
+            ),
+        ];
+        let mut body = Vec::new();
+        for frame in frames {
+            body.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+            body.extend(frame);
+        }
+        Box::pin(async move { Ok(body) })
+    }
+
+    fn push(
+        &self,
+        batch_id: String,
+        bytes: Vec<u8>,
+    ) -> BoxFuture<'static, Result<String, SyncError>> {
+        lock(&self.pushes).push(bytes);
+        Box::pin(async move {
+            Ok(serde_json::json!({"batchId":batch_id,"seq":1,"dup":false}).to_string())
+        })
+    }
+}
+
+#[tokio::test]
+async fn http_send_is_not_blocked_by_a_pending_websocket_dial() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let sink = Arc::new(RecordingSink::default());
+    let (fetcher, _) = fetcher(&[]);
+    let fetches = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let pushes = Arc::new(Mutex::new(Vec::new()));
+    let transport = Arc::new(RecordingHttpTransport {
+        fetches: fetches.clone(),
+        pushes: pushes.clone(),
+    });
+    let client = ChatClient::connect_with_transport(
+        Arc::new(PendingConnector),
+        sink,
+        fetcher,
+        "dev-a",
+        0,
+        ChatTuning::default(),
+        Some(transport),
+    )
+    .await
+    .unwrap();
+
+    // Let the bootstrap HTTP cycle finish, then enqueue while the socket dial
+    // remains pending forever. The send must use the independent HTTP worker.
+    while fetches.load(Relaxed) == 0 {
+        tokio::task::yield_now().await;
+    }
+    client.enqueue_batch("post-bootstrap".into(), b"durable-update".to_vec());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while lock(&pushes).is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "HTTP send was starved by WS dial"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(lock(&pushes).as_slice(), &[b"durable-update".to_vec()]);
+    client.shutdown().await;
+}

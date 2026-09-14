@@ -1,13 +1,12 @@
-// chat2 wire-frame conformance — pins the same layout vectors as
-// crates/sync/src/chat_frames.rs and edge/src/chat-frames.test.ts. The three
-// codecs must stay byte-compatible; change all suites together.
+// Chat wire-frame conformance pins the same layout vectors as
+// crates/sync/src/chat_frames.rs. Swift and Rust codecs remain byte-compatible.
 
 import XCTest
 @testable import Zeron
 
 final class ChatFramesTests: XCTestCase {
     func testPinsTheWireLayout() {
-        // Must match the Rust/TS vector: [type][headerLen u32 LE][header][payload].
+        // Must match the Rust vector: [type][headerLen u32 LE][header][payload].
         let frame = ChatWire.encode(ChatFrameType.push,
                                     header: ["batchId": "b1"],
                                     payload: Data([9, 8, 7]))

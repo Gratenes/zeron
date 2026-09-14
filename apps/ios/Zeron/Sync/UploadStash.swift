@@ -39,6 +39,11 @@ enum UploadStash {
     private static func url(uploadId: String) -> URL {
         let safe = uploadId.filter { $0.isLetter || $0.isNumber || $0 == "-" }
         return directory.appendingPathComponent("\(safe).bin")
+
+    }
+
+    private static func progressURL(uploadId: String) -> URL {
+        url(uploadId: uploadId).deletingPathExtension().appendingPathExtension("progress")
     }
 
     static func save(uploadId: String, data: Data) {
@@ -49,8 +54,14 @@ enum UploadStash {
         try? Data(contentsOf: url(uploadId: uploadId))
     }
 
+
+    static func saveProgress(uploadId: String, nextOffset: Int) {
+        try? Data(String(nextOffset).utf8).write(to: progressURL(uploadId: uploadId), options: .atomic)
+    }
+
     static func delete(uploadId: String) {
         try? FileManager.default.removeItem(at: url(uploadId: uploadId))
+        try? FileManager.default.removeItem(at: progressURL(uploadId: uploadId))
     }
 
     /// Drop entries older than the command TTL — their commands have expired,

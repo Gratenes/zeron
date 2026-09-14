@@ -29,10 +29,10 @@ use zeron_rpc::methods;
 
 /// use-attachments.ts `MAX_ATTACHMENT_BYTES`.
 pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
-/// Base64 chars per `UploadChunk`, sized against the relay's hard ceiling:
-/// Cloudflare caps a WebSocket message at 1 MiB, and a chunk rides one relay
-/// frame (JSON envelope + uleb header add ~150 bytes) — 680 000 chars ≈
-/// 510 KB binary leaves ~35% headroom. Multiple of 4 so a slice of the
+/// Base64 chars per `UploadChunk`, sized against the application's 1 MiB
+/// relay-frame ceiling. A chunk rides one frame (JSON envelope + uleb header add
+/// ~150 bytes), so 680 000 chars ≈510 KB binary leaves ample headroom. Multiple
+/// of 4 so a slice of the
 /// whole-file base64 stays independently decodable. The old 60 000 (45 KB)
 /// made a 3 MB screenshot ~70 sequential round trips — each one a stall
 /// opportunity on a flaky link.
@@ -1063,8 +1063,8 @@ mod tests {
 
     #[test]
     fn upload_chunk_fits_the_relay_frame_ceiling() {
-        // Cloudflare caps a WebSocket message at 1 MiB; the chunk rides one
-        // relay frame with a small JSON envelope + uleb header.
+        // The application bounds relay frames at 1 MiB; leave room for the
+        // small JSON envelope and uleb header.
         assert!(UPLOAD_CHUNK_B64_CHARS + 1_024 < 1_048_576);
         // A slice of the whole-file base64 must stay independently decodable.
         assert_eq!(UPLOAD_CHUNK_B64_CHARS % 4, 0);

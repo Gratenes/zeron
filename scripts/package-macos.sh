@@ -24,12 +24,25 @@ APP_TARBALL="$OUT_DIR/zeron-$VERSION-macos-$ARCH-app.tar.gz"
 cd "$ROOT"
 cargo build --release -p zeron
 
+GO="${GO:-go}"
+GO="$GO" python3 "$ROOT/connectivity/tailcat/licenses/generate.py" --check
+GO="$GO" "$ROOT/scripts/build-tailcat.sh" native
+TAILCAT_BIN="$ROOT/target/tailcat/kratos-tailcat"
+
 rm -rf "$APP" "$DMG" "$APP_TARBALL"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 install -m 755 "$ROOT/target/release/zeron" "$APP/Contents/MacOS/zeron"
+
+install -m 755 "$TAILCAT_BIN" "$APP/Contents/MacOS/kratos-tailcat"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
+
+install -m 644 "$ROOT/LICENSE" "$APP/Contents/Resources/LICENSE"
+install -m 644 "$ROOT/THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
+
+mkdir -p "$APP/Contents/Resources/licenses/tailcat"
+cp -R "$ROOT/connectivity/tailcat/licenses/bundle/." "$APP/Contents/Resources/licenses/tailcat/"
 
 # Icon: iconset from the pre-masked macOS icon (squircle + margins + shadow
 # baked into dist/macos/icon-1024.png — sips can't alpha-mask, so the mask is
@@ -43,6 +56,15 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/zeron.icns"
 rm -rf "$ICONSET"
+
+# Nested executable code must be signed before the enclosing application.
+if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+  codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" \
+    "$APP/Contents/MacOS/kratos-tailcat"
+else
+  codesign --force --sign - "$APP/Contents/MacOS/kratos-tailcat"
+fi
+
 
 if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
   # Hardened runtime + secure timestamp are both notarization requirements.

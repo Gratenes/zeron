@@ -110,9 +110,9 @@ const RELAY_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(15 * 6
 const RELAY_MIN_VERSION: (u64, u64, u64) = (0, 2, 12);
 
 /// Edge connection config. The bearer is a **provider**, never a snapshot:
-/// every room (re)connect and HTTP request re-reads it, so WorkOS access-token
-/// refreshes (~1h expiry) take effect without an engine restart. Dev bearers
-/// (which never expire) ride the same seam as a [`zeron_rpc::StaticToken`].
+/// every room (re)connect and HTTP request re-reads it, so short-lived peer
+/// bearer refreshes take effect without an engine restart. Test/dev bearers
+/// ride the same seam as a [`zeron_rpc::StaticToken`].
 #[derive(Clone)]
 pub struct EdgeConfig {
     /// Edge base URL (`http(s)://…`); rewritten to `ws(s)` for the room socket.
@@ -264,6 +264,10 @@ struct DocHostInner {
     /// terminalizes the latter as Rejected instead of leaving a forever-
     /// Pending entry no retry could ever reach (2026-08-19 swallowed-send).
     executing: Mutex<HashSet<String>>,
+    /// Command ids with an active remote-delivery escort. Restored snapshots,
+    /// registry recovery, and explicit retry can all discover the same pending
+    /// row; only one may upload/relay it at a time.
+    delivering: Mutex<HashSet<String>>,
     /// Peer links (engine assembly, edge runtimes only) — the transport that
     /// pushes queued attachment bytes to a remote host.
     links: OnceLock<Arc<zeron_rpc::LinkCache>>,
@@ -311,6 +315,19 @@ struct TransferProgressGuard<'a> {
 impl Drop for TransferProgressGuard<'_> {
     fn drop(&mut self) {
         self.host.transfer_progress_clear(self.upload_id);
+    }
+}
+
+/// Releases a command's delivery single-flight slot even when runtime
+/// shutdown cancels the worker while an HTTP chunk is in flight.
+struct DeliveryGuard {
+    inner: Arc<DocHostInner>,
+    command_id: String,
+}
+
+impl Drop for DeliveryGuard {
+    fn drop(&mut self) {
+        lock(&self.inner.delivering).remove(&self.command_id);
     }
 }
 
@@ -609,7 +626,9 @@ impl ChatDocHandle {
     }
 
     pub fn connected(&self) -> bool {
-        lock(&self.chat2).is_some()
+        lock(&self.chat2)
+            .as_ref()
+            .is_some_and(|client| client.stats().connected)
     }
 
     /// Write a complete user message entry, idempotent by id (the client-minted message
@@ -723,6 +742,7 @@ impl DocHost {
                 transfers: watch::channel(Vec::new()).0,
                 connectivity_grace: Mutex::new(DegradeGrace::default()),
                 executing: Mutex::new(HashSet::new()),
+                delivering: Mutex::new(HashSet::new()),
                 links: OnceLock::new(),
                 http: reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(30))
@@ -862,7 +882,24 @@ impl DocHost {
     /// Wire the peer-link cache (engine assembly, edge runtimes only) — the
     /// transport for queued attachment transfers to a remote host.
     pub fn set_links(&self, links: Arc<zeron_rpc::LinkCache>) {
-        let _ = self.inner.links.set(links);
+        if self.inner.links.set(links).is_err() {
+            return;
+        }
+        // Runtime assembly reaches this point after uploads and the restored
+        // registry are wired. Re-open remote chats so locally-issued pending
+        // attachment refs regain an escort without a user Retry RPC.
+        let chats = self
+            .workspace()
+            .and_then(|workspace| workspace.read_chats().ok())
+            .unwrap_or_default();
+        for chat in chats {
+            if chat.device_id == self.inner.config.device_id {
+                continue;
+            }
+            if let Ok(handle) = self.open(&chat.id) {
+                self.rearm_pending_deliveries(&chat.id, &handle);
+            }
+        }
     }
 
     /// Re-evaluate every open chat's command queue NOW. Called after an
@@ -1337,6 +1374,7 @@ impl DocHost {
         }
         // Publish only after the durable subscription and bootstrap are installed.
         lock(&self.inner.handles).insert(chat_id.to_string(), handle.clone());
+        self.rearm_pending_deliveries(chat_id, &handle);
         drop(opening);
         self.spawn_worker(chat_task(self.clone(), Arc::downgrade(&handle), changed_rx));
         self.evict_over_budget();
@@ -3210,6 +3248,38 @@ impl DocHost {
     ///    rows didn't; there was no second road for the command).
     ///
     /// Stops the moment any path lands. No-op for locally-hosted chats.
+    /// Re-arm a restored outgoing attachment transfer. Only this device's
+    /// still-pending commands are eligible, and every referenced source file
+    /// must remain in the profile uploads jail. The delivery single-flight
+    /// handles overlap between open(), startup registry scan, and Retry.
+    fn rearm_pending_deliveries(&self, chat_id: &str, handle: &Arc<ChatDocHandle>) {
+        let Some(uploads) = self.inner.uploads.get() else {
+            return;
+        };
+        let Ok(commands) = handle.doc.read_commands() else {
+            return;
+        };
+        for entry in commands {
+            if entry.status != SessionCommandStatus::Pending
+                || entry.issued_by != self.inner.config.device_id
+                || self.inner.store.is_processed(&entry.id).unwrap_or(false)
+            {
+                continue;
+            }
+            let transfers = command_transfers(&entry);
+            if transfers.is_empty()
+                || !transfers.iter().all(|transfer| {
+                    uploads
+                        .pending_target(&transfer.upload_id, &transfer.file_name)
+                        .is_file()
+                })
+            {
+                continue;
+            }
+            self.spawn_command_delivery(chat_id, entry, transfers);
+        }
+    }
+
     fn spawn_command_delivery(
         &self,
         chat_id: &str,
@@ -3219,9 +3289,17 @@ impl DocHost {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return; // bare sync callers (unit tests) skip rather than panic
         };
+        if !lock(&self.inner.delivering).insert(entry.id.clone()) {
+            return;
+        }
+        let guard = DeliveryGuard {
+            inner: self.inner.clone(),
+            command_id: entry.id.clone(),
+        };
         let host = self.clone();
         let chat = chat_id.to_string();
         self.spawn_worker_on(&runtime, async move {
+            let _guard = guard;
             let Some(target) = host.remote_host_for(&chat) else {
                 return; // local host (or no row yet claimed remotely)
             };
@@ -3322,6 +3400,112 @@ impl DocHost {
             }
             backoff = (backoff * 2).min(TRANSFER_BACKOFF_CAP);
         }
+    }
+
+    async fn recover_attachments(&self, entry: &SessionCommandEntry) {
+        let Some(edge) = self.inner.config.edge.as_ref() else {
+            return;
+        };
+        let Some(uploads) = self.inner.uploads.get() else {
+            return;
+        };
+        let Some(bearer) = edge.bearer().await else {
+            return;
+        };
+        for transfer in command_transfers(entry) {
+            let pending = crate::uploads::pending_ref(&transfer.upload_id, &transfer.file_name);
+            if uploads.resolve_pending(&pending).is_some() {
+                continue;
+            }
+            let url = format!(
+                "{}/attachment/{}?senderDevice={}&targetDevice={}",
+                edge.url.trim_end_matches('/'),
+                transfer.upload_id,
+                entry.issued_by,
+                self.inner.config.device_id
+            );
+            let Ok(response) = self.inner.http.get(url).bearer_auth(&bearer).send().await else {
+                continue;
+            };
+            if !response.status().is_success() {
+                continue;
+            }
+            let digest = response
+                .headers()
+                .get("x-attachment-digest")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let Ok(bytes) = response.bytes().await else {
+                continue;
+            };
+            let Some(digest) = digest else { continue };
+            let identity = crate::uploads::CustodyIdentity {
+                upload_id: transfer.upload_id,
+                file_name: transfer.file_name,
+                sender_device: entry.issued_by.clone(),
+                target_device: self.inner.config.device_id.clone(),
+                digest,
+            };
+            if uploads.install_custody(&identity, &bytes).is_ok() {
+                self.transfer_progress_set(
+                    &identity.upload_id,
+                    &identity.file_name,
+                    bytes.len() as u64,
+                    bytes.len() as u64,
+                );
+                self.transfer_progress_clear(&identity.upload_id);
+            }
+        }
+    }
+
+    /// Rehydrate a transcript attachment whose local cache was evicted. The
+    /// custody sidecar is read only for paths directly inside the uploads jail.
+    pub async fn recover_history_attachment(&self, path: &str) -> Result<bool, EngineError> {
+        let uploads = self
+            .inner
+            .uploads
+            .get()
+            .ok_or_else(|| EngineError::Other("uploads not wired".into()))?;
+        if std::path::Path::new(path).is_file() {
+            return Ok(true);
+        }
+        let Some(identity) = uploads.custody_identity(path) else {
+            return Ok(false);
+        };
+        let edge = self
+            .inner
+            .config
+            .edge
+            .as_ref()
+            .ok_or_else(|| EngineError::Other("durable peer not configured".into()))?;
+        let bearer = edge
+            .bearer()
+            .await
+            .ok_or_else(|| EngineError::Other("signed out".into()))?;
+        let url = format!(
+            "{}/attachment/{}?senderDevice={}&targetDevice={}",
+            edge.url.trim_end_matches('/'),
+            identity.upload_id,
+            identity.sender_device,
+            identity.target_device
+        );
+        let response = self
+            .inner
+            .http
+            .get(url)
+            .bearer_auth(bearer)
+            .send()
+            .await
+            .map_err(|e| EngineError::Other(e.to_string()))?;
+        if !response.status().is_success() {
+            return Ok(false);
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| EngineError::Other(e.to_string()))?;
+        uploads.install_custody(&identity, &bytes)?;
+        Ok(true)
     }
 
     /// Every local chat2 batch acked while connected — our rows are ON the
@@ -3534,6 +3718,8 @@ impl DocHost {
         entry: SessionCommandEntry,
     ) -> Result<&'static str, EngineError> {
         let handle = self.open(chat_id)?;
+
+        self.recover_attachments(&entry).await;
         // The sender sequences attachment transfers BEFORE the relay; refuse
         // (retryably) rather than run without the images.
         if !self.missing_attachments(&entry).is_empty() {
@@ -3585,94 +3771,122 @@ impl DocHost {
         result
     }
 
-    /// One transfer attempt: chunked `UploadChunk` + `UploadCommit` straight
-    /// over the peer link (same wire the UI's legacy path used, so old and
-    /// new engines interoperate). Timeouts mark the link suspect —
-    /// `invalidate` drops the cached socket so the retry dials fresh instead
-    /// of feeding a zombie pipe forever (2026-08-19 incident).
+    /// Deposit every attachment into the always-on durable peer before the
+    /// command may use any delivery road. The peer's positional status makes
+    /// retries and process restarts resume rather than restart the file.
     async fn push_attachments(
         &self,
         target: &str,
         transfers: &[crate::uploads::AttachmentTransfer],
     ) -> Result<(), TransferError> {
         use TransferError::{Permanent, Transient};
-        let Some(links) = self.inner.links.get() else {
-            return Err(Permanent("peer links not wired".into()));
-        };
-        let Some(uploads) = self.inner.uploads.get() else {
-            return Err(Permanent("uploads not wired".into()));
-        };
-        let client = links
-            .client(target)
+        let edge = self
+            .inner
+            .config
+            .edge
+            .as_ref()
+            .ok_or_else(|| Permanent("durable peer not configured".into()))?;
+        let bearer = edge
+            .bearer()
             .await
-            .map_err(|e| Transient(format!("peer link: {e}")))?;
+            .ok_or_else(|| Transient("signed out".into()))?;
+        let uploads = self
+            .inner
+            .uploads
+            .get()
+            .ok_or_else(|| Permanent("uploads not wired".into()))?;
         for transfer in transfers {
-            // Bytes come from the uploads jail only — a transfer names an
-            // upload identity, never an arbitrary path.
             let source = uploads.pending_target(&transfer.upload_id, &transfer.file_name);
             let bytes = tokio::fs::read(&source)
                 .await
                 .map_err(|e| Permanent(format!("staged attachment missing: {e}")))?;
-            // Progress entry for the sender's thumbnail ring, updated per
-            // landed chunk. The guard retires it on EVERY exit — commit,
-            // timeout, refusal — so a dead attempt falls back to the
-            // indeterminate spinner and the retry re-publishes from 0.
             let total = bytes.len() as u64;
+            let digest = format!("{:x}", Sha256::digest(&bytes));
             self.transfer_progress_set(&transfer.upload_id, &transfer.file_name, 0, total);
             let _progress = TransferProgressGuard {
                 host: self,
                 upload_id: &transfer.upload_id,
             };
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            let mut start = 0usize;
-            let mut seq = 0u64;
-            loop {
-                let end = (start + TRANSFER_CHUNK_B64).min(b64.len());
-                let params = serde_json::json!({
-                    "uploadId": transfer.upload_id, "seq": seq, "data": &b64[start..end],
-                });
-                let call = client.call(zeron_rpc::methods::UPLOAD_CHUNK, params);
-                match tokio::time::timeout(TRANSFER_CHUNK_TIMEOUT, call).await {
-                    Err(_) => {
-                        links.invalidate(target);
-                        return Err(Transient("chunk push timed out; peer link suspect".into()));
-                    }
-                    Ok(Err(zeron_rpc::RpcError::Failed(err))) => {
-                        return Err(Permanent(format!("host refused chunk: {err}")));
-                    }
-                    Ok(Err(err)) => {
-                        links.invalidate(target);
-                        return Err(Transient(format!("chunk push failed: {err}")));
-                    }
-                    Ok(Ok(_)) => {}
-                }
-                start = end;
-                seq += 1;
-                // b64 → raw: 4 chars carry 3 bytes; min-clamp absorbs the
-                // final chunk's padding overshoot.
-                let done = ((start as u64) * 3 / 4).min(total);
-                self.transfer_progress_set(&transfer.upload_id, &transfer.file_name, done, total);
-                if start >= b64.len() {
-                    break;
-                }
+            let base = format!(
+                "{}/attachment/{}",
+                edge.url.trim_end_matches('/'),
+                transfer.upload_id
+            );
+            let init = self
+                .inner
+                .http
+                .post(&base)
+                .bearer_auth(&bearer)
+                .json(&serde_json::json!({
+                    "targetDevice": target,
+                    "fileName": transfer.file_name,
+                    "length": total,
+                    "digest": digest,
+                }))
+                .send()
+                .await
+                .map_err(|e| Transient(format!("custody init: {e}")))?;
+            if !init.status().is_success() {
+                return Err(Permanent(format!("custody init HTTP {}", init.status())));
             }
-            let params = serde_json::json!({
-                "uploadId": transfer.upload_id, "fileName": transfer.file_name,
-            });
-            let call = client.call(zeron_rpc::methods::UPLOAD_COMMIT, params);
-            match tokio::time::timeout(TRANSFER_COMMIT_TIMEOUT, call).await {
-                Err(_) => {
-                    links.invalidate(target);
-                    return Err(Transient("commit timed out; peer link suspect".into()));
+            let state: serde_json::Value = init
+                .json()
+                .await
+                .map_err(|e| Transient(format!("custody status: {e}")))?;
+            let mut offset = state
+                .get("nextOffset")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            if state.get("committed").and_then(|v| v.as_bool()) == Some(true) {
+                self.transfer_progress_set(&transfer.upload_id, &transfer.file_name, total, total);
+                continue;
+            }
+            while offset < total {
+                let end = (offset + 512 * 1024).min(total);
+                let response = self
+                    .inner
+                    .http
+                    .put(format!(
+                        "{base}/chunk?targetDevice={target}&offset={offset}"
+                    ))
+                    .bearer_auth(&bearer)
+                    .body(bytes[offset as usize..end as usize].to_vec())
+                    .send()
+                    .await
+                    .map_err(|e| Transient(format!("custody chunk: {e}")))?;
+                if !response.status().is_success() {
+                    return Err(Transient(format!(
+                        "custody chunk HTTP {}",
+                        response.status()
+                    )));
                 }
-                Ok(Err(zeron_rpc::RpcError::Failed(err))) => {
-                    return Err(Permanent(format!("host refused commit: {err}")));
+                let state: serde_json::Value = response
+                    .json()
+                    .await
+                    .map_err(|e| Transient(format!("custody chunk ack: {e}")))?;
+                let next = state
+                    .get("nextOffset")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(end);
+                if next <= offset || next > total {
+                    return Err(Permanent("invalid custody offset".into()));
                 }
-                Ok(Err(err)) => {
-                    links.invalidate(target);
-                    return Err(Transient(format!("commit failed: {err}")));
-                }
-                Ok(Ok(_)) => {}
+                offset = next;
+                self.transfer_progress_set(&transfer.upload_id, &transfer.file_name, offset, total);
+            }
+            let commit = self
+                .inner
+                .http
+                .post(format!("{base}/commit?targetDevice={target}"))
+                .bearer_auth(&bearer)
+                .send()
+                .await
+                .map_err(|e| Transient(format!("custody commit: {e}")))?;
+            if !commit.status().is_success() {
+                return Err(Transient(format!(
+                    "custody commit HTTP {}",
+                    commit.status()
+                )));
             }
         }
         Ok(())
@@ -3903,6 +4117,8 @@ impl DocHost {
             // the transfer instead of running without its images. The wait is
             // bounded; past it the command fails loudly.
             if matches!(disposition, CommandDisposition::Execute) {
+                self.recover_attachments(&entry).await;
+
                 let missing = self.missing_attachments(&entry);
                 if !missing.is_empty() {
                     if now_ms().saturating_sub(entry.issued_at) < ATTACHMENT_WAIT_MAX_MS {

@@ -1,5 +1,5 @@
 //! `zeron update` — check for and apply a newer release, natively (the same
-//! flow `edge/src/install.sh` performs: download → verify → symlink swap →
+//! flow `scripts/install.sh` performs: download → verify → symlink swap →
 //! service restart). macOS app bundles swap the bundle instead; source builds
 //! are report-only.
 
@@ -68,7 +68,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
         InstallKind::Unmanaged => {
             bail!(
                 "this binary is not update-managed (source build or hand-copied).\n\
-                 Linux: curl -fsSL https://zeron.sh/install.sh | sh\n\
+                 Linux: curl -fsSL https://github.com/wasimysaid/Kratos/releases/latest/download/install.sh | sh\n\
                  macOS: download the new Zeron.app dmg, or rebuild from source.\n\
                  Windows: use an update-enabled portable package, or rebuild from source."
             )

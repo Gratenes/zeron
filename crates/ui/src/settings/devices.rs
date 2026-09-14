@@ -13,7 +13,11 @@ use zeron_proto::WorkspaceScope;
 use zeron_rpc::methods;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
+use crate::pairing::{
+    PeerStatus, TrustedDevice, connectivity_label, parse_peer_status, parse_trusted_devices,
+};
 use crate::popover;
+use crate::popover::Loadable;
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -54,6 +58,42 @@ pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerAction {
+    Invitation,
+    Revocation,
+}
+
+fn peer_action_can_start(current: Option<PeerAction>) -> bool {
+    current.is_none()
+}
+
+fn begin_peer_action(slot: &mut Option<PeerAction>, action: PeerAction) -> bool {
+    if !peer_action_can_start(*slot) {
+        return false;
+    }
+    *slot = Some(action);
+    true
+}
+
+pub(crate) fn can_manage_peer(status: &PeerStatus) -> bool {
+    // The durable host is currently the only owner identity the engine creates.
+    status.signed_in && status.hosting
+}
+
+fn take_invitation_for_clipboard(
+    invitation: &mut Option<String>,
+    copied: &mut bool,
+) -> Option<String> {
+    let code = invitation.take()?;
+    *copied = true;
+    Some(code)
+}
+
+fn refresh_response_is_current(current: u64, response: u64) -> bool {
+    current == response
+}
+
 struct RenameDialog {
     device_id: String,
     input: Entity<ComposerInput>,
@@ -66,23 +106,44 @@ pub struct DevicesPage {
     /// Device id whose id-chip shows "Copied" right now.
     copied: Option<String>,
     error: Option<SharedString>,
-    task: Option<Task<()>>,
+    refresh_task: Option<Task<()>>,
+    peer_action_task: Option<Task<()>>,
+    rename_task: Option<Task<()>>,
     copy_task: Option<Task<()>>,
+    invitation_copy_task: Option<Task<()>>,
+    peer_action: Option<PeerAction>,
+    refresh_generation: u64,
+    invitation_copied: bool,
+
+    peer_status: Loadable<PeerStatus>,
+    trusted_devices: Loadable<Vec<TrustedDevice>>,
+    invitation: Option<String>,
     _observe: Subscription,
 }
 
 impl DevicesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
-        Self {
+        let mut page = Self {
             state,
             rename: None,
             copied: None,
             error: None,
-            task: None,
+            refresh_task: None,
+            peer_action_task: None,
+            rename_task: None,
             copy_task: None,
+            invitation_copy_task: None,
+            peer_action: None,
+            refresh_generation: 0,
+            invitation_copied: false,
+            peer_status: Loadable::Idle,
+            trusted_devices: Loadable::Idle,
+            invitation: None,
             _observe: observe,
-        }
+        };
+        page.refresh_peer(cx);
+        page
     }
 
     fn open_rename(&mut self, device_id: String, current: String, cx: &mut Context<Self>) {
@@ -118,7 +179,7 @@ impl DevicesPage {
             "deviceId": dialog.device_id,
             "name": name,
         });
-        self.task = Some(cx.spawn(async move |this, cx| {
+        self.rename_task = Some(cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::MUTATE, params).await;
             this.update(cx, |page, cx| {
                 if let Err(err) = result {
@@ -144,6 +205,143 @@ impl DevicesPage {
             })
             .ok();
         }));
+        cx.notify();
+    }
+
+    fn refresh_peer(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.refresh_generation = self.refresh_generation.wrapping_add(1);
+        let generation = self.refresh_generation;
+        self.peer_status = Loadable::Loading;
+        self.trusted_devices = Loadable::Loading;
+        self.refresh_task = Some(cx.spawn(async move |this, cx| {
+            let status = engine
+                .client()
+                .call(methods::PEER_STATUS, serde_json::json!({}))
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(parse_peer_status);
+            let devices = match &status {
+                Ok(status) if can_manage_peer(status) => Some(
+                    engine
+                        .client()
+                        .call(methods::PEER_DEVICES, serde_json::json!({}))
+                        .await,
+                ),
+                _ => None,
+            };
+            this.update(cx, |page, cx| {
+                if !refresh_response_is_current(page.refresh_generation, generation) {
+                    return;
+                }
+                page.peer_status = match status {
+                    Ok(status) => Loadable::Ready(status),
+                    Err(error) => Loadable::Error(error),
+                };
+                page.trusted_devices = match devices {
+                    Some(Ok(value)) => parse_trusted_devices(value)
+                        .map(Loadable::Ready)
+                        .unwrap_or_else(Loadable::Error),
+                    Some(Err(error)) => Loadable::Error(error.to_string()),
+                    None => Loadable::Ready(Vec::new()),
+                };
+                cx.notify();
+            })
+            .ok();
+        }));
+
+        cx.notify();
+    }
+
+    fn create_invitation(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        if !matches!(&self.peer_status, Loadable::Ready(status) if can_manage_peer(status))
+            || !begin_peer_action(&mut self.peer_action, PeerAction::Invitation)
+        {
+            return;
+        }
+        self.invitation = None;
+        self.invitation_copied = false;
+        self.peer_action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::PEER_INVITE, serde_json::json!({}))
+                .await;
+            this.update(cx, |page, cx| {
+                page.peer_action = None;
+                match result {
+                    Ok(value) => {
+                        page.invitation = value
+                            .get("code")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                    }
+                    Err(error) => {
+                        page.error = Some(format!("Could not create invitation: {error}").into())
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+
+        cx.notify();
+    }
+
+    fn copy_invitation(&mut self, cx: &mut Context<Self>) {
+        let Some(code) =
+            take_invitation_for_clipboard(&mut self.invitation, &mut self.invitation_copied)
+        else {
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(code));
+        // Do not retain the one-time secret after handing it to the clipboard.
+        self.invitation_copy_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            this.update(cx, |page, cx| {
+                page.invitation_copied = false;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    fn revoke_peer_device(&mut self, device_id: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        if !matches!(&self.peer_status, Loadable::Ready(status) if can_manage_peer(status))
+            || !begin_peer_action(&mut self.peer_action, PeerAction::Revocation)
+        {
+            return;
+        }
+        self.peer_action_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(
+                    methods::PEER_REVOKE,
+                    serde_json::json!({ "deviceId": device_id }),
+                )
+                .await;
+            this.update(cx, |page, cx| {
+                page.peer_action = None;
+                if let Err(error) = result {
+                    page.error = Some(format!("Could not revoke device: {error}").into());
+                } else {
+                    page.refresh_peer(cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+
         cx.notify();
     }
 
@@ -394,6 +592,166 @@ impl Render for DevicesPage {
             card.children(rows)
         };
 
+        let peer_card = match (&self.peer_status, &self.trusted_devices) {
+            (Loadable::Ready(status), trusted) => {
+                let status_text = connectivity_label(status);
+
+                let can_manage = can_manage_peer(status);
+                let own_id = status.device_id.clone();
+                let mut panel = widgets::section_card(&theme).child(
+                    div().px(px(16.0)).py(px(13.0)).flex().items_center().justify_between()
+                        .child(div().flex().flex_col()
+                            .child(widgets::row_title(&theme, "Private sync peer"))
+                            .child(div().mt(px(3.0)).text_size(crate::typography::ui_rems(11.0)).text_color(theme.text_muted)
+                                .child(SharedString::from(if status.hosting {
+                                    format!("{status_text} · this device is the durable always-on peer")
+                                } else {
+                                    format!("{status_text} · managed by your trusted peer")
+                                })))
+                        )
+                        .child(div().flex().gap(px(8.0))
+                            .child(popover::btn_ghost(&theme, "Refresh", "peer-refresh").id("peer-refresh")
+                                .on_click(cx.listener(|this, _, _, cx| this.refresh_peer(cx))))
+                            .when(can_manage && status.connected, |el| el.child(
+                                popover::btn_primary(
+                                    &theme,
+                                    if self.peer_action == Some(PeerAction::Invitation) {
+                                        "Creating…"
+                                    } else {
+                                        "New invitation"
+                                    },
+                                ).id("peer-invite")
+
+                                    .when(self.peer_action.is_some(), |button| button.opacity(0.5))
+                                    .on_click(cx.listener(|this, _, _, cx| this.create_invitation(cx)))
+                            )))
+                );
+
+                if !can_manage && status.signed_in {
+                    panel = panel.child(
+                        div().border_t_1().border_color(theme.border).p(px(14.0))
+                            .text_size(crate::typography::ui_rems(12.0)).text_color(theme.text_muted)
+                            .child("Trusted devices, invitations, and revocation are managed on the durable owner peer. This paired device can sync but cannot change trust."),
+                    );
+                }
+                if self.invitation_copied {
+                    panel = panel.child(
+                        div()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .px(px(16.0))
+                            .py(px(12.0))
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.text)
+                            .child("Invitation copied. The secret was cleared from this window."),
+                    );
+                }
+                if let Some(code) = self.invitation.as_ref() {
+                    panel = panel.child(
+                        div().border_t_1().border_color(theme.border).px(px(16.0)).py(px(12.0)).flex().items_center().gap(px(10.0))
+                            .child(div().flex_1().min_w_0().flex().flex_col()
+                                .child(div().text_size(crate::typography::ui_rems(12.0)).text_color(theme.text).child("One-time secret invitation ready"))
+                                .child(div().mt(px(2.0)).text_size(crate::typography::ui_rems(10.5)).text_color(theme.text_muted)
+                                    .child("Copy it now. Zeron does not save it in UI settings.")))
+                            .child(popover::btn_primary(&theme, "Copy invitation")
+                                .id("peer-copy-invite").on_click(cx.listener(|this, _, _, cx| this.copy_invitation(cx))))
+                    );
+                    // Keep the actual secret out of the element tree and logs.
+                    let _ = code;
+                }
+                if can_manage && let Loadable::Ready(rows) = trusted {
+                    for (ix, device) in rows.iter().enumerate() {
+                        let revoked = device.revoked_at.is_some();
+                        let is_self = own_id.as_deref() == Some(device.device_id.as_str());
+                        let revoke_id = device.device_id.clone();
+                        panel = panel.child(
+                            div()
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .px(px(16.0))
+                                .py(px(12.0))
+                                .flex()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .flex()
+                                        .flex_col()
+                                        .child(widgets::row_title(
+                                            &theme,
+                                            device
+                                                .display_name
+                                                .clone()
+                                                .unwrap_or_else(|| "Unnamed device".into()),
+                                        ))
+                                        .child(
+                                            div()
+                                                .mt(px(2.0))
+                                                .text_size(crate::typography::ui_rems(10.5))
+                                                .text_color(theme.text_muted)
+                                                .child(SharedString::from(format!(
+                                                    "{}{} · {}",
+                                                    short_id(&device.device_id),
+                                                    if device.owner { " · owner" } else { "" },
+                                                    if revoked { "revoked" } else { "trusted" }
+                                                ))),
+                                        )
+                                        .when(is_self, |el| {
+                                            el.child(
+                                                div()
+                                                    .text_size(crate::typography::ui_rems(10.5))
+                                                    .text_color(theme.text_muted)
+                                                    .child("This device"),
+                                            )
+                                        })
+                                        .when(!is_self && !revoked, |el| {
+                                            el.child(
+                                                widgets::ghost_action(&theme)
+                                                    .id(("peer-revoke", ix))
+                                                    .child("Revoke")
+                                                    .when(self.peer_action.is_some(), |button| {
+                                                        button.opacity(0.5)
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            this.revoke_peer_device(
+                                                                revoke_id.clone(),
+                                                                cx,
+                                                            )
+                                                        },
+                                                    )),
+                                            )
+                                        }),
+                                ),
+                        );
+                    }
+                } else if can_manage && let Loadable::Error(message) = trusted {
+                    panel = panel.child(div().border_t_1().border_color(theme.border).p(px(14.0)).text_size(crate::typography::ui_rems(12.0)).text_color(theme.danger_muted).child(SharedString::from(format!("Trusted devices unavailable: {message}. The peer may be temporarily offline."))));
+                }
+                panel.into_any_element()
+            }
+            (Loadable::Error(message), _) => widgets::section_card(&theme)
+                .child(
+                    div()
+                        .p(px(16.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.danger_muted)
+                        .child(SharedString::from(format!(
+                            "Peer status unavailable: {message}"
+                        ))),
+                )
+                .into_any_element(),
+            _ => widgets::section_card(&theme)
+                .child(
+                    div()
+                        .p(px(16.0))
+                        .text_color(theme.text_muted)
+                        .child("Loading private sync status…"),
+                )
+                .into_any_element(),
+        };
+
         div()
             .id("devices-page")
             .size_full()
@@ -420,6 +778,8 @@ impl Render for DevicesPage {
                                 })),
                         )
                     })
+                    .child(peer_card)
+                    .child(div().h(px(16.0)))
                     .child(card),
             )
             .when_some(dialog, |el, dialog| el.child(dialog))
@@ -469,5 +829,51 @@ mod tests {
         let copy = devices_subtitle(Some(WorkspaceScope::Local));
         assert!(copy.contains("local workspace"));
         assert!(!copy.contains("synced"));
+    }
+
+    #[test]
+    fn only_the_durable_owner_peer_can_manage_trust() {
+        let owner = PeerStatus {
+            signed_in: true,
+            hosting: true,
+            ..PeerStatus::default()
+        };
+        let member = PeerStatus {
+            signed_in: true,
+            hosting: false,
+            ..PeerStatus::default()
+        };
+        assert!(can_manage_peer(&owner));
+        assert!(!can_manage_peer(&member));
+    }
+
+    #[test]
+    fn copying_invitation_clears_secret_but_keeps_nonsecret_ack() {
+        let mut invitation = Some("kratos-pair:secret".to_string());
+        let mut copied = false;
+        assert_eq!(
+            take_invitation_for_clipboard(&mut invitation, &mut copied).as_deref(),
+            Some("kratos-pair:secret")
+        );
+        assert!(invitation.is_none());
+        assert!(copied);
+    }
+
+    #[test]
+    fn stale_refresh_cannot_overwrite_a_newer_request() {
+        assert!(refresh_response_is_current(2, 2));
+        assert!(!refresh_response_is_current(2, 1));
+    }
+
+    #[test]
+    fn peer_actions_are_pending_before_completion_and_serialized() {
+        let mut pending = None;
+        assert!(begin_peer_action(&mut pending, PeerAction::Invitation));
+        assert_eq!(pending, Some(PeerAction::Invitation));
+        assert!(!begin_peer_action(&mut pending, PeerAction::Revocation));
+        pending = None;
+        assert!(begin_peer_action(&mut pending, PeerAction::Revocation));
+        assert_eq!(pending, Some(PeerAction::Revocation));
+        assert!(refresh_response_is_current(9, 9));
     }
 }

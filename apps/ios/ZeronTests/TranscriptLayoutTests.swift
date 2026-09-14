@@ -42,8 +42,8 @@ final class TranscriptLayoutTests: XCTestCase {
     private func mount(turns: Int, size: CGSize = CGSize(width: 390, height: 844),
                        offline: Bool = true, waitForLayout: Bool = true, useEditor: Bool = false) async {
         TranscriptLayoutProbe.enabled = true
-        let config = AppConfig(edgeURL: URL(string: "http://localhost:8787")!, mode: .dev,
-                               userId: "test", orgId: "test", deviceId: "test", deviceName: "Test")
+        let config = AppConfig(peerURL: URL(string: "http://localhost:8787")!,
+                               profileId: "profile-test", deviceId: "test", deviceName: "Test")
         let store = SessionStore(chatId: UUID().uuidString, config: config, offline: offline)
         store.setEntries(BenchRunner.syntheticEntries(turns: turns))
         harness = Harness(store: store)

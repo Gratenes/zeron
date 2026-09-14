@@ -1,6 +1,8 @@
 # Registry sync — the workspace index without a CRDT
 
-**Status: shipped behind the `reg1/` room namespace; replaces the `ws4/` Loro workspace doc.**
+**Status: protocol retained; hosted backend retired.** The incident history and
+Cloudflare room details below are historical. The Rust durable peer now serves
+the same current-state registry protocol; see `ARCHITECTURE.md`.
 
 ## Why
 
@@ -97,14 +99,12 @@ Server→client:
 - Local-only rows on a full resync re-seed the same way; unpushed writes always live in
   the pending queue and replay over whatever the server returns.
 
-## Migration (instant, on first boot after update)
+## Fresh-profile startup
 
-`WorkspaceHost::open`: if no `registry1` snapshot exists, read the legacy `workspace2`
-Loro snapshot, convert every row into pending upsert ops (HLCs derived from the rows' own
-timestamps, so genuinely-newer live writes beat migrated values), and save. The UI reads
-the overlay immediately — zero visible gap. Each device seeds the same converged values
-idempotently; the old `ws4` rooms are simply never joined again (hibernated, ~zero cost).
-The legacy snapshot is retained for rollback.
+New peer profiles initialize the row registry directly. Retired `workspace2`
+Loro snapshots are not imported or seeded into a new profile. Normal registry
+snapshot loading, current-peer catch-up and pending-operation replay remain
+unchanged; old on-disk snapshots are left untouched.
 
 ## Parity notes
 

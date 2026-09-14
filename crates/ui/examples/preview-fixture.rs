@@ -142,10 +142,6 @@ fn main() -> anyhow::Result<()> {
     let boot = EngineBootConfig {
         data_dir: data.clone(),
         ipc_port,
-        edge_url: String::new(),
-        edge_token: None,
-        org_id: None,
-        workos_client_id: None,
         default_harness: zeron_proto::HarnessId::ClaudeCode,
     };
     let handle = runtime.block_on(state::EngineHandle::bootstrap(boot.clone()))?;

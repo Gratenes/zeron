@@ -23,6 +23,24 @@ Zeron also uses the following editor foundations from the pinned `wasimysaid/gpu
 
 Zeron's own source code is licensed under the terms in `LICENSE`. Bundled third-party components retain their respective licenses and notices.
 
+
+## Tailcat native connectivity adapter
+
+Desktop distributions bundle a statically linked `kratos-tailcat` connectivity
+adapter built from Tailcat commit `fd101889796a947ac514e9d86ec731af2965fad3`
+(module version `v0.6.1-0.20260913000754-fd101889796a`). Tailcat is distributed
+under the BSD 3-Clause License and retains:
+
+> Copyright (c) 2020 Tailscale Inc & contributors.
+
+The complete Tailcat license, the exact license and patent-notice files for the
+pinned transitive Go modules compiled for supported desktop targets, and the Go
+standard library/runtime BSD license are packaged under `licenses/tailcat/`.
+`licenses/tailcat/DEPENDENCIES.txt` records each source module and version. The
+checked-in bundle is reproducibly generated from `connectivity/tailcat/go.mod`,
+`go.sum`, and the corresponding verified Go module-cache files by
+`connectivity/tailcat/licenses/generate.py`; license text is not inferred from
+or fetched through repository URLs.
 ## Symbols
 
 Zeron bundles the SVG icon set and filename/folder associations from

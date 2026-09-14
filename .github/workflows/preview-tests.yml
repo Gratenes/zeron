@@ -1,10 +1,10 @@
 name: Preview networking
 on:
   pull_request:
-    paths: ['crates/preview/**', 'crates/proto/**', 'Cargo.toml', 'Cargo.lock', 'edge/**', '.github/workflows/preview-tests.yml']
+    paths: ['crates/preview/**', 'crates/proto/**', 'crates/engine/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/preview-tests.yml']
   push:
     branches: [main]
-    paths: ['crates/preview/**', 'crates/proto/**', 'Cargo.toml', 'Cargo.lock', 'edge/**', '.github/workflows/preview-tests.yml']
+    paths: ['crates/preview/**', 'crates/proto/**', 'crates/engine/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/preview-tests.yml']
 permissions:
   contents: read
 concurrency:
@@ -21,20 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked -p zeron-preview
-  coordinator:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: edge
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: edge/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
+      - name: Preview discovery and authenticated durable-peer relay
+        run: |
+          cargo test --locked -p zeron-preview
+          cargo test --locked -p zeron-engine --test peer_preview

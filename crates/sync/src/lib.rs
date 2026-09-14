@@ -1,19 +1,18 @@
-//! zeron-sync — the edge room clients (registry rows + chat2 row protocol over
-//! WebSocket against the TS edge) and the local `DocsStore` (SQLite snapshots +
-//! processed-command ledger).
+//! Durable-peer sync clients and storage.
 //!
-//! - [`ChatClient`]: joins a ChatRoom DO (`wss://…/chat2/{chatId}/ws?token=`),
-//!   catches up via checkpoint + row backfill, pushes local loro updates as
-//!   rows, and reconnects with exponential backoff.
-//! - [`RegistryClient`]: the per-profile workspace registry room (sidebar rows,
-//!   presence).
-//! - [`DocsStore`]: snapshot persistence (the doc IS the outbox — commands + user entries
-//!   flush immediately) and the processed-command ledger with mark-BEFORE-execute semantics.
+//! - [`ChatClient`] implements the chat2 row/checkpoint protocol over the managed peer.
+//! - [`RegistryClient`] synchronizes profile-scoped registry rows and presence.
+//! - [`peer`] serves authenticated durable rows, checkpoints, sidecars, attachments, previews,
+//!   and targeted device links from the headless peer.
+//! - [`DocsStore`] persists local snapshots, pending update outboxes, and the
+//!   processed-command ledger with mark-before-execute semantics.
 
 pub mod chat_client;
 pub mod chat_frames;
 pub mod dial;
 pub mod net_path;
+
+pub mod peer;
 pub mod registry;
 mod store;
 mod types;
