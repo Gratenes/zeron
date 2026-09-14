@@ -47,9 +47,11 @@ brokers are outside this ownership.
 
 Frosted window chrome uses native Acrylic and requires Windows **Settings >
 Personalization > Colors > Transparency effects**. Content cards and popovers
-remain opaque because in-app backdrop blur is not supported. The pinned
-[Zui DirectX fix](https://github.com/zeronsh/zui/pull/7) supplies the renderer
-layout and edge-fade corrections.
+use in-app backdrop blur when frosted surfaces are selected. The pinned
+[Zui Windows blur fixes](https://github.com/wasimysaid/zui/pull/1) support
+nested panels, clipped blur, and translucent composition alongside the earlier
+renderer layout and edge-fade corrections. Hardware scrolling performance and
+exact macOS appearance remain unverified.
 
 ## Verification
 
