@@ -6,6 +6,12 @@ This module is the production connectivity shim between Kratos's Rust HTTP/WebSo
 
 The parent process starts and owns one subprocess per role. Standard output contains exactly one readiness JSON line; diagnostics go to standard error and never include the secret Tailcat address.
 
+The Rust launcher sets `KRATOS_TAILCAT_PARENT_PIPE=1` and retains the write end of
+an otherwise unused stdin pipe. EOF terminates the adapter even when native app
+termination or a crash bypasses Rust destructors. Standalone CLI usage without
+this environment variable remains signal-controlled. Normal engine shutdown also
+explicitly stops and waits for its adapter without deleting the saved pairing.
+
 ```text
 kratos-tailcat serve \
   --state /private/profile/server.key \
@@ -28,6 +34,14 @@ kratos-tailcat connect \
 ```
 
 `connect.json` has the exact schema `{"address":"tc..."}` and must be a regular mode-`0600` file. The secret is never accepted in argv. `connect` rejects unknown fields and trailing JSON, verifies connectivity before readiness, binds only numeric `127.0.0.1`, and sends every accepted stream to Tailcat application port `7332`. HTTP, streaming bodies, and WebSockets pass through as ordinary TCP bytes. SIGINT or SIGTERM closes listeners, active streams, and the Tailcat engine.
+
+Tunnel TCP dials have a five-second attempt budget. After failure, the client
+recreates its Tailcat network stack using the same persisted identity, coalescing
+concurrent failures and rate-limiting resets. This repeats the registration that
+the pinned upstream client otherwise caches across a server restart. The local
+listener stays stable. Only connection establishment is retried; application
+bytes are never replayed by the adapter. Room supervisors still own stream
+reconnection and durable application-level catch-up.
 
 State is role-tagged so client/server identities cannot be interchanged. Secret files are atomically written with mode `0600` under a `0700` directory. Existing symlinks, non-regular files, incorrect permissions, malformed JSON, missing keys, and role mismatches fail closed rather than generating a replacement identity.
 

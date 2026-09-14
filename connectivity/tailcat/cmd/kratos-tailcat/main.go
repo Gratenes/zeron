@@ -25,6 +25,16 @@ func main() {
 }
 
 func run(args []string) error {
+	if os.Getenv("KRATOS_TAILCAT_PARENT_PIPE") == "1" {
+		// Managed mode: stdin is a pipe held ONLY by the owning engine. EOF
+		// also covers abrupt process exit, where kill_on_drop never runs.
+		// Exit immediately even during startup or a stuck network shutdown;
+		// the OS closes all listeners and no pairing state is removed.
+		go func() {
+			_, _ = io.Copy(io.Discard, os.Stdin)
+			os.Exit(0)
+		}()
+	}
 	if len(args) == 0 {
 		return usageError()
 	}

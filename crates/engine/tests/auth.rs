@@ -212,6 +212,7 @@ exec sleep 86400 >/dev/null 2>&1
             "non-owner cannot manage devices"
         );
 
+        let stable_url = client.peer_url().expect("client adapter URL");
         let config = engine_config(&fixture.client_dir);
         let scope = Engine::initial_workspace_scope(&client);
         assert_eq!(scope, WorkspaceScope::Synced);
@@ -229,10 +230,29 @@ exec sleep 86400 >/dev/null 2>&1
         let historical = std::fs::read_to_string(fixture.client_dir.join("device-id"))
             .expect("historical device id");
         assert_ne!(historical.trim(), runtime.core().device_id);
+        // Retaining an Auth/RPC clone must not retain the child after Quit.
+        let retained_rpc = runtime.core().rpc_service();
         runtime.shutdown().await;
+        assert!(
+            !client.peer_status().await.connected,
+            "shutdown retained the adapter"
+        );
+        assert!(
+            client.state().is_signed_in(),
+            "shutdown must preserve pairing"
+        );
+        assert!(
+            client.access_token().await.is_none(),
+            "late consumers restarted a stopped adapter"
+        );
+        client.resume().await;
+        assert!(
+            !client.peer_status().await.connected,
+            "late startup resumed a stopped adapter"
+        );
+        drop(retained_rpc);
         drop(runtime);
 
-        let stable_url = client.peer_url().expect("client adapter URL");
         drop(client);
         let reopened = Auth::open(auth_config(&fixture.client_dir, &fixture.adapter))
             .expect("reopen client auth");

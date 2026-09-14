@@ -43,9 +43,13 @@ type stateFile struct {
 // server's fixed application port.
 type Client struct {
 	proxy *proxy
-	tc    *tailcat.Client
 	url   string
 	once  sync.Once
+
+	mu        sync.Mutex
+	tc        *tailcat.Client
+	newTC     func() *tailcat.Client
+	lastReset time.Time
 }
 
 // URL returns the local loopback URL. It remains stable until Close.
@@ -56,6 +60,7 @@ func (c *Client) URL() string { return c.url }
 func (c *Client) Close() {
 	c.once.Do(func() {
 		c.proxy.close()
+		// proxy.close cancels and joins all dial/copy workers first.
 		_ = c.tc.Close()
 	})
 }
@@ -119,12 +124,15 @@ func startClient(address, listenAddress, statePath, derpMap string) (*Client, er
 	if err != nil {
 		return nil, fmt.Errorf("client identity: %w", err)
 	}
-	cl := &tailcat.Client{
-		Server:     tailcat.Addr(address),
-		Key:        state.PrivateKey,
-		DERPMapURL: derpMap,
-		Logf:       logger.Discard,
+	newTC := func() *tailcat.Client {
+		return &tailcat.Client{
+			Server:     tailcat.Addr(address),
+			Key:        state.PrivateKey,
+			DERPMapURL: derpMap,
+			Logf:       logger.Discard,
+		}
 	}
+	cl := newTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if _, err := cl.Ping(ctx); err != nil {
@@ -136,11 +144,49 @@ func startClient(address, listenAddress, statePath, derpMap string) (*Client, er
 		_ = cl.Close()
 		return nil, errors.New("could not open loopback listener")
 	}
-	p := newProxy(ln, func(ctx context.Context) (net.Conn, error) {
-		return cl.DialTCPPort(ctx, ApplicationPort)
-	})
-	p.start()
-	return &Client{proxy: p, tc: cl, url: "http://" + ln.Addr().String()}, nil
+	c := &Client{tc: cl, newTC: newTC, url: "http://" + ln.Addr().String()}
+	c.proxy = newProxy(ln, c.dial)
+	c.proxy.start()
+	return c, nil
+}
+
+// Bound each tunnel dial: the proxy's lifetime context alone can leave a
+// gVisor SYN pending long after the HTTP caller has given up. The pinned
+// Tailcat client caches its initial registration (upDone); a restarted server
+// has forgotten that peer. Recreate the tunnel, with the SAME persisted key,
+// only after a failed dial. Keep the loopback listener and pairing untouched.
+const tunnelDialTimeout = 5 * time.Second
+
+func (c *Client) dial(ctx context.Context) (net.Conn, error) {
+	c.mu.Lock()
+	tc := c.tc
+	c.mu.Unlock()
+	dial := func(tc *tailcat.Client) (net.Conn, error) {
+		attempt, cancel := context.WithTimeout(ctx, tunnelDialTimeout)
+		defer cancel()
+		return tc.DialTCPPort(attempt, ApplicationPort)
+	}
+	conn, err := dial(tc)
+	if err == nil || ctx.Err() != nil {
+		return conn, err
+	}
+	c.mu.Lock()
+	// Coalesce simultaneous room reconnects. Never tear down a newer tunnel
+	// because a dial from its predecessor finally timed out; rate-limit resets
+	// while the server is offline or its application is unavailable.
+	if c.tc == tc && time.Since(c.lastReset) >= tunnelDialTimeout && ctx.Err() == nil {
+		_ = tc.Close()
+		c.tc = c.newTC()
+		c.lastReset = time.Now()
+	}
+	tc = c.tc
+	c.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	// No application bytes have been copied yet: retrying the TCP dial cannot
+	// replay a command or attachment write. The upper layer owns such retries.
+	return dial(tc)
 }
 
 func startServer(target, statePath, derpMap string, regionID int, region *tailcfg.DERPRegion) (*Server, error) {

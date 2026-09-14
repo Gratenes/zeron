@@ -479,6 +479,17 @@ impl EngineCore {
     /// kill live PTYs, stamp our workspace `lastSeenAt`, and flush every open doc
     /// snapshot.
     pub async fn shutdown(&self) {
+        // UI/RPC consumers and token refresh tasks can retain Auth after the
+        // runtime drains. Do not rely on their last Arc being dropped to release
+        // the adapter's loopback port. Stop it without changing saved pairing.
+        let auth = self
+            .auth
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(auth) = auth {
+            auth.shutdown_peer_preserving_session().await;
+        }
         self.previews.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
         // releases the next queued row. Freeze first so quitting never starts

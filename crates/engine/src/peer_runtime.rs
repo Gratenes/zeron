@@ -370,7 +370,11 @@ impl AdapterProcess {
         let mut command = Command::new(path);
         command
             .args(args)
-            .stdin(Stdio::null())
+            // The adapter exits when this pipe closes, even if AppKit/exit or
+            // a crash bypasses Rust destructors. Child retains the write end;
+            // it is never handed to a room task or inherited by another exec.
+            .env("KRATOS_TAILCAT_PARENT_PIPE", "1")
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);

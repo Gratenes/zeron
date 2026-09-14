@@ -304,9 +304,11 @@ impl Auth {
     /// Resume a saved host/client adapter. Connectivity failure is observable
     /// through `peer_status` but never mutates the durable signed-in profile.
     pub async fn resume(&self) {
-        self.inner
-            .transport_suspended
-            .store(false, Ordering::Release);
+        // Shutdown is terminal for this Auth instance. A detached startup task
+        // may reach resume after Quit; only a newly opened Auth may restart it.
+        if self.inner.transport_suspended.load(Ordering::Acquire) {
+            return;
+        }
         if self.session().is_none() {
             return;
         }
