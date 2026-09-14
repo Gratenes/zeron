@@ -4,9 +4,6 @@
 
 This PR prepares production hosting and CI/CD. It does **not** establish that
 `web.zeron.sh` has been deployed or tested: production account access is required.
-The user verified the staging browser login → native CLI/headless → browser device
-flow on **two accounts and two machines** at `zeron-test.embedez.com`.
-That is evidence for the application flow, not production DNS, credentials or state.
 
 ## Reuse the existing production backend
 
@@ -34,8 +31,8 @@ route policy and its regression checks together.
 
 This does not create a second set of production devices. Existing native clients
 continue using `edge.zeron.sh`; browser requests at `web.zeron.sh` reach the same
-Worker and DO namespaces. Do not point production clients at the staging backend,
-rename the production Worker, copy staging's fresh migration, or replace buckets.
+Worker and DO namespaces. Do not point production clients at another backend,
+rename the production Worker, copy another environment's migration, or replace buckets.
 Existing device registration behavior is unchanged; an old native client may need
 to reconnect/update if it predates browser device registration.
 
@@ -45,7 +42,7 @@ to reconnect/update if it predates browser device registration.
    `web.zeron.sh` is available for a Worker custom domain. Review existing dashboard
    variables/secrets against source: Wrangler deploy reconciles configuration.
 2. Verify the existing production WorkOS app and its issuer/JWKS URLs in
-   `edge/wrangler.jsonc`. Do not substitute the staging WorkOS client or key.
+   `edge/wrangler.jsonc`. Do not substitute another WorkOS client or key.
 3. In that WorkOS app, register:
    `https://web.zeron.sh/api/browser/callback`.
    Keep existing native/CLI callbacks, including the callback used at
@@ -55,8 +52,9 @@ to reconnect/update if it predates browser device registration.
 4. Verify remote `WORKOS_API_KEY` on `comet-native-edge`. Provision a production
    `BROWSER_SESSION_KEY` if absent (32 random bytes encoded base64url). Retain any
    valid existing key; changing it invalidates stored encrypted browser credentials.
-   Do not copy staging's key, commit keys or put keys in CLI arguments. Secret writes
-   are deployment operations and should be scheduled accordingly.
+   Do not copy another environment's key, commit keys or put keys in CLI
+   arguments. Secret writes are deployment operations and should be scheduled
+   accordingly.
 5. Configure the repository `CLOUDFLARE_API_TOKEN` for the production account with
    Workers Scripts/Routes and required R2 permissions. Never put it into the app.
 6. Merge the runtime dependency PR first and follow `apps/web/README.md` to repin
@@ -66,6 +64,12 @@ to reconnect/update if it predates browser device registration.
 No single-user allowlist is required. WorkOS authenticates users and the backend
 scopes sessions/devices to each verified user. Signup/invitation policy belongs
 in the production WorkOS app.
+
+Native hosts publish a display name to the owner's browser device registry. By
+default this may be the operating-system computer name or hostname. Set
+`ZERON_DEVICE_NAME` before starting or installing the daemon to publish a neutral
+alias instead; for example, `ZERON_DEVICE_NAME="Private device"` avoids disclosing
+the machine hostname.
 
 ## Build, CI and release behavior
 
@@ -99,12 +103,12 @@ npx wrangler deploy --dry-run --config wrangler.jsonc --outdir dist/production
 node scripts/production-routing.mjs
 # Only an authorized production operator, after the checklist above:
 npx wrangler deploy --config wrangler.jsonc
-node scripts/staging-smoke.mjs https://web.zeron.sh
+node scripts/production-smoke.mjs https://web.zeron.sh
 ```
 
-The smoke script accepts an explicit origin despite its historical staging name.
-It verifies public assets/headers and unauthenticated API responses, not completion
-of WorkOS login. Keep `AUTH_MODE=workos`; missing browser secrets must fail closed.
+The smoke script verifies public assets/headers and unauthenticated API responses,
+not completion of WorkOS login. Keep `AUTH_MODE=workos`; missing browser secrets
+must fail closed.
 
 ## Post-deployment acceptance and recovery
 
@@ -129,14 +133,11 @@ remove the new namespace or reverse stored data.
 ## Local verification for this change
 
 - Locked release WASM build, TypeScript typecheck and production Wrangler dry-run passed.
-- Earlier workerd runs reported passing while emitting `Expected global Vitest
-  state` assertions. Investigation traced these to pre-initialization HTTP probes
-  reaching the Vitest pool entrypoint. `edge/scripts/patch-vitest-pool.mjs` applies
-  a temporary, layout-checked startup guard during `npm ci`; dependency versions
-  are unchanged. `npm run test:workerd` also fails on uncaught runner diagnostics
-  even when Vitest reports exit 0. Repeated local runs passed 44 unit + 24 workerd
-  tests without those diagnostics. Revalidate hosted CI; remove the patch when
-  an upstream release fixes this startup behavior.
+- Workerd tests use Cloudflare's supported `@cloudflare/vitest-plugin`. Version
+  1.1.9 can receive pre-initialization probes before Vitest installs its global
+  state, so a version-pinned `patch-package` guard rejects only those early probes.
+  `npm run test:workerd` still fails if any uncaught runner diagnostic appears;
+  remove the patch when the upstream package includes the guard.
 - 39 real local Worker routing checks passed, including static response bytes,
   isolation headers, native/preview host exclusion and backend route preservation.
 - Workflow actionlint and production storage/configuration preservation checks passed.

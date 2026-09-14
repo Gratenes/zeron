@@ -15,7 +15,6 @@
  */
 import { bearerFromRequest, verifyToken } from "./auth";
 
-import { handleBrowserAuthRoute } from "./browser-auth";
 import type { Env } from "./env";
 import { WorkOsAuthFailed, createOrg, exchange, listOrgs, refresh } from "./workos";
 
@@ -47,7 +46,6 @@ export const handleAuthRoute = async (
   const parts = url.pathname.split("/").filter(Boolean);
   if (parts[0] !== "auth") return undefined;
 
-  if (parts[1] === "browser") return handleBrowserAuthRoute(request, env, url);
   const apiKey = env.WORKOS_API_KEY;
 
   if (parts[1] === "exchange" && parts.length === 2 && request.method === "POST") {

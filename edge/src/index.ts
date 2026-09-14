@@ -40,10 +40,9 @@ import { authenticate } from "./auth";
 import { handleAuthRoute } from "./auth-routes";
 
 import { browserDeviceRoute, browserPreviewRoute, handleBrowserRoute } from "./browser-routes";
-import { BrowserSessionStore } from "./browser-sessions";
-
-import { registerBrowserDevice } from "./browser-sessions";
-import { AUTH_USER_HEADER, ROOM_KIND_HEADER, type Env } from "./env";
+import { BrowserSessionStore, registerBrowserDevice } from "./browser-sessions";
+import type { Env } from "./env";
+import { forwardedHeaders } from "./forwarded-headers";
 import { SessionRoom } from "./session-room";
 import { previewRoute } from "./preview-route";
 import { PreviewRoom } from "./preview-room";
@@ -94,15 +93,7 @@ const forward = (
   const url = new URL(request.url);
   url.pathname = path;
   if (search !== undefined) url.search = search;
-  const headers = new Headers(request.headers);
-  // room-kind is a Worker-controlled signal (the DO relaxes owner gating for
-  // workspace rooms): clear any inbound value so only the explicit set below —
-  // reached solely on workspace forwards, after the org-membership check —
-  // can assert it. Do not drop this line; passthrough would let a caller
-  // choose their own room kind.
-  headers.delete(ROOM_KIND_HEADER);
-  headers.set(AUTH_USER_HEADER, userId);
-  if (roomKind) headers.set(ROOM_KIND_HEADER, roomKind);
+  const headers = forwardedHeaders(request, userId, roomKind);
   return stub.fetch(new Request(url.toString(), { ...requestInit(request), headers }));
 };
 

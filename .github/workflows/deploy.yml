@@ -64,7 +64,7 @@ jobs:
         run: npm test
       - name: Rust toolchain
         if: steps.changed.outputs.changed == 'true'
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly-2026-09-08
           targets: wasm32-unknown-unknown
@@ -110,7 +110,7 @@ jobs:
         if: steps.changed.outputs.changed == 'true' && env.CLOUDFLARE_API_TOKEN != ''
         working-directory: edge
         timeout-minutes: 5
-        run: node scripts/staging-smoke.mjs https://web.zeron.sh
+        run: node scripts/production-smoke.mjs https://web.zeron.sh
 
   # Static landing page (zeron.sh) — assets-only worker, no build step.
   landing:

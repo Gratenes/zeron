@@ -23,6 +23,12 @@ const NO_RETRY = 8_640_000_000_000_000;
 const text = new TextEncoder();
 const decoder = new TextDecoder();
 
+const ensureColumn = (sql: SqlStorage, table: string, column: string, definition: string): void => {
+  const present = [...sql.exec<{ name: string }>(`PRAGMA table_info(${table})`)]
+    .some(({ name }) => name === column);
+  if (!present) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+};
+
 type Json = Record<string, unknown>;
 export interface BrowserSession {
   readonly hash: string;
@@ -105,19 +111,19 @@ export class BrowserSessionStore implements DurableObject {
     this.ctx = ctx;
     this.env = env;
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS browser_sessions (hash TEXT PRIMARY KEY, owner TEXT NOT NULL, sid TEXT NOT NULL, csrf TEXT NOT NULL, organization_id TEXT, access_secret TEXT NOT NULL, refresh_secret TEXT NOT NULL, provider_expiry INTEGER NOT NULL, created INTEGER NOT NULL, last_active INTEGER NOT NULL, absolute_expiry INTEGER NOT NULL, generation INTEGER NOT NULL DEFAULT 1, revoked INTEGER NOT NULL DEFAULT 0)");
-    try { ctx.storage.sql.exec("ALTER TABLE browser_sessions ADD COLUMN organization_id TEXT"); } catch { /* existing store */ }
+    ensureColumn(ctx.storage.sql, "browser_sessions", "organization_id", "TEXT");
     ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS browser_sessions_owner ON browser_sessions(owner, revoked)");
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS browser_transactions (state TEXT PRIMARY KEY, nonce_hash TEXT NOT NULL, verifier TEXT NOT NULL, expires INTEGER NOT NULL, consumed INTEGER NOT NULL DEFAULT 0)");
 
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS browser_bindings (hash TEXT NOT NULL, room TEXT NOT NULL, conn_id TEXT NOT NULL, PRIMARY KEY(hash, room, conn_id))");
 
-    try { ctx.storage.sql.exec("ALTER TABLE browser_bindings ADD COLUMN next_retry INTEGER NOT NULL DEFAULT 0"); } catch { /* existing store */ }
+    ensureColumn(ctx.storage.sql, "browser_bindings", "next_retry", "INTEGER NOT NULL DEFAULT 0");
 
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS preview_sessions (hash TEXT PRIMARY KEY, parent_hash TEXT NOT NULL, owner TEXT NOT NULL, device_id TEXT NOT NULL, service_id TEXT NOT NULL, host TEXT NOT NULL, expires INTEGER NOT NULL)");
-    try { ctx.storage.sql.exec("ALTER TABLE preview_sessions ADD COLUMN parent_hash TEXT"); } catch { /* current schema */ }
-    try { ctx.storage.sql.exec("ALTER TABLE preview_sessions ADD COLUMN host TEXT"); } catch { /* current schema */ }
+    ensureColumn(ctx.storage.sql, "preview_sessions", "parent_hash", "TEXT");
+    ensureColumn(ctx.storage.sql, "preview_sessions", "host", "TEXT");
     ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS browser_devices (owner TEXT NOT NULL, device_id TEXT NOT NULL, name TEXT, seen_at INTEGER NOT NULL, PRIMARY KEY(owner, device_id))");
-    try { ctx.storage.sql.exec("ALTER TABLE browser_devices ADD COLUMN name TEXT"); } catch { /* existing store */ }
+    ensureColumn(ctx.storage.sql, "browser_devices", "name", "TEXT");
   }
 
   async fetch(request: Request): Promise<Response> {

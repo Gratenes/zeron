@@ -334,15 +334,9 @@ export class DeviceRoom implements DurableObject {
     );
   }
 
-  async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
+  webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): void {
     if (typeof message === "string") return; // ping/pong auto-response
     const state = ws.deserializeAttachment() as SocketState;
-    // Recheck after hibernation on every direction. Revoked/expired cookies
-    // cannot keep receiving host frames after their original WS upgrade.
-    if (!(await this.browserSessionActive(state))) {
-      ws.close(4401, "browser session expired or revoked");
-      return;
-    }
     let frame: { header: DeviceFrameHeader; payload: Uint8Array };
     try {
       frame = decodeDeviceFrame(new Uint8Array(message));
@@ -363,12 +357,6 @@ export class DeviceRoom implements DurableObject {
     if (!to) return;
     const target = this.ctx.getWebSockets(clientTag(to))[0];
     if (!target) {
-      this.deliver(ws, { s: frame.header.s, k: RELAY_KIND, to }, encodeRelayError("client_gone"));
-      return;
-    }
-    const targetState = target.deserializeAttachment() as SocketState | null;
-    if (!targetState || !(await this.browserSessionActive(targetState))) {
-      target.close(4401, "browser session expired or revoked");
       this.deliver(ws, { s: frame.header.s, k: RELAY_KIND, to }, encodeRelayError("client_gone"));
       return;
     }

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 
 // Read-only deployment checks; never logs in or mutates remote state.
-const origin = new URL(process.argv[2] ?? "http://127.0.0.1:27641");
+assert.ok(process.argv[2], "Usage: node scripts/production-smoke.mjs <origin>");
+const origin = new URL(process.argv[2]);
 const request = (path, init = {}) => fetch(new URL(path, origin), {
   ...init, redirect: "manual", signal: AbortSignal.timeout(15_000)
 });
@@ -14,7 +15,6 @@ for (const [header, value] of Object.entries({
   "cross-origin-resource-policy": "same-origin"
 })) assert.equal(page.headers.get(header), value, header);
 const html = await page.text();
-// Read asset references, not JS identifiers such as window.wasmBindings.
 const assets = [...new Set([...html.matchAll(/\bhref=["']([^"']+\.(?:js|wasm))["']/g)].map(match => match[1]))];
 assert.ok(assets.some(path => path.endsWith(".wasm")), "WASM preload must be present");
 assert.ok(assets.some(path => path.endsWith(".js")), "JS module preload must be present");
@@ -39,4 +39,4 @@ for (const path of ["/api/browser/session", "/api/nonexistent", "/auth/nonexiste
     assert.deepEqual(await response.json(), { error: "unauthenticated" });
   }
 }
-console.log(`Staging static assets, isolation headers, WorkOS mode, and API routing passed: ${origin.origin}`);
+console.log(`Production assets, isolation headers, WorkOS mode, and API routing passed: ${origin.origin}`);

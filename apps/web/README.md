@@ -33,7 +33,7 @@ env -u NO_COLOR RUSTUP_TOOLCHAIN=nightly-2026-09-08 \
   trunk serve --port 8080
 ```
 
-`index.html` selects the `comet-web` binary. The bundle is written to `apps/web/dist/` (ignored by git); `--locked` rejects unreviewed dependency or lockfile changes. The manifest pins the published [`Gratenes/zui@aca6b04288396d26a0b080ba9a21a50446443834`](https://github.com/Gratenes/zui/commit/aca6b04288396d26a0b080ba9a21a50446443834), including bundled color emoji, core touch-focus tracking and browser keyboard/input bridging. All web runtime packages resolve from Git, not the sibling checkout or an ignored staging snapshot.
+`index.html` selects the `comet-web` binary. The bundle is written to `apps/web/dist/` (ignored by git); `--locked` rejects unreviewed dependency or lockfile changes. The manifest pins the published [`Gratenes/zui@8d78b9c2175b66e6881fa1ba0c576fffe847b1d0`](https://github.com/Gratenes/zui/commit/8d78b9c2175b66e6881fa1ba0c576fffe847b1d0), including bundled color emoji, touch and browser focus fixes. All web runtime packages resolve from Git, not the sibling checkout or an ignored local snapshot.
 
 [`trunk.toml`](trunk.toml) binds development serving to `127.0.0.1:8080` and sets the GPUI/WASM headers:
 
@@ -58,15 +58,14 @@ The public browser BFF is fail-closed unless the worker has these non-secret val
 
 Set these as Wrangler secrets, never in this README or browser code: `WORKOS_API_KEY` (WorkOS exchange/revocation) and `BROWSER_SESSION_KEY` (browser session credential-encryption key). Public browser routes also need the `BROWSER_SESSIONS` and `DEVICE_ROOMS` Durable Object bindings. For remote project preview, configure `BROWSER_PREVIEW_ORIGIN` as a dedicated HTTPS origin (the current config uses `https://preview.edge.zeron.sh`) with wildcard routing for ticketed preview hosts, and provision `PREVIEW_ROOMS`.
 
-For loopback worker tests only, `AUTH_MODE=dev` requires a loopback `BROWSER_DEV_ORIGIN`, `BROWSER_DEV_OWNER_SUBJECT`, and `BROWSER_SESSION_KEY`; optional `BROWSER_DEV_ORGANIZATION_ID` and trusted-proxy `BROWSER_DEV_PROXY_KEY` are also supported. Never use dev mode in a deployed integration. The separate private `/auth/browser/*` broker routes additionally use `BROWSER_BROKER_TOKEN`; the public web BFF does not send that token.
+For loopback worker tests only, `AUTH_MODE=dev` requires a loopback `BROWSER_DEV_ORIGIN`, `BROWSER_DEV_OWNER_SUBJECT`, and `BROWSER_SESSION_KEY`; optional `BROWSER_DEV_ORGANIZATION_ID` and trusted-proxy `BROWSER_DEV_PROXY_KEY` are also supported. Never use dev mode in a deployed integration.
 
 ## Production deployment
 
 See [the production rollout checklist](../../docs/web-production-rollout.md) for
 `web.zeron.sh`, WorkOS prerequisites and the existing edge deployment workflow.
 The production Worker keeps its existing device/session storage; PR validation
-builds and packages it without deploying. [Staging](../../docs/web-staging-deployment.md)
-remains a separate, manually deployed verification target.
+builds and packages it without deploying.
 
 
 ## Runtime-first landing and final pin
@@ -83,7 +82,7 @@ From the repository root:
 CARGO_BUILD_JOBS=2 cargo test --locked --manifest-path apps/web/tests/lifecycle/Cargo.toml
 (cd edge && npm ci)
 (cd edge && npm run typecheck)
-(cd edge && npm run test:unit -- src/browser-auth.test.ts src/browser-routes.test.ts src/device-frame.test.ts)
+(cd edge && npm run test:unit -- src/browser-routes.test.ts src/device-frame.test.ts src/forwarded-headers.test.ts)
 (cd edge && npm run test:workerd -- test/workerd/browser-discovery.workerd.test.ts test/workerd/browser-sessions.workerd.test.ts test/workerd/device-browser.workerd.test.ts)
 ```
 
@@ -97,7 +96,7 @@ The web CI workflow runs the locked Trunk WASM build, lifecycle tests, and the s
 - [ ] Revoke a session/device; verify its old cookie, socket, and request cannot be replayed, while another active session is unaffected.
 - [ ] Upload and read back 200 KiB and 1 MiB attachments without disconnects or duplicate submission. The attachment limit is 24 MiB; the encoded relay-frame ceiling is 1 MiB, so larger attachments use multiple frames.
 - [x] Phone taps, scrolling, keyboard behavior, and popovers: manually verified by the user. Device/browser versions and tested revision were not recorded.
-- [x] Terminal input/focus, mobile drawers, emoji and reconnect interactions: user-verified passing on staging on 2026-09-13 with the local-runtime bundle. This is user acceptance, not automated evidence for a later merge build.
+- [x] Terminal input/focus, mobile drawers, emoji and reconnect interactions: user-verified passing on 2026-09-13 with the local-runtime bundle. This is user acceptance, not automated evidence for a later merge build.
 - [ ] Run the lifecycle and focused edge auth/device tests above.
 - [ ] Review manifest/lockfile sources; after runtime landing, repin to the exact published `zeronsh/zui` commit.
 - [ ] Keep native CI and unrelated upload/lifecycle implementation changes in their owning changesets.

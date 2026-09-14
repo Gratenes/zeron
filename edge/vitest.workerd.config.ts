@@ -1,8 +1,8 @@
 import { defineConfig } from "vitest/config";
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest } from "@cloudflare/vitest-plugin";
 
 // Runtime-real test tier: runs inside actual workerd via
-// @cloudflare/vitest-pool-workers, against a real SQLite-backed Durable
+// @cloudflare/vitest-plugin, against a real SQLite-backed Durable
 // Object, so platform limits like the ~2MB SQLITE_TOOBIG row cap (the
 // 2026-08-05 whale sync freeze) are the runtime's own, not FakeSql constants.
 // `npm run test:workerd`.

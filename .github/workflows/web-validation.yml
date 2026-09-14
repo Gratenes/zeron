@@ -44,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly-2026-09-08
           targets: wasm32-unknown-unknown
@@ -120,6 +120,6 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - name: Unit auth and frame tests
-        run: npm run test:unit -- src/browser-auth.test.ts src/browser-routes.test.ts src/device-frame.test.ts
+        run: npm run test:unit -- src/browser-routes.test.ts src/device-frame.test.ts src/forwarded-headers.test.ts
       - name: Workerd session and DeviceRoom tests
         run: npm run test:workerd -- test/workerd/browser-discovery.workerd.test.ts test/workerd/browser-sessions.workerd.test.ts test/workerd/device-browser.workerd.test.ts test/workerd/browser-multi-user.workerd.test.ts
