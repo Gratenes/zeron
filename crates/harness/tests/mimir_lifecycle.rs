@@ -120,6 +120,14 @@ fn respond(question: &UserInputQuestion, labels: &[&str]) -> UserInputAnswer {
     UserInputAnswer {
         question_id: question.id.clone(),
         labels: labels.iter().map(|label| (*label).to_string()).collect(),
+        note: None,
+    }
+}
+
+fn respond_with_note(question: &UserInputQuestion, labels: &[&str], note: &str) -> UserInputAnswer {
+    UserInputAnswer {
+        note: Some(note.to_string()),
+        ..respond(question, labels)
     }
 }
 
@@ -127,9 +135,12 @@ fn respond(question: &UserInputQuestion, labels: &[&str]) -> UserInputAnswer {
 async fn forms_round_trip_real_mimir_schema_through_public_input_bridge() {
     let mut run = Running::start(request("forms")).await;
     let (questions, sender) = run.question().await;
-    assert_eq!(questions.len(), 5);
+    // The merged Mimir shape: one page per question — the two "Optional
+    // note" companions folded into their choice questions.
+    assert_eq!(questions.len(), 3);
     assert!(questions[0].question.contains("Do not enter credentials"));
     assert!(questions[0].options.is_empty());
+    assert!(!questions[0].note);
     assert_eq!(
         questions[1].options,
         [
@@ -138,15 +149,14 @@ async fn forms_round_trip_real_mimir_schema_through_public_input_bridge() {
             "3. None of the above"
         ]
     );
-    assert_eq!(questions[2].options, ["Skip (optional)"]);
-    assert!(questions[3].multi_select);
+    assert!(questions[1].note);
+    assert!(questions[2].multi_select);
+    assert!(questions[2].note);
     sender
         .send(vec![
             respond(&questions[0], &["  Casey  "]),
-            respond(&questions[1], &["2. Same — Second"]),
-            respond(&questions[2], &["Keep this note"]),
-            respond(&questions[3], &["1. Unit — Fast", "2. Process — Wire"]),
-            respond(&questions[4], &["Skip (optional)"]),
+            respond_with_note(&questions[1], &["2. Same — Second"], "Keep this note"),
+            respond(&questions[2], &["1. Unit — Fast", "2. Process — Wire"]),
         ])
         .unwrap();
     let events = run.finish().await;

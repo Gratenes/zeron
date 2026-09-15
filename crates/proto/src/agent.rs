@@ -328,6 +328,11 @@ pub struct UserInputQuestion {
     pub options: Vec<String>,
     #[serde(default)]
     pub multi_select: bool,
+    /// This question carries an optional free-text note, collected in the
+    /// composer's already-visible input after an option pick (Mimir's
+    /// ask_user `note` companion field) — never a separate follow-up page.
+    #[serde(default)]
+    pub note: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -335,6 +340,10 @@ pub struct UserInputQuestion {
 pub struct UserInputAnswer {
     pub question_id: String,
     pub labels: Vec<String>,
+    /// Optional free-text note for [`UserInputQuestion::note`] questions
+    /// (Mimir's ask_user forms); `None` on every other answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

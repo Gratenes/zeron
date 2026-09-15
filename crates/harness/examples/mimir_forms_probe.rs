@@ -64,21 +64,24 @@ fn sample_answers(questions: &[UserInputQuestion]) -> Result<Vec<UserInputAnswer
                     label(". Unit").ok_or("Missing declared Unit choice")?,
                     label(". Integration").ok_or("Missing declared Integration choice")?,
                 ]
-            } else if question.question.contains("Optional note") {
-                notes += 1;
-                if notes == 1 {
-                    vec!["ACP_NOTE_EXACT".into()]
-                } else {
-                    vec![label("Skip (optional)").ok_or("Missing optional-note skip")?]
-                }
             } else {
                 return Err(
                     "Agent asked an unexpected question; no automatic answer supplied".into(),
                 );
             };
+            // The merged Mimir shape carries the optional note on the choice
+            // question itself: the first note-capable answer carries the note
+            // text, later ones leave it blank (no separate note pages).
+            let note = if question.note {
+                notes += 1;
+                (notes == 1).then(|| "ACP_NOTE_EXACT".to_string())
+            } else {
+                None
+            };
             Ok(UserInputAnswer {
                 question_id: question.id.clone(),
                 labels,
+                note,
             })
         })
         .collect()

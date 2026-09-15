@@ -230,11 +230,15 @@ struct UserInputQuestion: Hashable, Codable {
     /// options to show and an unresolved request crashed the app.
     var options: [String]
     var multiSelect: Bool?
+    /// Optional free-text note collected in the composer input already on
+    /// screen (Mimir's ask_user note companion) — never a separate page.
+    var note: Bool?
 }
 
 struct UserInputAnswer: Hashable, Codable {
     var questionId: String
     var labels: [String]
+    var note: String?
 }
 
 /// Render-only sanitized tool call (packages render-parts policy).
