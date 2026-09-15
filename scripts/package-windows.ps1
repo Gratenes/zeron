@@ -20,9 +20,11 @@ try {
         go build -trimpath -ldflags '-s -w' -o (Join-Path $tailcatOut 'kratos-tailcat.exe') ./cmd/kratos-tailcat
         if ($LASTEXITCODE -ne 0) { throw 'Tailcat companion build failed' }
     } finally { Pop-Location }
-    $versionText = & ./target/release/zeron.exe --version
-    if ($LASTEXITCODE -ne 0 -or $versionText -notmatch '^zeron (\d+\.\d+\.\d+)$') { throw 'Cannot read executable version' }
-    $version = $Matches[1]
+    # Pipe GUI-subsystem executables so PowerShell waits for their output.
+    $versionText = & ./target/release/zeron.exe --version | Out-String
+    $versionMatch = [regex]::Match($versionText.Trim(), '^zeron (\d+\.\d+\.\d+)$')
+    if ($LASTEXITCODE -ne 0 -or -not $versionMatch.Success) { throw "Cannot read executable version: $versionText" }
+    $version = $versionMatch.Groups[1].Value
     $out = Join-Path $root 'target/package'
     $stage = Join-Path $out "zeron-$version-windows-x86_64"
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $stage

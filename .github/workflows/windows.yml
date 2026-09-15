@@ -54,6 +54,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Package version regression
+        run: ./scripts/test-windows-package-version.ps1
 
       - uses: actions/setup-go@v5
         with:
