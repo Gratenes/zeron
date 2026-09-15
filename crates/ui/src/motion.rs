@@ -147,16 +147,18 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
     if !clock.running {
         clock.running = true;
         cx.spawn(async move |cx| {
-            #[cfg(windows)]
+            // GPUI's deterministic unit-test scheduler cannot be woken by an
+            // external thread. Keep its virtual timer in unit tests.
+            #[cfg(all(windows, not(test)))]
             let mut precise_clock = windows_pulse::Clock::new(PULSE_TICK);
             loop {
-                #[cfg(windows)]
+                #[cfg(all(windows, not(test)))]
                 let precise_tick = if let Some(clock) = precise_clock.as_mut() {
                     clock.tick().await
                 } else {
                     false
                 };
-                #[cfg(not(windows))]
+                #[cfg(any(not(windows), test))]
                 let precise_tick = false;
                 if !precise_tick {
                     cx.background_executor().timer(PULSE_TICK).await;
@@ -1147,6 +1149,6 @@ mod tests {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 #[path = "motion/windows_pulse.rs"]
 mod windows_pulse;
