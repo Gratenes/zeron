@@ -25,20 +25,26 @@
 //! Wheel/touch releases that anchor immediately, including when background
 //! streaming has advanced beyond the last measured frame.
 
-mod artifacts;
-
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
+#[path = "transcript/source.rs"]
+pub mod source;
+use source::TranscriptSource;
 
 use gpui::{
-    AnyElement, BorderStyle, Bounds, ClipboardItem, ContentMask, Context, Entity, ListAlignment,
-    ListOffset, ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PathBuilder, Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task,
-    TextAlign, TextRun, Window, canvas, div, img, list, point, prelude::*, px, quad, size,
+    AnyElement, BorderStyle, Bounds, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
+    ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels,
+    Point, SharedString, StyledImage as _, StyledText, Subscription, Task, TextRun, Window, canvas,
+    div, img, list, prelude::*, px, quad,
 };
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
@@ -49,7 +55,7 @@ use crate::markdown::parser::{
 };
 use crate::markdown::render::{self, RenderCache, RenderOptions};
 use crate::markdown::veil::RowVeil;
-use crate::motion::{self, AnimationExt as _};
+use crate::motion::{self, AnimationExt as _, RESIZE};
 use crate::state::AppState;
 use crate::syntax_cache::{DocumentHighlightKey, SyntaxHighlightCache};
 use crate::theme::Theme;
@@ -65,17 +71,6 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 pub const OVERDRAW_PX: f32 = 320.0;
 /// Show the scroll-to-bottom button beyond this distance from the end.
 pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
-
-fn jump_visibility(was_shown: bool, distance: f32) -> bool {
-    // Once offered, keep the control until close to the end. A single 320px
-    // threshold made it disappear halfway through a downward scroll gesture.
-    distance
-        > if was_shown {
-            AT_BOTTOM_PX
-        } else {
-            SCROLL_BUTTON_THRESHOLD_PX
-        }
-}
 /// Bound session-local viewport memory independently of total chat history.
 const MAX_SAVED_VIEWPORTS: usize = 256;
 /// Bound locally-authored queue ids waiting to become transcript prompts.
@@ -99,36 +94,10 @@ pub const CHIP_CARD_HEIGHT: f32 = 30.0;
 /// header inside a 30px bordered card clips 2px off the bottom and every
 /// glyph/icon reads high (user report).
 const CHIP_HEADER_HEIGHT: f32 = CHIP_CARD_HEIGHT - 2.0;
-/// Child labels and expanded text share one edge beneath the compact summary.
-/// The child gutter reserves room for
-/// a longer elbow, a 4px break before the icon, and an 8px icon-to-text gap.
-const ACTIVITY_GUTTER_WIDTH: f32 = 48.0;
-const ACTIVITY_TEXT_GAP: f32 = 8.0;
-const ACTIVITY_TRUNK_X: f32 = 12.5;
-const ACTIVITY_BEND_RADIUS: f32 = 6.0;
-const ACTIVITY_BRANCH_END_X: f32 = 28.0;
-const ACTIVITY_ICON_LEFT: f32 = 32.0;
-const ACTIVITY_ICON_SIZE: f32 = 16.0;
+/// Shared columns keep the group summary, tool labels, and expanded text aligned.
+const ACTIVITY_GUTTER_WIDTH: f32 = 26.0;
+const ACTIVITY_TEXT_GAP: f32 = 4.0;
 const TOOL_TEXT_SIZE: f32 = 12.0;
-const TOOL_LABEL_SIZE: f32 = TOOL_TEXT_SIZE;
-const TOOL_LABEL_LINE_HEIGHT: f32 = 18.0;
-const TOOL_GROUP_HEADER_HEIGHT: f32 = 26.0;
-/// Compact rows retain the analytic heights used by row and group folds.
-const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
-const TOOL_FOLD: motion::MotionSpec = motion::MotionSpec::new(140, motion::EASE_OUT);
-/// BoardUI task-list cadence: a slow light sweep keeps the active summary
-/// legible, while each newly appended row reveals quickly enough to read as a
-/// continuous log rather than a stack of discrete pop-ins.
-const TOOL_GROUP_SHIMMER_DURATION: Duration = Duration::from_millis(3_400);
-const TOOL_GROUP_SHIMMER_HALF_WIDTH: f32 = 0.36;
-const TOOL_GROUP_SHIMMER_STRIP_WIDTH: f32 = 2.0;
-const TOOL_ROW_REVEAL: motion::MotionSpec = motion::MotionSpec::new(360, motion::EASE_OUT_EXPO);
-/// The connector draws briskly, then eases into the branch tip so its arrival
-/// remains visible without feeling mechanically linear.
-const TOOL_CONNECTOR_REVEAL: motion::MotionSpec =
-    motion::MotionSpec::new(480, motion::EASE_OUT_QUINT);
-const TOOL_FIRST_ROW_DELAY_MS: u64 = 90;
-const TOOL_ROW_STAGGER_MS: u64 = 65;
 
 /// Signed list scroll step for a pointer near a viewport edge.
 ///
@@ -735,16 +704,11 @@ pub enum ToolDetail {
         lines: Vec<Vec<InlineRun>>,
         truncated_by: usize,
     },
-    /// Schema-identified public Markdown rendered through the full measured renderer.
-    Markdown {
-        source: SharedString,
-        tree: Arc<BlockTree>,
-    },
     /// A file diff, in the changes pane's model: hunks with 3 lines of
     /// context, dual line numbers, and (for recognized languages) syntax
     /// tokens — rendered by `changes::render_file_body`.
     Diff {
-        file: Arc<crate::changes::FileDiff>,
+        file: Arc<crate::changes::presentation::FileDiff>,
         old_text: Option<Arc<str>>,
         new_text: Option<Arc<str>>,
     },
@@ -765,7 +729,7 @@ pub const OUTPUT_DETAIL_MAX_LINES: usize = 24;
 pub const DIFF_DETAIL_MAX_LINES: usize = 600;
 
 /// Per-line height of an output detail block (diff blocks use the changes
-/// pane's own [`crate::changes::DIFF_LINE_HEIGHT`]).
+/// pane's own [`crate::changes::presentation::DIFF_LINE_HEIGHT`]).
 pub const OUTPUT_LINE_HEIGHT: f32 = 18.0;
 
 /// Vertical padding of an output detail body (py(6) × 2).
@@ -791,7 +755,7 @@ pub fn tool_detail(
         // cap it so a whole-file rewrite (or fetched full-diff blob) can't
         // build tens of thousands of elements per frame. The changes pane
         // has no such cap; it virtualizes per line.
-        crate::changes::truncate_file_lines(&mut file, DIFF_DETAIL_MAX_LINES);
+        crate::changes::presentation::truncate_file_lines(&mut file, DIFF_DETAIL_MAX_LINES);
         return Some(ToolDetail::Diff {
             file: Arc::new(file),
             old_text: diff.old_text.as_deref().map(Arc::from),
@@ -821,32 +785,6 @@ pub fn tool_detail(
         lines,
         truncated_by,
     })
-}
-
-fn markdown_tool_detail(output: Option<&str>) -> Option<ToolDetail> {
-    let source = output?.trim();
-    if source.is_empty() {
-        return None;
-    }
-    let tree = Arc::new(parse_full(source));
-    if tree.blocks.is_empty() {
-        return None;
-    }
-    Some(ToolDetail::Markdown {
-        source: source.to_owned().into(),
-        tree,
-    })
-}
-
-/// Small public results already ride whole in the doc (apart from transport
-/// fences/outer whitespace). Do not offer a fetch which only repeats them.
-/// Unknown lengths and locally truncated detail still need the sidecar.
-fn output_needs_fetch(output: Option<&str>, bytes: Option<u64>) -> bool {
-    let (Some(output), Some(bytes)) = (output, bytes) else {
-        return true;
-    };
-    output.lines().count() > OUTPUT_DETAIL_MAX_LINES
-        || (bytes > zeron_doc::TOOL_OUTPUT_SUMMARY_MAX as u64 && bytes > output.len() as u64)
 }
 
 /// Columns at which an invocation line soft-wraps into continuation lines.
@@ -891,13 +829,13 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
             None => url.clone(),
         },
         ToolCall::WebSearch { query } => query.clone(),
-        ToolCall::Document { .. } => return None,
-        ToolCall::Answer { .. } | ToolCall::Report { .. } => return None,
         ToolCall::Todo { items } => items
             .iter()
             .map(|i| format!("{} {}", if i.done { "[x]" } else { "[ ]" }, i.text))
             .collect::<Vec<_>>()
             .join("\n"),
+        ToolCall::Document { .. } => return None,
+        ToolCall::Answer { .. } | ToolCall::Report { .. } => return None,
         ToolCall::Mcp {
             server,
             tool,
@@ -936,10 +874,10 @@ pub fn call_block(call: &ToolCall) -> Option<ToolDetail> {
 }
 
 /// Reduce an inline [`zeron_proto::ToolDiff`] to the changes pane's
-/// [`crate::changes::FileDiff`]: hunks grouped with 3 context lines, dual
+/// [`crate::changes::presentation::FileDiff`]: hunks grouped with 3 context lines, dual
 /// 1-based line numbers, unified-diff hunk headers, and add/del counts.
-pub fn diff_to_file(diff: &zeron_proto::ToolDiff) -> crate::changes::FileDiff {
-    use crate::changes::{DiffLine, FileDiff, FileStatus, Hunk, LineKind};
+pub fn diff_to_file(diff: &zeron_proto::ToolDiff) -> crate::changes::presentation::FileDiff {
+    use crate::changes::presentation::{DiffLine, FileDiff, FileStatus, Hunk, LineKind};
     let old = diff.old_text.as_deref().unwrap_or("");
     let text_diff = similar::TextDiff::from_lines(old, &diff.new_text);
     let mut hunks = Vec::new();
@@ -1034,18 +972,6 @@ pub enum RowKind {
         tree: Arc<BlockTree>,
         block_ix: usize,
     },
-    /// A MIME-identified public document, outside the generic tool accordion.
-    Document {
-        title: SharedString,
-        preview: Arc<BlockTree>,
-        output_ref: Option<SharedString>,
-        resolved: bool,
-        is_error: bool,
-    },
-    /// Delivery steps belong to the reply, never to the composer/steering queue.
-    Checklist {
-        items: Arc<Vec<zeron_proto::TodoItem>>,
-    },
     ToolGroup {
         tools: Arc<Vec<ToolItem>>,
         auto_open: bool,
@@ -1111,53 +1037,6 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BlobPresentation {
-    Output,
-    Document,
-    Markdown,
-}
-
-impl BlobPresentation {
-    fn for_tool_output(call: &ToolCall) -> Self {
-        match call {
-            ToolCall::Document { .. } => Self::Document,
-            ToolCall::Answer { .. } | ToolCall::Report { .. } => Self::Markdown,
-            _ => Self::Output,
-        }
-    }
-}
-
-fn collect_public_blob_owners(
-    entry: &SessionMessageEntry,
-    owners: &mut HashMap<SharedString, (u64, BlobPresentation)>,
-) {
-    for part in &entry.parts {
-        if let MessagePart::Tool {
-            call,
-            resolved,
-            is_error,
-            output,
-            output_ref: Some(blob_ref),
-            output_bytes,
-            output_digest,
-            ..
-        } = part
-        {
-            // Prefer the fold-time full-output digest. Legacy docs fall back
-            // to their bounded summary, which preserves pre-digest behavior.
-            let mut token = output_digest
-                .unwrap_or_else(|| fnv1a(output.as_deref().unwrap_or_default().as_bytes()));
-            token ^= output_bytes.unwrap_or(0).rotate_left(17);
-            token ^= u64::from(*resolved) << 62 | u64::from(*is_error) << 63;
-            owners.insert(
-                blob_ref.as_str().into(),
-                (token, BlobPresentation::for_tool_output(call)),
-            );
-        }
-    }
-}
-
 fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
     let mut acc = Vec::with_capacity(tools.len() * 8 + 1);
     for t in tools {
@@ -1165,8 +1044,8 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         acc.extend_from_slice(label.as_bytes());
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
         acc.push(t.is_error as u8 | (t.resolved as u8) << 1);
-        // Public detail replacements must re-splice even at the same length
-        // and resolution state. Hash the bounded, already-built render data.
+        // Detail payload arriving (or growing) must re-splice the row even
+        // when the resolved bit didn't change.
         match t.detail.as_deref() {
             None => acc.push(0),
             Some(ToolDetail::Output {
@@ -1176,9 +1055,8 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                 acc.push(1);
                 acc.extend_from_slice(&(lines.len() as u32).to_le_bytes());
                 acc.extend_from_slice(&(*truncated_by as u32).to_le_bytes());
-                for line in lines {
-                    acc.extend_from_slice(&fnv1a(line.as_bytes()).to_le_bytes());
-                }
+                let bytes: usize = lines.iter().map(|l| l.len()).sum();
+                acc.extend_from_slice(&(bytes as u32).to_le_bytes());
             }
             Some(ToolDetail::Thought {
                 lines,
@@ -1204,27 +1082,12 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
                     acc.push(b'\n');
                 }
             }
-            Some(ToolDetail::Markdown { source, tree }) => {
-                acc.push(5);
-                acc.extend_from_slice(&fnv1a(source.as_bytes()).to_le_bytes());
-                acc.extend_from_slice(&(tree.blocks.len() as u32).to_le_bytes());
-            }
-
             Some(ToolDetail::Diff { file, .. }) => {
                 acc.push(2);
                 acc.extend_from_slice(file.path.as_bytes());
                 acc.extend_from_slice(&file.additions.to_le_bytes());
                 acc.extend_from_slice(&file.deletions.to_le_bytes());
                 acc.extend_from_slice(&(file.hunks.len() as u32).to_le_bytes());
-                for hunk in &file.hunks {
-                    acc.extend_from_slice(&fnv1a(hunk.header.as_bytes()).to_le_bytes());
-                    for line in &hunk.lines {
-                        acc.push(line.kind as u8);
-                        acc.extend_from_slice(&line.old_no.unwrap_or(0).to_le_bytes());
-                        acc.extend_from_slice(&line.new_no.unwrap_or(0).to_le_bytes());
-                        acc.extend_from_slice(&fnv1a(line.text.as_bytes()).to_le_bytes());
-                    }
-                }
             }
             Some(ToolDetail::Stats { stats }) => {
                 acc.push(3);
@@ -1407,7 +1270,6 @@ pub fn rows_for_entry(
     for (part_ix, part) in entry.parts.iter().enumerate() {
         match part {
             MessagePart::Tool {
-                id: part_id,
                 call,
                 is_error,
                 resolved,
@@ -1422,59 +1284,14 @@ pub fn rows_for_entry(
                 subagent_tail,
                 ..
             } => {
-                let key = format!("{}#{}", entry.id, part_id);
-                let artifact = match call {
-                    ToolCall::Document { title } => Some(RowKind::Document {
-                        title: single_line(title).into(),
-                        preview: parse(&key, output.as_deref().unwrap_or_default()),
-                        output_ref: output_ref.clone().map(Into::into),
-                        resolved: *resolved,
-                        is_error: *is_error,
-                    }),
-                    ToolCall::Todo { items } => Some(RowKind::Checklist {
-                        items: Arc::new(items.clone()),
-                    }),
-                    _ => None,
-                };
-                if let Some(kind) = artifact {
-                    flush_group(
-                        &mut rows,
-                        &mut pending_group,
-                        &mut group_ix,
-                        group_last_part_ix,
-                    );
-                    rows.push(Row {
-                        id: key.into(),
-                        version: fnv1a(&serde_json::to_vec(part).unwrap_or_default()),
-                        turn_start: false,
-                        kind,
-                        entry_id: entry_id.clone(),
-                        timestamp: None,
-                        copy_text: None,
-                    });
-                    continue;
-                }
-
                 let item = ToolItem {
                     call: call.clone(),
                     is_error: *is_error,
                     resolved: *resolved,
-                    detail: if matches!(call, ToolCall::Answer { .. } | ToolCall::Report { .. }) {
-                        markdown_tool_detail(output.as_deref())
-                    } else {
-                        tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
-                    }
-                    .map(Arc::new),
+                    detail: tool_detail(output.as_deref(), diff.as_ref(), diff_stats.as_deref())
+                        .map(Arc::new),
                     invocation: call_block(call).map(Arc::new),
-                    output_ref: output_ref
-                        .clone()
-                        .filter(|_| {
-                            diff_ref.is_some()
-                                || diff.is_some()
-                                || diff_stats.as_ref().is_some_and(|s| !s.is_empty())
-                                || output_needs_fetch(output.as_deref(), *output_bytes)
-                        })
-                        .map(SharedString::from),
+                    output_ref: output_ref.clone().map(SharedString::from),
                     output_bytes: *output_bytes,
                     diff_ref: diff_ref.clone().map(SharedString::from),
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
@@ -1870,99 +1687,6 @@ pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     }
 }
 
-fn tool_group_title(text: SharedString, shimmer_phase: Option<f32>, theme: &Theme) -> AnyElement {
-    let Some(shimmer_phase) = shimmer_phase else {
-        // Keep the ordinary inherited hover color when the group is settled
-        // (and when reduced motion turns the active shimmer off).
-        return text.into_any_element();
-    };
-    // Keep the title as ONE normal text run. Splitting it per character copies
-    // the gradient stops, but also splits shaping/kerning and makes the sweep
-    // visibly hop one glyph at a time. The overlay repaints the intact shaped
-    // line through narrow moving clips, which is the native equivalent of
-    // CSS `background-clip: text` without duplicating accessible text.
-    let overlay_text = text.clone();
-    let overlay_font = gpui::font(theme.font_sans_fixed.clone());
-    let base = theme.text_muted;
-    let peak = theme.text;
-    let overlay = canvas(
-        move |bounds, window, _| {
-            let probe = window.text_system().shape_line(
-                overlay_text.clone(),
-                px(TOOL_LABEL_SIZE),
-                &[TextRun {
-                    len: overlay_text.len(),
-                    font: overlay_font.clone(),
-                    color: peak,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }],
-                None,
-            );
-            let text_width = f32::from(probe.width()).min(f32::from(bounds.size.width));
-            let strip_count = (text_width / TOOL_GROUP_SHIMMER_STRIP_WIDTH).ceil() as usize;
-            let mut strips = Vec::with_capacity(strip_count);
-            for ix in 0..strip_count {
-                let left = ix as f32 * TOOL_GROUP_SHIMMER_STRIP_WIDTH;
-                let right = ((ix + 1) as f32 * TOOL_GROUP_SHIMMER_STRIP_WIDTH).min(text_width);
-                let x = (left + right) * 0.5 / text_width.max(1.0);
-                let amount = tool_title_shimmer_amount(x, shimmer_phase);
-                if amount <= 0.001 {
-                    continue;
-                }
-                let line = window.text_system().shape_line(
-                    overlay_text.clone(),
-                    px(TOOL_LABEL_SIZE),
-                    &[TextRun {
-                        len: overlay_text.len(),
-                        font: overlay_font.clone(),
-                        color: motion::mix(base, peak, amount),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    None,
-                );
-                strips.push((left, right, line));
-            }
-            strips
-        },
-        move |bounds, strips, window, cx| {
-            for (left, right, line) in strips {
-                let mask = ContentMask {
-                    bounds: Bounds {
-                        origin: point(bounds.origin.x + px(left), bounds.origin.y),
-                        size: size(px(right - left), bounds.size.height),
-                    },
-                };
-                window.with_content_mask(Some(mask), |window| {
-                    let line_height = px(TOOL_LABEL_LINE_HEIGHT);
-                    let _ = line.paint(
-                        bounds.origin,
-                        line_height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
-                });
-            }
-        },
-    )
-    .absolute()
-    .inset_0();
-    div()
-        .relative()
-        .h_full()
-        .min_w_0()
-        .flex_1()
-        .overflow_hidden()
-        .child(text)
-        .child(overlay)
-        .into_any_element()
-}
-
 // `single_line` and the per-kind chip label/detail are shared with the terminal
 // viewport (`zeron_proto::view`): a tool must be named identically on every
 // surface, and the one-line collapse is needed for the same reason in both (a
@@ -1980,7 +1704,7 @@ pub fn chips_height(count: usize) -> f32 {
 
 /// Analytic height an open detail adds to its chip's card (separator + body)
 /// — output blocks by line count, diff blocks via the changes pane's own
-/// [`crate::changes::body_height`]. The chip's own [`CHIP_HEIGHT`] is already
+/// [`crate::changes::presentation::body_height`]. The chip's own [`CHIP_HEIGHT`] is already
 /// counted by [`chips_height`].
 pub fn detail_height(detail: &ToolDetail) -> f32 {
     let body = match detail {
@@ -1998,10 +1722,7 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
             let rows = lines.len() + usize::from(*truncated_by > 0);
             rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
         }
-        // Full Markdown uses measured GPUI layout; callers with this variant do
-        // not constrain the card or group to this analytic estimate.
-        ToolDetail::Markdown { .. } => 0.0,
-        ToolDetail::Diff { file, .. } => crate::changes::body_height(file),
+        ToolDetail::Diff { file, .. } => crate::changes::presentation::body_height(file),
         ToolDetail::Stats { stats } => stats.len() as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD,
     };
     DETAIL_SEPARATOR + body
@@ -2018,7 +1739,6 @@ pub const BLOB_AFFORDANCE_HEIGHT: f32 = 24.0;
 struct ChipAffordance {
     blob_ref: SharedString,
     label: SharedString,
-    presentation: BlobPresentation,
 }
 
 /// Line cap for a FETCHED full output (a defensive ceiling, not a doc cap —
@@ -2136,6 +1856,195 @@ struct HighlightEntry {
     _task: Option<Task<()>>,
 }
 
+/// Browser-safe lexical highlighting for fenced code. It deliberately covers
+/// only paint roles the renderer already understands and has no worker, engine,
+/// or native parser dependency.
+#[cfg(any(target_arch = "wasm32", test))]
+fn portable_highlight_document(language: Lang, source: &str) -> zeron_syntax::HighlightedDocument {
+    zeron_syntax::HighlightedDocument {
+        language,
+        lines: source
+            .split('\n')
+            .map(|line| portable_highlight_line(language, line))
+            .collect(),
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn portable_highlight_line(language: Lang, line: &str) -> Vec<zeron_syntax::HighlightSpan> {
+    use zeron_syntax::{HighlightKind, HighlightSpan};
+
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while at < line.len() {
+        let rest = &line[at..];
+        let comment = match language {
+            Lang::Bash | Lang::Python | Lang::Yaml | Lang::Toml => rest.starts_with('#'),
+            Lang::Sql => rest.starts_with("--"),
+            _ => rest.starts_with("//"),
+        };
+        if comment {
+            spans.push(HighlightSpan {
+                range: at..line.len(),
+                kind: HighlightKind::Comment,
+            });
+            break;
+        }
+        let byte = rest.as_bytes()[0];
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            let quote = byte;
+            let mut end = at + 1;
+            let mut escaped = false;
+            while end < line.len() {
+                let current = line.as_bytes()[end];
+                end += 1;
+                if current == quote && !escaped {
+                    break;
+                }
+                escaped = current == b'\\' && !escaped;
+                if current != b'\\' {
+                    escaped = false;
+                }
+            }
+            spans.push(HighlightSpan {
+                range: at..end,
+                kind: HighlightKind::String,
+            });
+            at = end;
+            continue;
+        }
+        if byte.is_ascii_digit() {
+            let end = at
+                + rest
+                    .bytes()
+                    .take_while(|byte| {
+                        byte.is_ascii_alphanumeric() || *byte == b'.' || *byte == b'_'
+                    })
+                    .count();
+            spans.push(HighlightSpan {
+                range: at..end,
+                kind: HighlightKind::Number,
+            });
+            at = end;
+            continue;
+        }
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            let end = at
+                + rest
+                    .bytes()
+                    .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                    .count();
+            if portable_keyword(&line[at..end]) {
+                spans.push(HighlightSpan {
+                    range: at..end,
+                    kind: HighlightKind::Keyword,
+                });
+            }
+            at = end;
+            continue;
+        }
+        at += 1;
+    }
+    spans
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn portable_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "class"
+            | "const"
+            | "continue"
+            | "def"
+            | "do"
+            | "else"
+            | "enum"
+            | "export"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "from"
+            | "function"
+            | "if"
+            | "impl"
+            | "import"
+            | "in"
+            | "interface"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "mut"
+            | "new"
+            | "null"
+            | "package"
+            | "pub"
+            | "return"
+            | "self"
+            | "static"
+            | "struct"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "trait"
+            | "true"
+            | "try"
+            | "type"
+            | "use"
+            | "var"
+            | "while"
+            | "with"
+            | "yield"
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_highlight_document(
+    language: Lang,
+    source: &str,
+) -> Option<zeron_syntax::HighlightedDocument> {
+    zeron_syntax::highlight(zeron_syntax::HighlightRequest {
+        source,
+        path: None,
+        fence_tag: Some(match language {
+            Lang::Rust => "rust",
+            Lang::JavaScript => "javascript",
+            Lang::Jsx => "jsx",
+            Lang::TypeScript => "typescript",
+            Lang::Tsx => "tsx",
+            Lang::Python => "python",
+            Lang::Go => "go",
+            Lang::Json => "json",
+            Lang::Jsonc => "jsonc",
+            Lang::Bash => "bash",
+            Lang::Toml => "toml",
+            Lang::Markdown => "markdown",
+            Lang::Html => "html",
+            Lang::Css => "css",
+            Lang::Yaml => "yaml",
+            Lang::C => "c",
+            Lang::Cpp => "cpp",
+            Lang::CSharp => "csharp",
+            Lang::Java => "java",
+            Lang::Kotlin => "kotlin",
+            Lang::Swift => "swift",
+            Lang::Ruby => "ruby",
+            Lang::Php => "php",
+            Lang::Sql => "sql",
+            Lang::Lua => "lua",
+            Lang::Dockerfile => "dockerfile",
+            Lang::Nix => "nix",
+            Lang::Make => "make",
+        }),
+    })
+    .ok()
+}
+
 /// Cache of tokenized code blocks keyed by `(row id, block ix)`. Tokenization
 /// runs on the background executor, time-sliced; results apply as paint-only
 /// run colors when they land.
@@ -2146,7 +2055,55 @@ struct HighlightStore {
 }
 
 impl HighlightStore {
+    /// The browser has no native syntax worker. Tokenize synchronously through
+    /// the portable lexer; the resulting roles use the same renderer and cache
+    /// as native Tree-sitter documents.
+    #[cfg(target_arch = "wasm32")]
+    fn request(
+        &mut self,
+        row_id: SharedString,
+        block_ix: usize,
+        lang: Lang,
+        code: &str,
+        _cx: &mut Context<Transcript>,
+    ) -> Option<Arc<zeron_syntax::HighlightedDocument>> {
+        let slot_key = (row_id, block_ix);
+        let document_key = DocumentHighlightKey::new(lang, code);
+        if let Some(document) = self
+            .entries
+            .get(&slot_key)
+            .filter(|entry| entry.key == document_key)
+            .and_then(|entry| entry.document.as_ref())
+            .and_then(Weak::upgrade)
+        {
+            return Some(document);
+        }
+        if let Some(document) = self.cache.get(&document_key) {
+            self.entries.insert(
+                slot_key,
+                HighlightEntry {
+                    key: document_key,
+                    document: Some(Arc::downgrade(&document)),
+                    _task: None,
+                },
+            );
+            return Some(document);
+        }
+        let document = Arc::new(portable_highlight_document(lang, code));
+        let retained = self.cache.insert(document_key, document.clone());
+        self.entries.insert(
+            slot_key,
+            HighlightEntry {
+                key: document_key,
+                document: retained.then(|| Arc::downgrade(&document)),
+                _task: None,
+            },
+        );
+        retained.then_some(document)
+    }
+
     /// Current tokens if ready; kicks a background tokenize when stale/missing.
+    #[cfg(not(target_arch = "wasm32"))]
     fn request(
         &mut self,
         row_id: SharedString,
@@ -2182,43 +2139,7 @@ impl HighlightStore {
             let started = Instant::now();
             let document = cx
                 .background_executor()
-                .spawn(async move {
-                    zeron_syntax::highlight(zeron_syntax::HighlightRequest {
-                        source: &code,
-                        path: None,
-                        fence_tag: Some(match lang {
-                            Lang::Rust => "rust",
-                            Lang::JavaScript => "javascript",
-                            Lang::Jsx => "jsx",
-                            Lang::TypeScript => "typescript",
-                            Lang::Tsx => "tsx",
-                            Lang::Python => "python",
-                            Lang::Go => "go",
-                            Lang::Json => "json",
-                            Lang::Jsonc => "jsonc",
-                            Lang::Bash => "bash",
-                            Lang::Toml => "toml",
-                            Lang::Markdown => "markdown",
-                            Lang::Html => "html",
-                            Lang::Css => "css",
-                            Lang::Yaml => "yaml",
-                            Lang::C => "c",
-                            Lang::Cpp => "cpp",
-                            Lang::CSharp => "csharp",
-                            Lang::Java => "java",
-                            Lang::Kotlin => "kotlin",
-                            Lang::Swift => "swift",
-                            Lang::Ruby => "ruby",
-                            Lang::Php => "php",
-                            Lang::Sql => "sql",
-                            Lang::Lua => "lua",
-                            Lang::Dockerfile => "dockerfile",
-                            Lang::Nix => "nix",
-                            Lang::Make => "make",
-                        }),
-                    })
-                    .ok()
-                })
+                .spawn(async move { native_highlight_document(lang, &code) })
                 .await;
             this.update(cx, |transcript, cx| {
                 if let Some(document) = document {
@@ -2281,145 +2202,12 @@ struct FoldState {
     /// tween made every once-collapsed group flash open→closed on each
     /// reappearance (user report).
     toggled_at: Option<Instant>,
-    disclosure_at: Option<Instant>,
     /// Per-toggle duration. User bubbles scale this with travel distance;
     /// existing tool folds leave it at zero and keep their catalog constants.
     duration_ms: u64,
     /// Extra user-body height revealed by Show more. It is not reply growth
     /// and must not permanently consume the sent turn's reservation.
     user_expansion_height: f32,
-}
-
-/// Reveal epochs for one live ordinary tool group. `None` means the row was
-/// already present when this transcript attached (or has finished revealing),
-/// so replaying history and scrolling a virtualized row back into view stay
-/// completely still.
-#[derive(Default)]
-struct ToolGroupReveal {
-    /// A newly streamed task header participates in the same height/fade/lift
-    /// reveal as its steps. Replayed headers leave this unset.
-    header_started_at: Option<Instant>,
-    starts: Vec<Option<Instant>>,
-    /// A title sweep begins with this group instead of inheriting the shared
-    /// loader clock at an arbitrary point midway across the label.
-    shimmer_started_at: Option<Instant>,
-    rendered_open: Option<bool>,
-    rendered_height: f32,
-}
-
-fn tool_row_reveal_progress(start: Option<Instant>, now: Instant, reduce_motion: bool) -> f32 {
-    let Some(start) = start.filter(|_| !reduce_motion) else {
-        return 1.0;
-    };
-    let elapsed = now.checked_duration_since(start).unwrap_or_default();
-    let raw = elapsed.as_secs_f32() / TOOL_ROW_REVEAL.total().as_secs_f32();
-    TOOL_ROW_REVEAL.curve.eval(raw)
-}
-
-fn tool_connector_reveal_progress(
-    start: Option<Instant>,
-    now: Instant,
-    reduce_motion: bool,
-) -> f32 {
-    let Some(start) = start.filter(|_| !reduce_motion) else {
-        return 1.0;
-    };
-    let elapsed = now.checked_duration_since(start).unwrap_or_default();
-    let raw = elapsed.as_secs_f32() / TOOL_CONNECTOR_REVEAL.total().as_secs_f32();
-    TOOL_CONNECTOR_REVEAL.curve.eval(raw)
-}
-
-/// Split one arrival into a continuous tree draw. For child rows, the previous
-/// row grows its continuation to the boundary first, then this row draws its
-/// incoming trunk and elbow. The branch slightly overlaps the end of the
-/// incoming phase so there is no dead frame at the bend.
-fn tool_connector_parts(progress: f32, has_predecessor: bool) -> (f32, f32) {
-    let progress = progress.clamp(0.0, 1.0);
-    let (incoming_start, incoming_end, branch_start) = if has_predecessor {
-        (0.45, 0.72, 0.68)
-    } else {
-        (0.0, 0.62, 0.58)
-    };
-    let incoming = ((progress - incoming_start) / (incoming_end - incoming_start)).clamp(0.0, 1.0);
-    let branch = ((progress - branch_start) / (1.0 - branch_start)).clamp(0.0, 1.0);
-    (incoming, branch)
-}
-
-/// The outgoing trunk belongs visually to the row that is already present,
-/// but its timing belongs to the next row's arrival.
-fn tool_connector_continuation(next_progress: Option<f32>) -> f32 {
-    next_progress
-        .map(|progress| (progress / 0.45).clamp(0.0, 1.0))
-        .unwrap_or(0.0)
-}
-
-/// Reveal by distance along the elbow and straight leg, so changing the branch
-/// length does not introduce a speed jump at their junction.
-fn activity_branch_points(progress: f32) -> Vec<Point<f32>> {
-    let mut path: Vec<_> = (0..=24)
-        .map(|step| {
-            let t = step as f32 / 24.0;
-            point(
-                ACTIVITY_BEND_RADIUS * t * t,
-                ACTIVITY_BEND_RADIUS * (2.0 * t - t * t),
-            )
-        })
-        .collect();
-    path.push(point(
-        ACTIVITY_BRANCH_END_X - ACTIVITY_TRUNK_X,
-        ACTIVITY_BEND_RADIUS,
-    ));
-    if progress >= 1.0 {
-        return path;
-    }
-    let lengths: Vec<_> = path
-        .windows(2)
-        .map(|pair| (pair[1].x - pair[0].x).hypot(pair[1].y - pair[0].y))
-        .collect();
-    let mut remaining = lengths.iter().sum::<f32>() * progress.clamp(0.0, 1.0);
-    let mut visible = vec![path[0]];
-    for (pair, length) in path.windows(2).zip(lengths) {
-        if remaining <= 0.0 {
-            break;
-        }
-        let t = (remaining / length).min(1.0);
-        visible.push(point(
-            motion::lerp(pair[0].x, pair[1].x, t),
-            motion::lerp(pair[0].y, pair[1].y, t),
-        ));
-        remaining -= length;
-    }
-    visible
-}
-
-fn tool_disclosure_progress(open: bool, fold: FoldState, now: Instant) -> f32 {
-    let Some(start) = fold.disclosure_at else {
-        return if open { 1.0 } else { 0.0 };
-    };
-    let raw = now
-        .checked_duration_since(start)
-        .unwrap_or_default()
-        .as_secs_f32()
-        / TOOL_FOLD.total().as_secs_f32();
-    let progress = TOOL_FOLD.curve.eval(raw);
-    if open { progress } else { 1.0 - progress }
-}
-
-/// BoardUI's measured recipe: a 300%-wide repeating gradient moves from 200%
-/// to -100%. Its 38→50→62% highlight maps to a 36%-of-title shoulder around
-/// each peak; adjacent copies sit three title-widths apart. Sampling this by
-/// x-coordinate lets the paint clips reproduce the continuous pattern.
-fn tool_title_shimmer_amount(x: f32, phase: f32) -> f32 {
-    let primary_center = -2.5 + phase.clamp(0.0, 1.0) * 6.0;
-    (-2..=2)
-        .map(|copy| primary_center + copy as f32 * 3.0)
-        .map(|center| (1.0 - (x - center).abs() / TOOL_GROUP_SHIMMER_HALF_WIDTH).clamp(0.0, 1.0))
-        .fold(0.0, f32::max)
-}
-
-fn tool_title_shimmer_phase(start: Instant, now: Instant) -> f32 {
-    let elapsed = now.checked_duration_since(start).unwrap_or_default();
-    (elapsed.as_secs_f32() / TOOL_GROUP_SHIMMER_DURATION.as_secs_f32()).fract()
 }
 
 /// Viewport compensation paired with a long user-message collapse. While the
@@ -2712,14 +2500,11 @@ impl SavedViewportCache {
 }
 
 pub struct Transcript {
-    state: Entity<AppState>,
+    source: TranscriptSource,
     list: ListState,
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
     chat_id: Option<String>,
-    /// The shell may retain this already-laid-out view briefly for its exit.
-    /// Cleared as soon as the exit is invisible; never used for another chat.
-    retain_on_deselect: bool,
     /// `Some(doc_id)` pins this instance to a SUBAGENT doc: rows come from
     /// `AppState::sub_transcript(doc_id)` instead of the selected chat, and
     /// the instance is READ-ONLY — no echoes, no own-turn hold, and no global
@@ -2758,9 +2543,6 @@ pub struct Transcript {
     live_parsers: HashMap<String, IncrementalParser>,
     tree_cache: HashMap<String, (usize, Arc<BlockTree>)>,
     folds: HashMap<SharedString, FoldState>,
-    /// Entrance state follows stable groups through completion so fast calls
-    /// finish revealing. Replay rows have no entrance timestamps.
-    tool_group_reveals: HashMap<SharedString, ToolGroupReveal>,
     /// Detail folds (output/diff) per chip, keyed `"{row_id}#d{ix}"` — full
     /// [`FoldState`]s so detail bodies tween open/closed exactly like the
     /// group fold. Render-local like `folds` — never part of the row
@@ -2893,17 +2675,13 @@ pub struct Transcript {
     /// Deliberately NOT cleared on chat switch: refs are chat-qualified and a
     /// fetched blob stays valid.
     blob_details: HashMap<SharedString, BlobFetch>,
-    /// Public owner fingerprint and fetch generation for each stable blob ref.
-    /// Child revisions intentionally reuse refs, so the ref alone is not a cache key.
-    blob_owners: HashMap<SharedString, (u64, BlobPresentation)>,
-    blob_generations: HashMap<SharedString, u64>,
     /// Monotonic fetch order per blob ref: when a tool has BOTH a diff and
     /// an output blob fetched, the chip shows the one requested most
     /// recently (click "Show full output" after a diff → see the output).
     blob_fetch_order: HashMap<SharedString, u64>,
     blob_fetch_counter: u64,
     _observe: Subscription,
-    _text_changes: Subscription,
+    _text_changes: Option<Subscription>,
 }
 
 /// One sidecar blob fetch's lifecycle.
@@ -2912,20 +2690,6 @@ enum BlobFetch {
     /// Failed with the affordance re-armed as a retry.
     Failed,
     Ready(Arc<ToolDetail>),
-    /// Parsed only when the owning tool is explicitly a Markdown document.
-    Document(Arc<BlockTree>),
-}
-
-fn build_blob_fetch(text: &str, is_diff: bool, presentation: BlobPresentation) -> BlobFetch {
-    match presentation {
-        BlobPresentation::Output => blob_detail(text, is_diff)
-            .map(|detail| BlobFetch::Ready(Arc::new(detail)))
-            .unwrap_or(BlobFetch::Failed),
-        BlobPresentation::Document => BlobFetch::Document(Arc::new(parse_full(text))),
-        BlobPresentation::Markdown => markdown_tool_detail(Some(text))
-            .map(|detail| BlobFetch::Ready(Arc::new(detail)))
-            .unwrap_or(BlobFetch::Failed),
-    }
 }
 
 /// Shell-facing events (the transcript itself hosts no surfaces).
@@ -2960,7 +2724,7 @@ impl Transcript {
     }
 
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        Self::build(state, None, true, cx)
+        Self::build(TranscriptSource::Native(state), None, true, cx)
     }
 
     /// A read-only transcript over one SUBAGENT doc (right-pane tab). The
@@ -2975,11 +2739,27 @@ impl Transcript {
         follow: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::build(state, Some(doc_id), follow, cx)
+        Self::build(TranscriptSource::Native(state), Some(doc_id), follow, cx)
+    }
+
+    /// Render an already-replayed document without engine services. The same
+    /// rows, caches, list, selection and rendering are used on both platforms.
+    pub fn from_document(
+        document: Entity<source::TranscriptDocument>,
+        follow: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let doc_id = document.read(cx).doc_id().to_owned();
+        Self::build(
+            TranscriptSource::Document(document),
+            Some(doc_id),
+            follow,
+            cx,
+        )
     }
 
     fn build(
-        state: Entity<AppState>,
+        source: TranscriptSource,
         doc_override: Option<String>,
         follow: bool,
         cx: &mut Context<Self>,
@@ -3010,19 +2790,28 @@ impl Transcript {
             })
             .ok();
         });
-        let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
-        let text_changes = cx.subscribe(
-            &state,
-            |this: &mut Self, state, event: &crate::state::TranscriptTextChanged, cx| {
-                let doc_id = this
-                    .doc_override
-                    .as_deref()
-                    .or_else(|| state.read(cx).selected_chat.as_deref());
-                if doc_id == Some(event.doc_id.as_str()) {
-                    this.sync(cx);
-                }
-            },
-        );
+        let (observe, text_changes) = match &source {
+            TranscriptSource::Native(state) => {
+                let observe = cx.observe(state, |this: &mut Self, _, cx| this.sync(cx));
+                let text_changes = cx.subscribe(
+                    state,
+                    |this: &mut Self, state, event: &crate::state::TranscriptTextChanged, cx| {
+                        let doc_id = this
+                            .doc_override
+                            .as_deref()
+                            .or_else(|| state.read(cx).selected_chat.as_deref());
+                        if doc_id == Some(event.doc_id.as_str()) {
+                            this.sync(cx);
+                        }
+                    },
+                );
+                (observe, Some(text_changes))
+            }
+            TranscriptSource::Document(document) => (
+                cx.observe(document, |this: &mut Self, _, cx| this.sync(cx)),
+                None,
+            ),
+        };
         // The rail is sized for the conversation column; a narrow right-pane
         // tab has no width gate driving it, so override instances skip it.
         let rail_enabled = doc_override.is_none();
@@ -3034,14 +2823,13 @@ impl Transcript {
         // wheel-up, and resticks/jumps exactly like the main transcript.
         let pinned = follow;
         let mut this = Self {
-            state,
+            source,
             list,
             rows: Vec::new(),
             last_source: None,
             // Pre-set so `sync` never sees an attach edge — an override
             // instance must not reset (or re-pin) on selection changes.
             chat_id: doc_override.clone(),
-            retain_on_deselect: false,
             land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
             doc_override,
@@ -3055,7 +2843,6 @@ impl Transcript {
             live_parsers: HashMap::new(),
             tree_cache: HashMap::new(),
             folds: HashMap::new(),
-            tool_group_reveals: HashMap::new(),
             tool_details: HashMap::new(),
             user_folds: HashMap::new(),
             user_heights: HashMap::new(),
@@ -3103,8 +2890,6 @@ impl Transcript {
             attachment_loads: HashMap::new(),
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),
-            blob_owners: HashMap::new(),
-            blob_generations: HashMap::new(),
             blob_fetch_order: HashMap::new(),
             blob_fetch_counter: 0,
             _observe: observe,
@@ -3248,8 +3033,13 @@ impl Transcript {
         }
     }
 
-    pub(crate) fn state_entity(&self) -> &Entity<AppState> {
-        &self.state
+    pub(crate) fn with_entries<R>(
+        &self,
+        cx: &gpui::App,
+        read: impl FnOnce(&[SessionMessageEntry], &[SessionMessageEntry]) -> R,
+    ) -> R {
+        let snapshot = self.source.snapshot(self.doc_override.as_deref(), cx);
+        read(snapshot.entries, snapshot.echoes)
     }
 
     /// Hand viewport ownership to explicit rail/navigation input before its
@@ -3366,7 +3156,7 @@ impl Transcript {
                     if this.pinned {
                         this.wake_spring();
                     }
-                    this.show_jump_button = jump_visibility(this.show_jump_button, distance)
+                    this.show_jump_button = distance > SCROLL_BUTTON_THRESHOLD_PX
                         && !this.own_turn.as_ref().is_some_and(|a| a.held);
                     cx.notify();
                     return;
@@ -3390,7 +3180,7 @@ impl Transcript {
                         this.wake_spring();
                     }
                 }
-                let show = jump_visibility(this.show_jump_button, distance) && !this.pinned;
+                let show = distance > SCROLL_BUTTON_THRESHOLD_PX && !this.pinned;
                 if show != this.show_jump_button {
                     this.show_jump_button = show;
                 }
@@ -3453,8 +3243,7 @@ impl Transcript {
         }
         if was_selecting {
             self.last_scroll_distance = self.distance_from_bottom();
-            self.show_jump_button =
-                jump_visibility(self.show_jump_button, self.last_scroll_distance);
+            self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
             cx.notify();
         }
     }
@@ -3505,7 +3294,7 @@ impl Transcript {
         self.begin_scroll_navigation();
         self.list.scroll_by(px(step));
         self.last_scroll_distance = self.distance_from_bottom();
-        self.show_jump_button = jump_visibility(self.show_jump_button, self.last_scroll_distance);
+        self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
         cx.notify();
         self.schedule_selection_scroll(cx);
     }
@@ -3671,7 +3460,7 @@ impl Transcript {
         self.own_turn_last_tick = None;
         self.remeasure_last_row();
         self.last_scroll_distance = self.distance_from_bottom();
-        self.show_jump_button = jump_visibility(self.show_jump_button, self.last_scroll_distance);
+        self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
         self.viewport_finalize_pending = true;
     }
 
@@ -3722,9 +3511,6 @@ impl Transcript {
     /// Advance the prompt glide or hand a filled reservation to tail-follow.
     /// Reservation sizing happens in the list layout, never in this callback.
     fn step_own_turn(&mut self, cx: &mut Context<Self>) {
-        if self.route_exit_pending(cx) {
-            return;
-        }
         self.own_turn_kick = false;
         // Layout moves the bottom too (pad refinement, streaming growth):
         // refresh the wheel handler's escape baseline every frame so only a
@@ -4022,9 +3808,6 @@ impl Transcript {
     /// delta, and park on landing. Runs from `window.on_next_frame`,
     /// i.e. after layout — measurements are fresh.
     fn step_spring(&mut self, cx: &mut Context<Self>) {
-        if self.route_exit_pending(cx) {
-            return;
-        }
         self.spring_kick = false;
         if !self.pinned {
             self.spring_last_tick = None;
@@ -4079,62 +3862,22 @@ impl Transcript {
         }
     }
 
-    pub(crate) fn retain_for_route_exit(&mut self) {
-        self.retain_on_deselect = true;
-    }
-
-    fn route_exit_pending(&self, cx: &gpui::App) -> bool {
-        self.retain_on_deselect
-            && self.doc_override.is_none()
-            && self.state.read(cx).selected_chat.is_none()
-            && self.chat_id.is_some()
-    }
-
-    pub(crate) fn finish_route_exit(&mut self, cx: &mut Context<Self>) {
-        if self.state.read(cx).selected_chat.is_none() && self.chat_id.is_some() {
-            self.retain_on_deselect = false;
-            self.sync(cx);
-            self.retain_on_deselect = true;
-        }
-    }
-
-    /// Rebuild rows from app state; splice minimal ranges into the list.
+    /// Rebuild rows from a borrowed source; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        if self.retain_on_deselect
-            && self.doc_override.is_none()
-            && self.state.read(cx).selected_chat.is_none()
-            && self.chat_id.is_some()
-        {
-            // A quick return can reuse this entity before the exit finishes.
-            // Its next snapshot is still a replay, not newly arriving tools.
-            self.veil_attach_pending = true;
-            return;
-        }
-        let (selected, replay) = {
-            let s = self.state.read(cx);
-            match &self.doc_override {
-                // Pinned to a subagent doc: `selected` equals `chat_id` by
-                // construction, so the attach/reset branch below never fires,
-                // and echoes stay empty (nothing is ever sent from here).
-                Some(doc_id) => (Some(doc_id.clone()), TranscriptReplayState::Populated),
-                None => {
-                    let replay = if !s.transcript_replayed {
-                        TranscriptReplayState::Pending
-                    } else if s.transcript.is_empty() {
-                        TranscriptReplayState::Empty
-                    } else {
-                        TranscriptReplayState::Populated
-                    };
-                    (s.selected_chat.clone(), replay)
-                }
-            }
+        let (selected, replay, revision) = {
+            let snapshot = self.source.snapshot(self.doc_override.as_deref(), cx);
+            (
+                snapshot.doc_id.map(str::to_owned),
+                snapshot.replay,
+                snapshot.revision,
+            )
         };
-
-        let source = (
-            selected.clone(),
-            replay,
-            self.state.read(cx).transcript_revision,
-        );
+        // Document feeds may replace their identity; keep read-only policy while
+        // letting the normal attach path invalidate rows and restore viewport.
+        if self.source.is_document() {
+            self.doc_override = selected.clone();
+        }
+        let source = (selected.clone(), replay, revision);
         if self.last_source.as_ref() == Some(&source) {
             return;
         }
@@ -4171,7 +3914,6 @@ impl Transcript {
             self.live_parsers.clear();
             self.tree_cache.clear();
             self.folds.clear();
-            self.tool_group_reveals.clear();
             self.user_folds.clear();
             self.user_heights.clear();
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
@@ -4212,7 +3954,10 @@ impl Transcript {
             } else {
                 // New chats and chats that were following their tail retain
                 // the existing open-at-bottom behavior.
-                self.pinned = true;
+                self.pinned = !self.source.is_document() || self.doc_live;
+                if self.source.is_document() {
+                    self.land_end_pending = !self.doc_live;
+                }
                 self.last_scroll_distance = 0.0;
                 self.show_jump_button = false;
             }
@@ -4225,26 +3970,19 @@ impl Transcript {
         }
 
         let mut new_rows: Vec<Row> = Vec::new();
-        let mut public_blob_owners = HashMap::new();
         // Borrow the transcript only while deriving rows. Cloning the entity
         // handle lets rows_for mutate our caches without copying every text
         // and tool payload on each app-state notification.
         let (entries_empty, tail_streaming) = {
-            let state = self.state.clone();
-            let state = state.read(cx);
-            let entries = match &self.doc_override {
-                Some(doc_id) => state.sub_transcript(doc_id),
-                None => state.transcript.as_slice(),
-            };
+            let source = self.source.clone();
+            let doc_override = self.doc_override.clone();
+            let snapshot = source.snapshot(doc_override.as_deref(), cx);
+            let entries = snapshot.entries;
             for entry in entries {
-                collect_public_blob_owners(entry, &mut public_blob_owners);
                 new_rows.extend(self.rows_for(entry, false));
             }
-            if self.doc_override.is_none() {
-                for echo in state.pending_echoes() {
-                    collect_public_blob_owners(echo, &mut public_blob_owners);
-                    new_rows.extend(self.rows_for(echo, true));
-                }
+            for echo in snapshot.echoes {
+                new_rows.extend(self.rows_for(echo, true));
             }
             (
                 entries.is_empty(),
@@ -4253,68 +3991,6 @@ impl Transcript {
                     .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
             )
         };
-
-        // A child revision may replace the public snapshot while retaining the
-        // chat/part blob ref. Reconcile before using any fetched document tree.
-        self.reconcile_blob_owners(&new_rows, public_blob_owners, cx);
-        // Give only rows that ARRIVE after the replay baseline an entrance.
-        // The first populated frame after a chat attach may already contain a
-        // live tool group; treating it as history prevents a whole existing
-        // task tree from reanimating on every chat switch.
-        let replay_baseline = self.veil_attach_pending && !entries_empty;
-        if replay_baseline {
-            // Retain explicit user pins, but never resume an old arrival or
-            // closing animation when revisiting the retained transcript.
-            self.tool_group_reveals.clear();
-            for fold in self.folds.values_mut() {
-                fold.toggled_at = None;
-                fold.disclosure_at = None;
-            }
-        }
-        let previous_tool_counts: HashMap<SharedString, usize> = self
-            .rows
-            .iter()
-            .filter_map(|row| match &row.kind {
-                RowKind::ToolGroup { tools, .. } => Some((row.id.clone(), tools.len())),
-                _ => None,
-            })
-            .collect();
-        let now = Instant::now();
-        let mut live_tool_groups = HashSet::new();
-        for row in &new_rows {
-            let RowKind::ToolGroup { tools, .. } = &row.kind else {
-                continue;
-            };
-            // Agent/spawn groups are standalone cards, not task trees.
-            if !tool_group_collapses(tools) {
-                continue;
-            }
-            live_tool_groups.insert(row.id.clone());
-            let old_count = if replay_baseline {
-                tools.len()
-            } else {
-                previous_tool_counts.get(&row.id).copied().unwrap_or(0)
-            }
-            .min(tools.len());
-            let is_new_group = !replay_baseline && !previous_tool_counts.contains_key(&row.id);
-            let reveal = self.tool_group_reveals.entry(row.id.clone()).or_default();
-            reveal.shimmer_started_at.get_or_insert(now);
-            if is_new_group {
-                reveal.header_started_at.get_or_insert(now);
-            }
-            reveal.starts.truncate(tools.len());
-            reveal.starts.resize(tools.len(), None);
-            let first_row_delay = is_new_group.then_some(TOOL_FIRST_ROW_DELAY_MS).unwrap_or(0);
-            for (arrival_ix, tool_ix) in (old_count..tools.len()).enumerate() {
-                reveal.starts[tool_ix] = Some(
-                    now + Duration::from_millis(
-                        first_row_delay + arrival_ix as u64 * TOOL_ROW_STAGGER_MS,
-                    ),
-                );
-            }
-        }
-        self.tool_group_reveals
-            .retain(|row_id, _| live_tool_groups.contains(row_id));
 
         // Runtime scroll handles follow the stable code rows exactly. A live
         // block keeps its handle through completion; deleted/reindexed tail
@@ -4332,25 +4008,6 @@ impl Transcript {
                                 .collect()
                         })
                         .unwrap_or_default()
-                }
-                RowKind::Document {
-                    preview,
-                    output_ref,
-                    ..
-                } => {
-                    let tree = match output_ref.as_ref().and_then(|r| self.blob_details.get(r)) {
-                        Some(BlobFetch::Document(tree)) => tree,
-                        _ => preview,
-                    };
-                    tree.blocks
-                        .iter()
-                        .enumerate()
-                        .flat_map(|(ix, top)| {
-                            render::code_block_indices(&top.block, ix)
-                                .into_iter()
-                                .map(|ix| format!("{}#code{ix}", row.id).into())
-                        })
-                        .collect()
                 }
                 _ => Vec::new(),
             })
@@ -4533,126 +4190,11 @@ impl Transcript {
         rows
     }
 
-    fn reconcile_blob_owners(
-        &mut self,
-        rows: &[Row],
-        public_owners: HashMap<SharedString, (u64, BlobPresentation)>,
-        cx: &mut Context<Self>,
-    ) {
-        let mut owners = HashMap::<SharedString, (u64, BlobPresentation)>::new();
-        for row in rows {
-            match &row.kind {
-                RowKind::Document {
-                    output_ref: Some(blob_ref),
-                    ..
-                } => {
-                    owners.insert(blob_ref.clone(), (row.version, BlobPresentation::Document));
-                }
-                RowKind::ToolGroup { tools, .. } => {
-                    for tool in tools.iter() {
-                        let version = tool_fingerprint(std::slice::from_ref(tool), false);
-                        if let Some(blob_ref) = &tool.output_ref {
-                            owners.insert(
-                                blob_ref.clone(),
-                                (version, BlobPresentation::for_tool_output(&tool.call)),
-                            );
-                        }
-                        if let Some(blob_ref) = &tool.diff_ref {
-                            owners.insert(blob_ref.clone(), (version, BlobPresentation::Output));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        // Exact public output wins over the bounded render projection above.
-        owners.extend(public_owners);
-        let mut refresh = Vec::new();
-        for (blob_ref, owner) in owners {
-            match self.blob_owners.insert(blob_ref.clone(), owner) {
-                None => {
-                    self.blob_generations.entry(blob_ref).or_insert(1);
-                }
-                Some(previous) if previous != owner => {
-                    *self.blob_generations.entry(blob_ref.clone()).or_insert(1) += 1;
-                    let requested = matches!(
-                        self.blob_details.remove(&blob_ref),
-                        Some(BlobFetch::Loading(_) | BlobFetch::Ready(_) | BlobFetch::Document(_))
-                    );
-                    self.invalidate_blob_rows(&blob_ref);
-                    if requested {
-                        refresh.push((blob_ref, owner.1));
-                    }
-                }
-                Some(_) => {}
-            }
-        }
-        for (blob_ref, presentation) in refresh {
-            self.spawn_blob_fetch_with_presentation(blob_ref, presentation, cx);
-        }
-    }
-
-    fn blob_generation(&self, blob_ref: &str) -> u64 {
-        self.blob_generations.get(blob_ref).copied().unwrap_or(0)
-    }
-
-    /// Blob arrival changes render-local content without a doc revision. Invalidate
-    /// the owning list measurements too; notify alone leaves cached rows clipped.
-    fn invalidate_blob_rows(&mut self, blob_ref: &str) {
-        for (ix, row) in self.rows.iter().enumerate() {
-            let affected = match &row.kind {
-                RowKind::Document { output_ref, .. } => output_ref.as_deref() == Some(blob_ref),
-                RowKind::ToolGroup { tools, .. } => tools.iter().any(|tool| {
-                    tool.output_ref.as_deref() == Some(blob_ref)
-                        || tool.diff_ref.as_deref() == Some(blob_ref)
-                }),
-                _ => false,
-            };
-            if affected {
-                self.list.remeasure_items(ix..ix + 1);
-                // Full Markdown reuses the preview's row/block keys, but not its text.
-                self.render_cache.borrow_mut().invalidate_row(&row.id);
-                if let Some(fold) = self.folds.get_mut(&row.id) {
-                    fold.toggled_at = None;
-                }
-                if let RowKind::ToolGroup { tools, .. } = &row.kind {
-                    for ix in 0..tools.len() {
-                        if let Some(fold) = self
-                            .tool_details
-                            .get_mut(&SharedString::from(format!("{}#d{ix}", row.id)))
-                        {
-                            fold.toggled_at = None;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn finish_blob_fetch(
-        &mut self,
-        blob_ref: SharedString,
-        generation: u64,
-        result: BlobFetch,
-        cx: &mut Context<Self>,
-    ) {
-        if self.blob_generation(&blob_ref) != generation {
-            return;
-        }
-        self.invalidate_blob_rows(&blob_ref);
-        self.blob_details.insert(blob_ref, result);
-        cx.notify();
-    }
-
     /// Fetch a sidecar blob (full tool output or diff) and build its upgraded
     /// [`ToolDetail`] once, off the render path. Re-entry while Loading/Ready
     /// is a no-op; Failed re-arms as a retry (the affordance label says so).
-    fn spawn_blob_fetch_with_presentation(
-        &mut self,
-        blob_ref: SharedString,
-        presentation: BlobPresentation,
-        cx: &mut Context<Self>,
-    ) {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn_blob_fetch(&mut self, blob_ref: SharedString, cx: &mut Context<Self>) {
         // Rank BEFORE the already-fetched guard: clicking a Ready ref is the
         // "show me this one again" toggle (recency bump + repaint, no
         // re-fetch) — with both a diff and an output fetched, the two
@@ -4661,20 +4203,23 @@ impl Transcript {
         self.blob_fetch_order
             .insert(blob_ref.clone(), self.blob_fetch_counter);
         match self.blob_details.get(&blob_ref) {
-            Some(BlobFetch::Ready(_)) | Some(BlobFetch::Document(_)) => {
-                self.invalidate_blob_rows(&blob_ref);
+            Some(BlobFetch::Ready(_)) => {
                 cx.notify();
                 return;
             }
             Some(BlobFetch::Loading(_)) => return,
             Some(BlobFetch::Failed) | None => {}
         }
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
+        let Some(engine) = self
+            .source
+            .native()
+            .and_then(|state| state.read(cx).engine())
+            .cloned()
+        else {
             return;
         };
         let is_diff = blob_ref.ends_with(".diff");
         let ref_key = blob_ref.clone();
-        let generation = self.blob_generation(&blob_ref);
         let task = cx.spawn(async move |this, cx| {
             let reply = crate::attachments::call_with_timeout(
                 &engine,
@@ -4690,12 +4235,15 @@ impl Transcript {
                         .get("text")
                         .and_then(|t| t.as_str())
                         .unwrap_or_default();
-                    build_blob_fetch(text, is_diff, presentation)
+                    blob_detail(text, is_diff)
+                        .map(|d| BlobFetch::Ready(Arc::new(d)))
+                        .unwrap_or(BlobFetch::Failed)
                 }
                 Err(_) => BlobFetch::Failed,
             };
             this.update(cx, |this, cx| {
-                this.finish_blob_fetch(ref_key, generation, fetched, cx);
+                this.blob_details.insert(ref_key, fetched);
+                cx.notify();
             })
             .ok();
         });
@@ -4841,8 +4389,7 @@ impl Transcript {
         if raw >= 1.0 {
             self.user_collapse_scroll = None;
             self.last_scroll_distance = self.distance_from_bottom();
-            self.show_jump_button =
-                jump_visibility(self.show_jump_button, self.last_scroll_distance);
+            self.show_jump_button = self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX;
         }
         cx.notify();
     }
@@ -4854,7 +4401,6 @@ impl Transcript {
         entry.open = Some(!currently_open);
         entry.epoch += 1;
         entry.toggled_at = Some(Instant::now());
-        entry.disclosure_at = entry.toggled_at;
     }
 
     // ---- attachment read-back (user-attachments.tsx + transcript cache) ----
@@ -4887,23 +4433,29 @@ impl Transcript {
     /// device (uploads targeted it) plus this device (zeron's
     /// `uniqueIds([attachmentDeviceId, m.device_id])`).
     fn attachment_device_ids(&self, cx: &Context<Self>) -> Vec<String> {
-        // `selected_chat_row` belongs to the PRIMARY transcript's chat — an
-        // override instance has no chat row, so it claims no devices (its
-        // thumbnails degrade to placeholders instead of guessing).
-        if self.doc_override.is_some() {
-            return Vec::new();
+        if self.source.is_document() {
+            // Document fixtures may seed the real cache; no host reads are made.
+            return self.chat_id.iter().cloned().collect();
         }
-        let state = self.state.read(cx);
-        let mut ids = Vec::new();
-        if let Some(chat) = state.selected_chat_row() {
-            ids.push(chat.device_id.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(state) = self.source.native() {
+            // A native override must not guess the primary chat's device.
+            if self.doc_override.is_some() {
+                return Vec::new();
+            }
+            let state = state.read(cx);
+            let mut ids = Vec::new();
+            if let Some(chat) = state.selected_chat_row() {
+                ids.push(chat.device_id.clone());
+            }
+            if let Some(local) = state.local_device_id.clone()
+                && !ids.contains(&local)
+            {
+                ids.push(local);
+            }
+            return ids;
         }
-        if let Some(local) = state.local_device_id.clone()
-            && !ids.contains(&local)
-        {
-            ids.push(local);
-        }
-        ids
+        Vec::new()
     }
 
     /// Effective load state for one attachment across its candidate devices:
@@ -4920,6 +4472,13 @@ impl Transcript {
             if let AttachmentSnapshot::Loaded(image) = attachment_snapshot(dev, path) {
                 return AttachmentSnapshot::Loaded(image);
             }
+        }
+        // An unavailable host cannot claim a load or schedule a retry. Cached
+        // images above still work, while missing images remain explicitly absent.
+        if self.source.is_document() {
+            return AttachmentSnapshot::Error {
+                retry_in: Duration::MAX,
+            };
         }
         let mut any_loading = false;
         let mut min_retry: Option<Duration> = None;
@@ -4954,11 +4513,14 @@ impl Transcript {
 
     fn spawn_attachment_load(&mut self, device_id: String, path: String, cx: &mut Context<Self>) {
         use crate::attachments::{read_attachment_image, store_error, store_loaded};
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
+        let Some(state) = self.source.native() else {
+            return;
+        };
+        let Some(engine) = state.read(cx).engine().cloned() else {
             store_error(&device_id, &path);
             return;
         };
-        let local = self.state.read(cx).local_device_id.clone();
+        let local = state.read(cx).local_device_id.clone();
         // Relay-forward only for a genuinely remote owner; the local device's
         // files are served directly.
         let target = (local.as_deref() != Some(device_id.as_str())).then(|| device_id.clone());
@@ -5252,19 +4814,22 @@ impl Transcript {
             // that isn't a real transfer position (2026-08-20 report: the
             // staging-only percent blinked out in ~100ms and lied about the
             // slow part).
-            let sending = att.path.starts_with("pending://") || att.path.starts_with("pending/");
+            let sending = !self.source.is_document()
+                && (att.path.starts_with("pending://") || att.path.starts_with("pending/"));
             let upload_id = att
                 .path
                 .strip_prefix("pending://")
                 .and_then(|rest| rest.split_once('/'))
                 .map(|(id, _)| id);
-            let uploading = upload_id
-                .and_then(|id| self.state.read(cx).transfer_percent(id))
-                .or_else(|| {
-                    sending
-                        .then(|| self.state.read(cx).upload_progress_percent())
-                        .flatten()
-                });
+            #[cfg(not(target_arch = "wasm32"))]
+            let uploading = self.source.native().and_then(|state| {
+                let state = state.read(cx);
+                upload_id
+                    .and_then(|id| state.transfer_percent(id))
+                    .or_else(|| sending.then(|| state.upload_progress_percent()).flatten())
+            });
+            #[cfg(target_arch = "wasm32")]
+            let uploading: Option<u8> = None;
             if let Some(appshot) = &att.appshot {
                 let has_image = matches!(&state, AttachmentSnapshot::Loaded(_));
                 let theme = Theme::of(cx).clone();
@@ -5529,8 +5094,11 @@ impl Transcript {
         let Some(chat_id) = self.chat_id.clone() else {
             return;
         };
-        let engine = self.state.read(cx).engine().cloned();
-        self.state.update(cx, |s, cx| {
+        let Some(state) = self.source.native() else {
+            return;
+        };
+        let engine = state.read(cx).engine().cloned();
+        state.update(cx, |s, cx| {
             s.retry_pending_send(&chat_id, chrono::Utc::now());
             cx.notify();
         });
@@ -5561,62 +5129,65 @@ impl Transcript {
             if !self.doc_live {
                 return None;
             }
-            let state = self.state.read(cx);
-            let last = state.sub_transcript(doc_id).last()?;
-            let live =
-                last.status == Some(MessageStatus::Streaming) || last.role == MessageRole::User;
+            let snapshot = self.source.snapshot(Some(doc_id), cx);
+            let last = snapshot.entries.last()?;
+            let live = last.status == Some(MessageStatus::Streaming)
+                || (!self.source.is_document() && last.role == MessageRole::User);
             if !live {
                 return None;
             }
             let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
             (false, false, elapsed, flavour_seed(doc_id))
         } else {
-            let chat_id = self.chat_id.clone()?;
-            // Failed-send state first: past the grace window the trailer IS
-            // the retry affordance, whatever the indicator fell back to.
-            if self.state.read(cx).send_undelivered(&chat_id, now) {
-                let theme = Theme::of(cx).clone();
-                return Some(
-                    div()
-                        .id("undelivered-retry")
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(Theme::SPACE_SM))
-                        .pt(px(Theme::SPACE_LG))
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.danger)
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
-                        .child(SharedString::from("Not delivered — click to retry"))
-                        .into_any_element(),
-                );
-            }
-            let (sending, queued, elapsed) = {
-                let state = self.state.read(cx);
-                if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
-                    return None;
+            {
+                let native = self.source.native()?;
+                let chat_id = self.chat_id.clone()?;
+                // Failed-send state first: past the grace window the trailer IS
+                // the retry affordance, whatever the indicator fell back to.
+                if native.read(cx).send_undelivered(&chat_id, now) {
+                    let theme = Theme::of(cx).clone();
+                    return Some(
+                        div()
+                            .id("undelivered-retry")
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(Theme::SPACE_SM))
+                            .pt(px(Theme::SPACE_LG))
+                            .text_size(crate::typography::ui_rems(12.0))
+                            .text_color(theme.danger)
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.retry_send(cx)))
+                            .child(SharedString::from("Not delivered — click to retry"))
+                            .into_any_element(),
+                    );
                 }
-                // During the send→turn window the session row's `started_at`
-                // still belongs to the PREVIOUS turn — a timer based on the
-                // send counted the round-trip and then restarted when the
-                // turn actually began (user report). Bridge it as "Sending…"
-                // with no timer instead; the word + timer start with the
-                // turn.
-                let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
-                let sending =
-                    sending_bridge(state.pending_send_started(&chat_id, now), turn_started);
-                // Degraded delivery path: the send is a durable local write
-                // waiting on connectivity — say so instead of faking
-                // progress. (The overlay holds while degraded, so this line
-                // owns the surface until the ack or the failed state.)
-                let queued = sending && state.chat_delivery_degraded(&chat_id);
-                let elapsed = turn_started
-                    .map(|t| now.signed_duration_since(t).num_seconds().max(0))
-                    .unwrap_or(0);
-                (sending, queued, elapsed)
-            };
-            (sending, queued, elapsed, flavour_seed(&chat_id))
+                let (sending, queued, elapsed) = {
+                    let state = native.read(cx);
+                    if state.indicator_for(&chat_id, now) != crate::state::Indicator::Working {
+                        return None;
+                    }
+                    // During the send→turn window the session row's `started_at`
+                    // still belongs to the PREVIOUS turn — a timer based on the
+                    // send counted the round-trip and then restarted when the
+                    // turn actually began (user report). Bridge it as "Sending…"
+                    // with no timer instead; the word + timer start with the
+                    // turn.
+                    let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
+                    let sending =
+                        sending_bridge(state.pending_send_started(&chat_id, now), turn_started);
+                    // Degraded delivery path: the send is a durable local write
+                    // waiting on connectivity — say so instead of faking
+                    // progress. (The overlay holds while degraded, so this line
+                    // owns the surface until the ack or the failed state.)
+                    let queued = sending && state.chat_delivery_degraded(&chat_id);
+                    let elapsed = turn_started
+                        .map(|t| now.signed_duration_since(t).num_seconds().max(0))
+                        .unwrap_or(0);
+                    (sending, queued, elapsed)
+                };
+                (sending, queued, elapsed, flavour_seed(&chat_id))
+            }
         };
         let word = if queued {
             "Queued — will send automatically"
@@ -5672,15 +5243,6 @@ impl Transcript {
         };
         self.rendered_rows.insert(row.id.clone());
         let theme = Theme::of(cx).clone();
-        let workspace_root = {
-            let state = self.state.read(cx);
-            self.chat_id
-                .as_deref()
-                .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
-                .or_else(|| state.selected_chat_row())
-                .and_then(|chat| chat.cwd.as_deref())
-                .map(SharedString::from)
-        };
         // The viewport spans the full window (under the titlebar): the first
         // row's gap adds the titlebar's height so a top-scrolled transcript
         // rests below the chrome it fades under. The right pane already pads
@@ -5790,6 +5352,7 @@ impl Transcript {
                 };
                 let code = self.code_uis_for(&row.id, &top.block, *block_ix, cx);
                 let opts = RenderOptions {
+                    workspace_root: None,
                     tasks: None,
                     media: None,
                     row_key: row.id.clone(),
@@ -5797,8 +5360,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.link_ui(),
-                    workspace_root: workspace_root.clone(),
+                    link: self.workspace_link.clone(),
                     code,
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
@@ -5838,6 +5400,7 @@ impl Transcript {
                         .clone()
                 });
                 let opts = RenderOptions {
+                    workspace_root: None,
                     tasks: None,
                     media: None,
                     row_key: row.id.clone(),
@@ -5845,8 +5408,7 @@ impl Transcript {
                     cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
                     now: Instant::now(),
                     copy: Some(self.copy_ui_for(&row.id, cx)),
-                    link: self.link_ui(),
-                    workspace_root: workspace_root.clone(),
+                    link: self.workspace_link.clone(),
                     code,
                 };
                 let highlight = self.code_highlight_for(&row.id, tree, Some(*block_ix), cx);
@@ -5880,10 +5442,8 @@ impl Transcript {
                 }
                 el
             }
-            RowKind::Document { .. } => self.render_document(&row, &theme, window, cx),
-            RowKind::Checklist { items } => self.render_checklist(&row.id, items, &theme, cx),
             RowKind::ToolGroup { tools, auto_open } => {
-                self.render_tool_group(&row.id, tools, *auto_open, &theme, window, cx)
+                self.render_tool_group(&row.id, tools, *auto_open, &theme, cx)
             }
             RowKind::InputChip { header, resolved } => {
                 input_chip(header.clone(), *resolved, &theme)
@@ -6139,7 +5699,7 @@ impl Transcript {
         tool_ix: usize,
         detail: &ToolDetail,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<crate::changes::DiffHighlights>> {
+    ) -> Option<Arc<crate::changes::presentation::DiffHighlights>> {
         let ToolDetail::Diff {
             file,
             old_text,
@@ -6167,60 +5727,10 @@ impl Transcript {
             }
             None => None,
         };
-        Some(Arc::new(crate::changes::DiffHighlights { old, new }))
-    }
-
-    fn render_markdown_tool_detail(
-        &mut self,
-        row_id: &SharedString,
-        tree: &Arc<BlockTree>,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let highlights = self.code_highlight_for(row_id, tree, None, cx);
-        let mut body = div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(render::MD_BLOCK_GAP))
-            .py(px(10.0));
-        for (ix, top) in tree.blocks.iter().enumerate() {
-            let opts = RenderOptions {
-                workspace_root: {
-                    let state = self.state.read(cx);
-                    self.chat_id
-                        .as_deref()
-                        .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
-                        .or_else(|| state.selected_chat_row())
-                        .and_then(|chat| chat.cwd.as_deref())
-                        .map(SharedString::from)
-                },
-                tasks: None,
-                media: None,
-                row_key: row_id.clone(),
-                veil: None,
-                cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
-                now: Instant::now(),
-                copy: Some(self.copy_ui_for(row_id, cx)),
-                link: self.workspace_link.clone(),
-                code: self.code_uis_for(row_id, &top.block, ix, cx),
-            };
-            body = body.child(render::render_block(
-                &top.block,
-                ix,
-                ix,
-                &opts,
-                theme,
-                window,
-                highlights
-                    .get(&ix)
-                    .and_then(|highlight| highlight.as_deref())
-                    .map(|highlight| highlight.lines.as_slice()),
-            ));
-        }
-        body.into_any_element()
+        Some(Arc::new(crate::changes::presentation::DiffHighlights {
+            old,
+            new,
+        }))
     }
 
     fn render_tool_group(
@@ -6229,39 +5739,13 @@ impl Transcript {
         tools: &Arc<Vec<ToolItem>>,
         auto_open: bool,
         theme: &Theme,
-
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
+        let fold = self.folds.get(row_id).copied().unwrap_or_default();
         // Agent/spawn chips never fold: they are their own row, always open,
         // no "Called N tools" header — a running subagent stays visible.
         let collapses = tool_group_collapses(tools);
-        let arrival_pending = !cx.reduce_motion()
-            && self.tool_group_reveals.get(row_id).is_some_and(|reveal| {
-                reveal.starts.iter().flatten().any(|start| {
-                    Instant::now()
-                        .checked_duration_since(*start)
-                        .unwrap_or_default()
-                        < TOOL_CONNECTOR_REVEAL.total()
-                })
-            });
-        let effective_auto_open = auto_open || arrival_pending;
-        let open = !collapses || fold.open.unwrap_or(effective_auto_open);
-        if collapses {
-            let reveal = self.tool_group_reveals.entry(row_id.clone()).or_default();
-            if reveal
-                .rendered_open
-                .is_some_and(|previous| previous != open)
-            {
-                fold.from = reveal.rendered_height;
-                fold.toggled_at = Some(Instant::now());
-                fold.disclosure_at = fold.toggled_at;
-                self.folds.insert(row_id.clone(), fold);
-            }
-            reveal.rendered_open = Some(open);
-        }
-        let active = collapses && auto_open;
+        let open = !collapses || fold.open.unwrap_or(auto_open);
         // Chips render their EFFECTIVE detail: the precomputed doc-resident
         // one, upgraded in place by a fetched sidecar blob (chat2-sync A3).
         // Resolved per paint (a HashMap probe per chip) so fetched content
@@ -6304,6 +5788,9 @@ impl Transcript {
         let affordances: Vec<Option<ChipAffordance>> = tools
             .iter()
             .map(|tool| {
+                if self.source.is_document() {
+                    return None;
+                }
                 // The currently-displayed ref (same recency rule as
                 // `details` above): its affordance is spent; any OTHER
                 // Ready ref stays offered as a no-fetch toggle.
@@ -6320,23 +5807,13 @@ impl Transcript {
                     best.map(|(_, r)| r)
                 };
                 let candidates = [
-                    (
-                        tool.diff_ref.as_ref(),
-                        "diff",
-                        None,
-                        BlobPresentation::Output,
-                    ),
-                    (
-                        tool.output_ref.as_ref(),
-                        "output",
-                        tool.output_bytes,
-                        BlobPresentation::for_tool_output(&tool.call),
-                    ),
+                    (tool.diff_ref.as_ref(), "diff", None),
+                    (tool.output_ref.as_ref(), "output", tool.output_bytes),
                 ];
-                for (blob_ref, what, bytes, presentation) in candidates {
+                for (blob_ref, what, bytes) in candidates {
                     let Some(blob_ref) = blob_ref else { continue };
                     let label = match self.blob_details.get(blob_ref) {
-                        Some(BlobFetch::Ready(_)) | Some(BlobFetch::Document(_)) => {
+                        Some(BlobFetch::Ready(_)) => {
                             if shown == Some(blob_ref) {
                                 continue;
                             }
@@ -6354,7 +5831,6 @@ impl Transcript {
                     return Some(ChipAffordance {
                         blob_ref: blob_ref.clone(),
                         label: SharedString::from(label),
-                        presentation,
                     });
                 }
                 None
@@ -6389,139 +5865,51 @@ impl Transcript {
                 (detail.is_some() || invocation.is_some()) && fold.open.unwrap_or(default_open)
             })
             .collect();
-
-        let has_measured_markdown = details
-            .iter()
-            .any(|detail| matches!(detail.as_deref(), Some(ToolDetail::Markdown { .. })));
-        let detail_highlights: Vec<Option<Arc<crate::changes::DiffHighlights>>> = details
-            .iter()
-            .enumerate()
-            .map(|(ix, detail)| {
-                detail
-                    .as_deref()
-                    .filter(|_| detail_opens[ix])
-                    .and_then(|detail| self.tool_diff_highlight_for(row_id, ix, detail, cx))
-            })
-            .collect();
-        let base_row_height = if collapses {
-            TOOL_TREE_ROW_HEIGHT
-        } else {
-            CHIP_HEIGHT
-        };
-        let mut motion_active = false;
-        let row_heights: Vec<f32> = details
-            .iter()
-            .zip(&invocations)
-            .zip(&affordances)
-            .zip(&detail_opens)
-            .zip(&detail_folds)
-            .map(|((((detail, invocation), affordance), open), fold)| {
-                let target = if *open {
-                    base_row_height
-                        + invocation.as_deref().map_or(0.0, detail_height)
+        let detail_highlights: Vec<Option<Arc<crate::changes::presentation::DiffHighlights>>> =
+            details
+                .iter()
+                .enumerate()
+                .map(|(ix, detail)| {
+                    detail
+                        .as_deref()
+                        .filter(|_| detail_opens[ix])
+                        .and_then(|detail| self.tool_diff_highlight_for(row_id, ix, detail, cx))
+                })
+                .collect();
+        let open_height = chips_height(tools.len())
+            + details
+                .iter()
+                .zip(&invocations)
+                .zip(&affordances)
+                .zip(&detail_opens)
+                .filter(|(_, open)| **open)
+                .map(|(((detail, invocation), affordance), _)| {
+                    invocation.as_deref().map_or(0.0, detail_height)
                         + detail.as_deref().map_or(0.0, detail_height)
                         + if affordance.is_some() {
                             BLOB_AFFORDANCE_HEIGHT
                         } else {
                             0.0
                         }
-                } else {
-                    base_row_height
-                };
-                if !cx.reduce_motion() {
-                    if let Some(at) = fold.toggled_at {
-                        let t = TOOL_FOLD
-                            .curve
-                            .eval(at.elapsed().as_secs_f32() / TOOL_FOLD.total().as_secs_f32());
-                        if t < 1.0 {
-                            motion_active = true;
-                        }
-                        return motion::lerp(
-                            fold.from + base_row_height - CHIP_CARD_HEIGHT,
-                            target,
-                            t,
-                        );
-                    }
-                }
-                target
-            })
-            .collect();
-        let reduce_motion = cx.reduce_motion();
-        let now = Instant::now();
-        let reveal_progress: Vec<f32> = (0..tools.len())
-            .map(|ix| {
-                let start = self
-                    .tool_group_reveals
-                    .get(row_id)
-                    .and_then(|reveal| reveal.starts.get(ix))
-                    .copied()
-                    .flatten();
-                tool_row_reveal_progress(start, now, reduce_motion)
-            })
-            .collect();
-        let connector_progress: Vec<f32> = (0..tools.len())
-            .map(|ix| {
-                let start = self
-                    .tool_group_reveals
-                    .get(row_id)
-                    .and_then(|reveal| reveal.starts.get(ix))
-                    .copied()
-                    .flatten();
-                tool_connector_reveal_progress(start, now, reduce_motion)
-            })
-            .collect();
-        let header_reveal = tool_row_reveal_progress(
-            self.tool_group_reveals
-                .get(row_id)
-                .and_then(|reveal| reveal.header_started_at),
-            now,
-            reduce_motion,
-        );
-        if header_reveal < 1.0
-            || reveal_progress.iter().any(|progress| *progress < 1.0)
-            || connector_progress.iter().any(|progress| *progress < 1.0)
-        {
-            motion_active = true;
-        }
-        let revealed_height = CHIPS_TOP_PAD
-            + row_heights
-                .iter()
-                .zip(&reveal_progress)
-                .map(|(height, progress)| height * progress)
+                })
                 .sum::<f32>();
-        let viewport_height = revealed_height;
-        let target = if open { viewport_height } else { 0.0 };
-        let summary: SharedString = tool_group_summary(tools).into();
-        let shimmer_phase = if active && !reduce_motion {
-            motion::pulse_lease(cx.entity_id(), cx);
-            self.tool_group_reveals
-                .get(row_id)
-                .and_then(|reveal| reveal.shimmer_started_at)
-                .map(|start| tool_title_shimmer_phase(start, now))
-        } else {
-            None
-        };
-        let disclosure_progress = if reduce_motion {
-            if open { 1.0 } else { 0.0 }
-        } else {
-            tool_disclosure_progress(open, fold, now)
-        };
+        let target = if open { open_height } else { 0.0 };
+        let summary = tool_group_summary(tools);
 
         let toggle_id = row_id.clone();
-        // A quiet summary sits above the activity rail; its chevron occupies
-        // the same gutter as the rounded task-tree elbows below it.
+        // A quiet summary sits above the activity rail; its chevron has the
+        // same footprint as the tool icons below it.
         let header = div()
             .id(SharedString::from(format!("{row_id}-hdr")))
-            .relative()
             .flex()
             .flex_row()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(ACTIVITY_TEXT_GAP))
             .pr(px(4.0))
-            .h(px(TOOL_GROUP_HEADER_HEIGHT))
+            .h(px(26.0))
             .cursor_pointer()
-            .text_size(px(TOOL_LABEL_SIZE))
-            .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+            .text_size(px(TOOL_TEXT_SIZE))
+            .line_height(px(18.0))
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
@@ -6530,37 +5918,35 @@ impl Transcript {
             .text_color(theme.text_muted)
             .hover(|s| s.text_color(theme.text))
             .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                this.toggle_fold(toggle_id.clone(), viewport_height, effective_auto_open);
+                this.toggle_fold(toggle_id.clone(), open_height, auto_open);
                 cx.notify();
             }))
             .child(
                 div()
-                    // Keep the title adjacent to its disclosure affordance.
-                    .w(px(22.0))
+                    .w(px(ACTIVITY_GUTTER_WIDTH))
                     .h(px(18.0))
                     .flex_none()
-                    .relative()
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .child(
-                        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-                            .absolute()
-                            .left(px(ACTIVITY_TRUNK_X - 7.0))
-                            .top(px(2.0))
-                            .size(px(14.0))
-                            .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                                -std::f32::consts::FRAC_PI_2 * (1.0 - disclosure_progress),
-                            )))
-                            .text_color(theme.text_muted),
+                        crate::icons::icon(if open {
+                            crate::icons::ALT_ARROW_DOWN
+                        } else {
+                            crate::icons::ALT_ARROW_RIGHT
+                        })
+                        .size(px(14.0))
+                        .text_color(theme.text_muted),
                     ),
             )
             .child(
                 div()
                     .min_w_0()
-                    .h(px(TOOL_LABEL_LINE_HEIGHT))
+                    .h(px(18.0))
                     .flex()
                     .items_center()
                     .truncate()
-                    .child(tool_group_title(summary, shimmer_phase, theme)),
+                    .child(SharedString::from(summary)),
             );
 
         let chips = div()
@@ -6569,16 +5955,14 @@ impl Transcript {
             .flex_col()
             .gap(px(CHIP_GAP))
             .children(tools.iter().enumerate().map(|(ix, tool)| {
-                let reveal = reveal_progress[ix];
-                let connector_reveal = connector_progress[ix];
-                let content_reveal = tool_connector_parts(connector_reveal, ix > 0).1;
-                let continuation_reveal =
-                    tool_connector_continuation(connector_progress.get(ix + 1).copied());
-                let row_height = row_heights[ix];
                 // Spawn chips are LINKS, not accordions: the click opens the
                 // subagent's transcript as a right-pane tab (the shell hosts
                 // the surface — the chip only announces which doc it indexes).
-                if let Some(doc_id) = tool.subagent_ref.clone().filter(|_| is_spawn_link(tool)) {
+                if let Some(doc_id) = tool
+                    .subagent_ref
+                    .clone()
+                    .filter(|_| is_spawn_link(tool) && !self.source.is_document())
+                {
                     let chat_id = self.chat_id.clone().unwrap_or_default();
                     let title = subagent_tab_title(&tool.call);
                     let frozen = matches!(
@@ -6605,40 +5989,41 @@ impl Transcript {
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
                 if detail.is_none() && invocation.is_none() {
-                    return reveal_tool_row(
-                        tool_chip(
-                            tool,
-                            collapses,
-                            ix > 0,
-                            ix + 1 < tools.len(),
-                            content_reveal,
-                            connector_reveal,
-                            continuation_reveal,
-                            theme,
-                            cx.entity_id(),
-                            cx,
-                        ),
-                        row_height,
-                        reveal,
+                    return tool_chip(
+                        tool,
+                        collapses,
+                        ix + 1 < tools.len(),
+                        theme,
+                        cx.entity_id(),
+                        cx,
                     );
                 }
                 let affordance = affordances[ix].clone();
+                let affordance_h = if affordance.is_some() {
+                    BLOB_AFFORDANCE_HEIGHT
+                } else {
+                    0.0
+                };
                 let open = detail_opens[ix];
                 let dfold = detail_folds[ix];
                 let key = SharedString::from(format!("{row_id}#d{ix}"));
                 // Ordinary tools expand into muted text along the same column.
                 // Subagent fallbacks retain their card; explicit heights keep
                 // the row and group fold animations in sync.
-                let measured_markdown =
-                    matches!(detail.as_deref(), Some(ToolDetail::Markdown { .. }));
-                let animating = !measured_markdown
-                    && dfold.epoch > 0
+                let closed_h = CHIP_CARD_HEIGHT;
+                let open_h = CHIP_CARD_HEIGHT
+                    + invocation.as_deref().map_or(0.0, detail_height)
+                    + detail.as_deref().map_or(0.0, detail_height)
+                    + affordance_h;
+                let card_target = if open { open_h } else { closed_h };
+                let animating = dfold.epoch > 0
                     && dfold
                         .toggled_at
                         .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
                 let toggle_key = key.clone();
+                let group_key = row_id.clone();
                 let mut card = div()
-                    .my(px((base_row_height - CHIP_CARD_HEIGHT) / 2.0))
+                    .my(px((CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0))
                     .when(collapses, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
                     .min_w_0()
                     .flex_1()
@@ -6664,14 +6049,30 @@ impl Transcript {
                             .items_center()
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
                                 let entry =
                                     this.tool_details.entry(toggle_key.clone()).or_default();
                                 let currently_open = entry.open.unwrap_or(open);
-                                entry.from = row_height - base_row_height + CHIP_CARD_HEIGHT;
+                                entry.from = if currently_open { open_h } else { closed_h };
                                 entry.open = Some(!currently_open);
                                 entry.epoch += 1;
                                 entry.toggled_at = Some(Instant::now());
+                                // Arm the GROUP body's height tween too (open
+                                // state untouched): the body's height is
+                                // analytic over the final detail state, so
+                                // without a tween the row snaps to the target
+                                // height while the card is still mid-tween —
+                                // content below teleported on expand and the
+                                // shrinking card clipped on collapse (user
+                                // report). `open_height` was computed with
+                                // the detail still in its pre-click state,
+                                // which is exactly the tween's start; both
+                                // tweens share the click instant and the
+                                // RESIZE curve, so the row tracks the card's
+                                // bottom edge frame-for-frame.
+                                let group = this.folds.entry(group_key.clone()).or_default();
+                                group.from = open_height;
+                                group.epoch += 1;
+                                group.toggled_at = Some(Instant::now());
                                 cx.notify();
                             }))
                             .child(chip_header(tool, open, theme, cx.entity_id(), cx)),
@@ -6704,19 +6105,9 @@ impl Transcript {
                                     .flex_none()
                                     .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
                             )
-                            .child(match detail {
-                                ToolDetail::Markdown { tree, .. } => {
-                                    self.render_markdown_tool_detail(&key, tree, theme, window, cx)
-                                }
-                                _ => detail_body(detail, detail_highlights[ix].clone(), theme),
-                            });
+                            .child(detail_body(detail, detail_highlights[ix].clone(), theme));
                     }
-                    if let Some(ChipAffordance {
-                        blob_ref,
-                        label,
-                        presentation,
-                    }) = affordance
-                    {
+                    if let Some(ChipAffordance { blob_ref, label }) = affordance {
                         let loading = matches!(
                             self.blob_details.get(&blob_ref),
                             Some(BlobFetch::Loading(_))
@@ -6735,11 +6126,8 @@ impl Transcript {
                                 .cursor_pointer()
                                 .hover(|s| s.text_color(theme.text_muted))
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.spawn_blob_fetch_with_presentation(
-                                        blob_ref.clone(),
-                                        presentation,
-                                        cx,
-                                    );
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    this.spawn_blob_fetch(blob_ref.clone(), cx);
                                     cx.notify();
                                 }));
                         }
@@ -6747,114 +6135,72 @@ impl Transcript {
                     }
                     card = card.child(panel);
                 }
-                let card = if measured_markdown && open {
-                    card
+                let card: AnyElement = if animating {
+                    let from = dfold.from;
+                    card.with_animation(
+                        SharedString::from(format!("{key}-tween{}", dfold.epoch)),
+                        RESIZE.animation(),
+                        move |el, t| el.h(px(motion::lerp(from, card_target, t))),
+                    )
+                    .into_any_element()
                 } else {
-                    card.h(px(row_height - base_row_height + CHIP_CARD_HEIGHT))
+                    card.h(px(card_target)).into_any_element()
                 };
                 let card = div().min_w_0().flex_1().child(card);
-                let row = div()
+                div()
                     .w_full()
                     .flex_none()
                     .flex()
                     .flex_row()
                     // Stretch the line alongside the expanded text.
                     .when(collapses, |row| {
-                        row.child(activity_rail(
-                            tool,
-                            ix > 0,
-                            ix + 1 < tools.len(),
-                            connector_reveal,
-                            continuation_reveal,
-                            base_row_height,
-                            theme,
-                        ))
+                        row.child(activity_rail(tool, ix + 1 < tools.len(), theme))
                     })
-                    .child(card.when(collapses && content_reveal < 1.0, |card| {
-                        card.relative()
-                            .top(px(4.0 * (1.0 - content_reveal)))
-                            .opacity(content_reveal)
-                    }))
-                    .into_any_element();
-                // Public Markdown has measured, not analytic, height. Do not
-                // clip it to the task-tree estimate during an arrival reveal.
-                if measured_markdown && open {
-                    row
-                } else {
-                    reveal_tool_row(row, row_height, reveal)
-                }
+                    .child(card)
+                    .into_any_element()
             }));
 
-        let chips = chips.into_any_element();
-
-        // Evaluate the group on the same clock as its disclosure. This also
-        // gives completion a gentle close after the last arrival finishes,
-        // without restarting an element animation when the list remounts it.
-        let body_height = if !reduce_motion {
-            fold.toggled_at
-                .map(|at| {
-                    let t = TOOL_FOLD.curve.eval(
-                        now.saturating_duration_since(at).as_secs_f32()
-                            / TOOL_FOLD.total().as_secs_f32(),
-                    );
-                    if t < 1.0 {
-                        motion_active = true;
-                    }
-                    motion::lerp(fold.from, target, t)
-                })
-                .unwrap_or(target)
-        } else {
-            target
-        };
-        if let Some(reveal) = self.tool_group_reveals.get_mut(row_id) {
-            reveal.rendered_height = body_height;
-        }
+        // Fold body: 200ms committed-height tween on a USER toggle only — and
+        // only within a short window of the click. Auto-open (streaming) and
+        // content growth never tween, and a SETTLED fold renders at its static
+        // height: leaving the tween armed replayed it on every remount, which
+        // in a virtualized list means every scroll-back-into-view (only `open`
+        // toggles animate — composes with the stick spring). Agent groups skip
+        // the fold entirely (always open, no header).
+        let animating = collapses
+            && fold.epoch > 0
+            && fold
+                .toggled_at
+                .is_some_and(|at| at.elapsed() < FOLD_TWEEN_WINDOW);
         let body: AnyElement = if !collapses {
             chips.into_any_element()
-        } else if has_measured_markdown && open {
-            div().child(chips).into_any_element()
-        } else if has_measured_markdown {
+        } else if animating {
+            let from = fold.from;
             div()
                 .overflow_hidden()
-                .h(px(0.0))
                 .child(chips)
+                .with_animation(
+                    SharedString::from(format!("{row_id}-fold{}", fold.epoch)),
+                    RESIZE.animation(),
+                    move |el, t| el.h(px(motion::lerp(from, target, t))),
+                )
                 .into_any_element()
         } else {
             div()
                 .overflow_hidden()
-                .h(px(body_height))
+                .h(px(target))
                 .child(chips)
                 .into_any_element()
         };
 
-        let view = cx.entity_id();
         div()
-            .relative()
             .flex()
             .flex_col()
             // Tool summaries and cards are code-adjacent chrome. Detail bodies
             // retain their explicit mono/diff typography below this boundary.
             .font_family(theme.font_sans_fixed.clone())
-            .when(collapses, |el| {
-                el.child(reveal_tool_row(
-                    header.into_any_element(),
-                    TOOL_GROUP_HEADER_HEIGHT,
-                    header_reveal,
-                ))
-            })
+            .when(collapses, |el| el.child(header))
             .child(body)
-            .when(motion_active, |group| {
-                group.child(
-                    canvas(
-                        |_, _, _| (),
-                        move |_, _, window, _| {
-                            window.on_next_frame(move |_, cx| cx.notify(view));
-                        },
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-            })
             .into_any_element()
     }
 }
@@ -7103,23 +6449,14 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Search { .. } => crate::icons::MAGNIFER,
         ToolCall::Glob { .. } => crate::icons::FOLDER_WITH_FILES,
         ToolCall::WebFetch { .. } | ToolCall::WebSearch { .. } => crate::icons::GLOBAL,
-        ToolCall::Document { .. } => crate::icons::DOCUMENT,
-        ToolCall::Answer { .. } | ToolCall::Report { .. } => crate::icons::DOCUMENT,
         ToolCall::Todo { .. } => crate::icons::CHECKLIST,
+        ToolCall::Document { .. } | ToolCall::Answer { .. } | ToolCall::Report { .. } => {
+            crate::icons::DOCUMENT
+        }
         call if is_agent_call(call) => crate::icons::BOT,
         ToolCall::Unknown { name, .. } if name == "Wait for agents" => crate::icons::BOT,
         ToolCall::Mcp { .. } | ToolCall::Unknown { .. } => crate::icons::WIDGET,
     }
-}
-
-/// Compact file-action chips show only the final path component. The full
-/// path remains on the tool call (and in expanded diagnostics) for identity
-/// and disambiguation. Accept both separator styles because remote tools can
-/// report Windows paths even when the UI is running elsewhere.
-fn file_badge_name(path: &str) -> &str {
-    path.rsplit(['/', '\\'])
-        .find(|component| !component.is_empty())
-        .unwrap_or(path)
 }
 
 /// The body of an expanded chip card, under the header's separator. Diffs
@@ -7130,7 +6467,7 @@ fn file_badge_name(path: &str) -> &str {
 /// lines, indentation intact, counted-tail truncation.
 fn detail_body(
     detail: &ToolDetail,
-    diff_highlights: Option<Arc<crate::changes::DiffHighlights>>,
+    diff_highlights: Option<Arc<crate::changes::presentation::DiffHighlights>>,
     theme: &Theme,
 ) -> AnyElement {
     let body = div().w_full().min_w_0().flex().flex_col().overflow_hidden();
@@ -7156,14 +6493,6 @@ fn detail_body(
                     .flex()
                     .items_center()
                     .gap(px(8.0))
-                    .child(
-                        crate::file_icons::icon(
-                            crate::file_icons::FileIconIdentity::file(&stat.path),
-                            theme.appearance,
-                        )
-                        .size(px(14.0))
-                        .flex_none(),
-                    )
                     .child(
                         div()
                             .min_w_0()
@@ -7207,8 +6536,6 @@ fn detail_body(
                 block.child(more_lines_row(*truncated_by, theme))
             })
             .into_any_element(),
-        ToolDetail::Markdown { .. } => gpui::Empty.into_any_element(),
-
         ToolDetail::Thought {
             lines,
             truncated_by,
@@ -7360,8 +6687,8 @@ fn chip_header_row(
         .items_center()
         .gap(px(8.0))
         .px(px(if activity { 0.0 } else { 8.0 }))
-        .text_size(px(TOOL_LABEL_SIZE))
-        .line_height(px(TOOL_LABEL_LINE_HEIGHT))
+        .text_size(px(TOOL_TEXT_SIZE))
+        .line_height(px(18.0))
         .when(!activity, |row| {
             row.child(
                 // Subagent icon tile (`size-[18px] rounded-[5px] bg-white/[0.08]`,
@@ -7388,7 +6715,7 @@ fn chip_header_row(
         .child(
             div()
                 .flex_none()
-                .h(px(TOOL_LABEL_LINE_HEIGHT))
+                .h(px(18.0))
                 .flex()
                 .items_center()
                 .when(!activity, |label| {
@@ -7411,11 +6738,7 @@ fn chip_header_row(
             div()
                 .when(!activity, |detail| detail.flex_1())
                 .min_w_0()
-                .h(px(if file_path.is_some() {
-                    22.0
-                } else {
-                    TOOL_LABEL_LINE_HEIGHT
-                }))
+                .h(px(if file_path.is_some() { 24.0 } else { 18.0 }))
                 .flex()
                 .when(activity && detail.is_empty(), |detail| detail.hidden())
                 .items_center()
@@ -7433,40 +6756,29 @@ fn chip_header_row(
                         .h(px(22.0))
                         .flex()
                         .items_center()
-                        .overflow_hidden()
-                        .gap(px(6.0))
+                        .gap(px(5.0))
+                        .px(px(6.0))
                         .rounded(px(5.0))
-                        .bg(theme.ink(0.06))
-                        .pl(px(1.0))
-                        .pr(px(6.0))
+                        .bg(crate::theme::ink(0.06))
                         .text_color(if failed {
                             theme.danger
                         } else {
                             theme.text.opacity(0.85)
                         })
                         .child(
-                            div()
-                                .size(px(20.0))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(4.0))
-                                .bg(crate::file_icons::well_bg(theme))
-                                .child(
-                                    crate::file_icons::icon(
-                                        crate::file_icons::FileIconIdentity::file(path),
-                                        theme.appearance,
-                                    )
-                                    .size(px(14.0)),
-                                ),
+                            crate::file_icons::icon(
+                                crate::file_icons::FileIconIdentity::file(path),
+                                theme.appearance,
+                            )
+                                .size(px(14.0))
+                                .text_color(tint)
+                                .when(activity && !failed, |icon| {
+                                    icon.group_hover("tool-header", |style| {
+                                        style.text_color(theme.text)
+                                    })
+                                }),
                         )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .child(SharedString::from(file_badge_name(path).to_owned())),
-                        )
+                        .child(div().min_w_0().truncate().child(SharedString::from(detail)))
                         .map(|badge| {
                             if hover_text {
                                 badge
@@ -7649,88 +6961,39 @@ fn subagent_tab_title(call: &ToolCall) -> SharedString {
     "Subagent".into()
 }
 
-/// Clip one newly appended task row to its committed height. Fade and lift are
-/// applied to the row content itself, leaving the connector at full contrast
-/// while it draws; fading the whole row made the path animation imperceptible.
-fn reveal_tool_row(row: AnyElement, height: f32, progress: f32) -> AnyElement {
-    if progress >= 1.0 {
-        return row;
-    }
-    div()
-        .w_full()
-        .h(px(height * progress))
-        .flex_none()
-        .overflow_hidden()
-        .child(row)
-        .into_any_element()
-}
-
-/// BoardUI-style task tree with Zeron's tool glyph restored at each branch tip.
-/// The previous row draws the first leg of a new arrival to its lower boundary;
-/// this row then continues down, rounds the elbow, and finally reveals the icon.
-/// One paint owns every segment in a row, avoiding alpha-darkened joints.
-fn activity_rail(
-    tool: &ToolItem,
-    has_predecessor: bool,
-    continues: bool,
-    reveal: f32,
-    continuation_reveal: f32,
-    row_height: f32,
-    theme: &Theme,
-) -> gpui::Div {
-    let color = theme.hairline(0.12);
+/// The icon interrupts the rail, leaving a small breathing gap on each side.
+/// Absolute line segments stretch with the row, including expanded output.
+/// The final row ends at its icon instead of leaving a dangling line.
+fn activity_rail(tool: &ToolItem, continues: bool, theme: &Theme) -> gpui::Div {
     let tint = if tool.is_error {
         theme.danger
     } else {
         theme.text_muted
     };
-    let (incoming_reveal, branch_reveal) = tool_connector_parts(reveal, has_predecessor);
     div()
         .relative()
         .w(px(ACTIVITY_GUTTER_WIDTH))
         .flex_none()
         .child(
-            canvas(
-                move |_, _, _| (),
-                move |bounds, _, window, _| {
-                    let x = bounds.origin.x + px(ACTIVITY_TRUNK_X);
-                    let branch_y = bounds.origin.y + px(row_height / 2.0);
-                    let bend_y = branch_y - px(ACTIVITY_BEND_RADIUS);
-                    // Union the ribbons before painting. Stroke tessellation
-                    // blends intersections twice, even in a single path.
-                    let mut tree = PathBuilder::fill().with_style(gpui::PathStyle::Fill(
-                        gpui::FillOptions::default().with_fill_rule(gpui::FillRule::NonZero),
-                    ));
-                    if incoming_reveal > 0.0 {
-                        let mut bottom = point(
-                            x,
-                            bounds.origin.y
-                                + px((row_height / 2.0 - ACTIVITY_BEND_RADIUS) * incoming_reveal),
-                        );
-                        if incoming_reveal >= 1.0 && continues && continuation_reveal > 0.0 {
-                            let continuation_height = (f32::from(bounds.size.height)
-                                - (row_height / 2.0 - ACTIVITY_BEND_RADIUS))
-                                .max(0.0);
-                            bottom =
-                                point(x, bend_y + px(continuation_height * continuation_reveal));
-                        }
-                        activity_ribbon(&mut tree, &[point(x, bounds.origin.y), bottom]);
-                    }
-                    if branch_reveal > 0.0 {
-                        let points: Vec<_> = activity_branch_points(branch_reveal)
-                            .into_iter()
-                            .map(|p| point(x + px(p.x), bend_y + px(p.y)))
-                            .collect();
-                        activity_ribbon(&mut tree, &points);
-                    }
-                    if let Ok(path) = tree.build() {
-                        window.paint_path(path, color);
-                    }
-                },
-            )
-            .absolute()
-            .inset_0(),
+            div()
+                .absolute()
+                .left(px(12.5))
+                .top_0()
+                .w(px(1.0))
+                .h(px(7.0))
+                .bg(crate::theme::hairline(0.12)),
         )
+        .when(continues, |rail| {
+            rail.child(
+                div()
+                    .absolute()
+                    .left(px(12.5))
+                    .top(px(31.0))
+                    .bottom_0()
+                    .w(px(1.0))
+                    .bg(crate::theme::hairline(0.12)),
+            )
+        })
         .child(
             crate::icons::icon(if tool.is_thought {
                 crate::icons::CHAT_ROUND_LINE
@@ -7738,75 +7001,33 @@ fn activity_rail(
                 tool_icon_path(&tool.call)
             })
             .absolute()
-            .left(px(ACTIVITY_ICON_LEFT))
-            .top(px(row_height / 2.0 - ACTIVITY_ICON_SIZE / 2.0))
-            .size(px(ACTIVITY_ICON_SIZE))
-            .opacity(branch_reveal)
+            .left(px(6.0))
+            .top(px(12.0))
+            .size(px(14.0))
             .text_color(tint),
         )
-}
-
-/// A clockwise ribbon contour. Nonzero fill unions intersecting contours,
-/// preserving one alpha contribution at the fork on transparent surfaces.
-fn activity_ribbon(path: &mut PathBuilder, points: &[Point<Pixels>]) {
-    let mut left = Vec::with_capacity(points.len());
-    let mut right = Vec::with_capacity(points.len());
-    for (ix, p) in points.iter().enumerate() {
-        let a = points[ix.saturating_sub(1)];
-        let b = points[(ix + 1).min(points.len() - 1)];
-        let dx = f32::from(b.x - a.x);
-        let dy = f32::from(b.y - a.y);
-        let length = dx.hypot(dy).max(0.0001);
-        let normal = point(px(-dy / length * 0.5), px(dx / length * 0.5));
-        left.push(*p + normal);
-        right.push(*p - normal);
-    }
-    path.move_to(left[0]);
-    for p in left.iter().skip(1).chain(right.iter().rev()) {
-        path.line_to(*p);
-    }
-    path.close();
 }
 
 /// A plain activity row, or a card for a subagent without a linked document.
 fn tool_chip(
     tool: &ToolItem,
     rail: bool,
-    has_predecessor: bool,
     continues: bool,
-    content_reveal: f32,
-    connector_reveal: f32,
-    continuation_reveal: f32,
     theme: &Theme,
     view: gpui::EntityId,
     cx: &mut gpui::App,
 ) -> AnyElement {
-    let row_height = if rail {
-        TOOL_TREE_ROW_HEIGHT
-    } else {
-        CHIP_HEIGHT
-    };
     div()
-        .h(px(row_height))
+        .h(px(CHIP_HEIGHT))
         .w_full()
         .flex_none()
         .flex()
         .flex_row()
-        .when(rail, |row| {
-            row.child(activity_rail(
-                tool,
-                has_predecessor,
-                continues,
-                connector_reveal,
-                continuation_reveal,
-                row_height,
-                theme,
-            ))
-        })
+        .when(rail, |row| row.child(activity_rail(tool, continues, theme)))
         .child(
             div()
                 .when(rail, |el| el.ml(px(ACTIVITY_TEXT_GAP)))
-                .my(px((row_height - CHIP_CARD_HEIGHT) / 2.0))
+                .my(px((CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0))
                 .h(px(CHIP_CARD_HEIGHT))
                 .min_w_0()
                 .flex_1()
@@ -7818,11 +7039,6 @@ fn tool_chip(
                         .border_1()
                         .border_color(crate::theme::hairline(0.07))
                         .bg(crate::theme::ink(0.03))
-                })
-                .when(rail && content_reveal < 1.0, |card| {
-                    card.relative()
-                        .top(px(4.0 * (1.0 - content_reveal)))
-                        .opacity(content_reveal)
                 })
                 .child(chip_header_row(tool, None, theme, view, cx)),
         )
@@ -7904,8 +7120,6 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         if let MessagePart::Tool {
             is_error,
             resolved,
-            output,
-            diff,
             subagent_ref,
             subagent_status,
             subagent_tail,
@@ -7913,20 +7127,6 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
         } = part
         {
             acc.push(*is_error as u8 | (*resolved as u8) << 1);
-            // Same-sized public output/legacy inline-diff replacements still
-            // change rendered details. Borrow the bytes; do not rebuild details
-            // or copy full legacy payloads into this fingerprint buffer.
-            if let Some(output) = output {
-                acc.extend_from_slice(&fnv1a(output.as_bytes()).to_le_bytes());
-            }
-            if let Some(diff) = diff {
-                acc.extend_from_slice(&fnv1a(diff.path.as_bytes()).to_le_bytes());
-                acc.push(diff.old_text.is_some() as u8);
-                acc.extend_from_slice(
-                    &fnv1a(diff.old_text.as_deref().unwrap_or("").as_bytes()).to_le_bytes(),
-                );
-                acc.extend_from_slice(&fnv1a(diff.new_text.as_bytes()).to_le_bytes());
-            }
             // Subagent lifecycle mutates a COMPLETED entry in place (eager-
             // done: the spawn resolves while the subagent runs on) and
             // `byte_len` above doesn't cover these fields — hash them or the
@@ -8005,10 +7205,7 @@ impl Render for Transcript {
         // frame while an anchor is live (not just on kicks) so viewport
         // resizes and streaming growth re-derive the reservation; the step
         // only notifies on change, so a settled hold schedules no next frame.
-        if !self.route_exit_pending(cx)
-            && (self.own_turn.is_some() || self.own_turn_kick)
-            && !self.own_turn_scheduled
-        {
+        if (self.own_turn.is_some() || self.own_turn_kick) && !self.own_turn_scheduled {
             self.own_turn_scheduled = true;
             let entity = cx.weak_entity();
             window.on_next_frame(move |_, cx| {
@@ -8023,8 +7220,7 @@ impl Render for Transcript {
         // Spring driver: one on_next_frame callback at a time; each tick
         // notifies, which re-enters render and schedules the next frame until
         // the spring parks. Reduced motion never schedules (sync snaps).
-        if !self.route_exit_pending(cx)
-            && self.pinned
+        if self.pinned
             && !motion::reduced_motion(cx)
             && !self.spring_scheduled
             && self.spring_should_run()
@@ -8062,7 +7258,7 @@ impl Render for Transcript {
                         }
                         let distance = this.distance_from_bottom();
                         this.last_scroll_distance = distance;
-                        this.show_jump_button = jump_visibility(this.show_jump_button, distance)
+                        this.show_jump_button = distance > SCROLL_BUTTON_THRESHOLD_PX
                             && !this.pinned
                             && !this.own_turn.as_ref().is_some_and(|turn| turn.held);
                         if token.layout_settled(this.viewport_layout_revision) {
@@ -8165,317 +7361,134 @@ impl Render for Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn jump_button_stays_available_when_scrolling_down_until_near_bottom() {
-        let mut shown = false;
-        for distance in [500.0, 330.0, 319.0, 200.0, 100.0] {
-            shown = jump_visibility(shown, distance);
-            assert!(shown, "button vanished with {distance}px remaining");
-        }
-        assert!(!jump_visibility(shown, AT_BOTTOM_PX));
-        assert!(!jump_visibility(false, 319.0));
-        assert!(jump_visibility(false, 321.0));
-    }
-
-    #[gpui::test]
-    fn departing_transcript_is_retained_only_until_hidden(cx: &mut gpui::TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
-            let state = cx.new(|_| AppState::new());
-            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
-            transcript.update(cx, |transcript, cx| {
-                transcript.retain_for_route_exit();
-                transcript.chat_id = Some("departing".into());
-                transcript.last_source = None;
-                transcript.rows = vec![viewport_row("row", "message")];
-                transcript.list.reset(1);
-                transcript.sync(cx);
-                assert_eq!(transcript.rows.len(), 1);
-                assert!(transcript.route_exit_pending(cx));
-                transcript.finish_route_exit(cx);
-                assert!(transcript.rows.is_empty());
-                assert!(transcript.chat_id.is_none());
-                assert!(!transcript.route_exit_pending(cx));
-            });
-        });
-    }
     use zeron_doc::MessagePart;
 
-    struct ToolGroupNavigationWindow;
-
-    impl Render for ToolGroupNavigationWindow {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-        }
-    }
-
-    fn with_tool_group_navigation(
-        cx: &mut gpui::TestAppContext,
-        run: impl FnOnce(Entity<AppState>, Entity<Transcript>, &mut Window, &mut gpui::App),
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let (state, transcript) = cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
-            let state = cx.new(|_| AppState::new());
-            let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
-            transcript.update(cx, |this, _| this.retain_for_route_exit());
-            replay_tool_group(&state, &transcript, "chat-a", cx);
-            (state, transcript)
-        });
-        let host = cx.add_window(|_, _| ToolGroupNavigationWindow);
-        cx.update_window(host.into(), |_, window, cx| {
-            run(state, transcript, window, cx)
-        })
-        .unwrap();
-    }
-
-    fn replay_tool_group(
-        state: &Entity<AppState>,
-        transcript: &Entity<Transcript>,
-        chat: &str,
-        cx: &mut gpui::App,
-    ) {
-        state.update(cx, |state, _| {
-            state.selected_chat = Some(chat.into());
-            state.transcript_replayed = true;
-            state.transcript = vec![assistant(
-                "tools",
-                MessageStatus::Complete,
-                vec![tool_part("call", "pwd")],
-            )];
-            state.transcript_revision += 1;
-        });
-        transcript.update(cx, |this, cx| this.sync(cx));
-    }
-
-    fn assert_replayed_group_is_closed(
-        transcript: &Entity<Transcript>,
-        window: &mut Window,
-        cx: &mut gpui::App,
-    ) {
-        transcript.update(cx, |this, cx| {
-            let row = this
-                .rows
-                .iter()
-                .find(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
-                .unwrap()
-                .clone();
-            let RowKind::ToolGroup { tools, auto_open } = &row.kind else {
-                unreachable!()
-            };
-            assert!(!auto_open);
-            let _ = this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), window, cx);
-            let reveal = &this.tool_group_reveals[&row.id];
-            assert_eq!(
-                reveal.rendered_open,
-                Some(false),
-                "history flashed open on its first render"
-            );
-            assert_eq!(
-                reveal.rendered_height, 0.0,
-                "history replayed a stale closing tween"
-            );
-            assert!(reveal.header_started_at.is_none());
-            assert!(reveal.starts.iter().all(Option::is_none));
-        });
-    }
-
-    #[gpui::test]
-    fn tool_groups_stay_closed_on_populated_chat_attach(cx: &mut gpui::TestAppContext) {
-        with_tool_group_navigation(cx, |state, transcript, window, cx| {
-            for chat in ["chat-b", "chat-a", "chat-b"] {
-                // Selection and cached replay can coalesce into a single sync.
-                replay_tool_group(&state, &transcript, chat, cx);
-                assert_replayed_group_is_closed(&transcript, window, cx);
-            }
-        });
-    }
-
-    #[gpui::test]
-    fn tool_groups_stay_closed_after_rapid_new_chat_navigation(cx: &mut gpui::TestAppContext) {
-        with_tool_group_navigation(cx, |state, transcript, window, cx| {
-            for finish_exit in [false, true] {
-                transcript.update(cx, |this, _| {
-                    // Navigate away during the previous close animation.
-                    this.folds.insert(
-                        "tools#g0".into(),
-                        FoldState {
-                            open: Some(false),
-                            from: 120.0,
-                            toggled_at: Some(Instant::now()),
-                            disclosure_at: Some(Instant::now()),
-                            ..Default::default()
-                        },
-                    );
-                });
-                state.update(cx, |state, cx| state.select_chat(None, cx));
-                transcript.update(cx, |this, cx| {
-                    this.sync(cx);
-                    if finish_exit {
-                        this.finish_route_exit(cx);
-                    }
-                });
-                state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
-                transcript.update(cx, |this, cx| this.sync(cx));
-                replay_tool_group(&state, &transcript, "chat-a", cx);
-                assert_replayed_group_is_closed(&transcript, window, cx);
-            }
-        });
-    }
-
-    #[gpui::test]
-    fn tool_group_navigation_keeps_user_pins_and_new_arrivals(cx: &mut gpui::TestAppContext) {
-        with_tool_group_navigation(cx, |state, transcript, window, cx| {
-            transcript.update(cx, |this, _| {
-                this.folds.insert(
-                    "tools#g0".into(),
-                    FoldState {
-                        open: Some(true),
-                        ..Default::default()
-                    },
-                );
-            });
-            state.update(cx, |state, cx| state.select_chat(None, cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
-            // Cached replay can land without an intervening pending frame.
-            replay_tool_group(&state, &transcript, "chat-a", cx);
-            transcript.update(cx, |this, cx| {
-                let row = this.rows[0].clone();
-                let RowKind::ToolGroup { tools, auto_open } = &row.kind else {
-                    panic!("expected tools")
-                };
-                let _ =
-                    this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), window, cx);
-                assert_eq!(this.folds[&row.id].open, Some(true));
-                assert_eq!(this.tool_group_reveals[&row.id].rendered_open, Some(true));
-                assert!(
-                    this.tool_group_reveals[&row.id]
-                        .starts
-                        .iter()
-                        .all(Option::is_none)
-                );
-            });
-            state.update(cx, |state, _| {
-                state.transcript.push(assistant(
-                    "live-tools",
-                    MessageStatus::Streaming,
-                    vec![tool_part("new-call", "ls")],
-                ));
-                state.transcript_revision += 1;
-            });
-            transcript.update(cx, |this, cx| {
-                this.sync(cx);
-                let row = this.rows.last().unwrap().clone();
-                let RowKind::ToolGroup { tools, auto_open } = &row.kind else {
-                    panic!("expected tools")
-                };
-                assert!(*auto_open);
-                let _ =
-                    this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), window, cx);
-                let reveal = &this.tool_group_reveals[&row.id];
-                assert!(reveal.header_started_at.is_some());
-                assert!(reveal.starts.iter().all(Option::is_some));
-                assert_eq!(reveal.rendered_open, Some(true));
-            });
-        });
-    }
-
     #[test]
-    fn resizing_details_does_not_restart_group_disclosure() {
-        let now = Instant::now();
-        let fold = FoldState {
-            toggled_at: Some(now),
-            ..Default::default()
-        };
-        assert_eq!(tool_disclosure_progress(true, fold, now), 1.0);
-        assert_eq!(tool_disclosure_progress(false, fold, now), 0.0);
-    }
+    fn portable_highlighter_marks_fence_roles_without_tree_sitter() {
+        use zeron_syntax::HighlightKind;
 
-    #[test]
-    fn connector_intersection_is_tessellated_only_once() {
-        let mut path = PathBuilder::fill().with_style(gpui::PathStyle::Fill(
-            gpui::FillOptions::default().with_fill_rule(gpui::FillRule::NonZero),
-        ));
-        activity_ribbon(
-            &mut path,
-            &[point(px(0.0), px(0.0)), point(px(0.0), px(10.0))],
+        let document = portable_highlight_document(
+            Lang::Rust,
+            "fn main() { let answer = 42; let label = \"ok\"; // note }",
         );
-        activity_ribbon(
-            &mut path,
-            &[point(px(-5.0), px(5.0)), point(px(5.0), px(5.0))],
-        );
-        let path = path.build().unwrap();
-        let area: f32 = path
-            .vertices
-            .chunks_exact(3)
-            .map(|triangle| {
-                let a = triangle[0].xy_position;
-                let b = triangle[1].xy_position;
-                let c = triangle[2].xy_position;
-                (f32::from(b.x - a.x) * f32::from(c.y - a.y)
-                    - f32::from(b.y - a.y) * f32::from(c.x - a.x))
-                .abs()
-                    / 2.0
-            })
-            .sum();
-        assert!(
-            (area - 19.0).abs() < 0.001,
-            "overlap must contribute once: {area}"
-        );
-    }
-
-    #[test]
-    fn file_badge_icon_well_counter_shades_each_appearance() {
-        for (mut theme, base) in [
-            (Theme::dark(), crate::theme::grey(48)),
-            (Theme::light(), crate::theme::grey(230)),
+        let kinds = document.lines[0]
+            .iter()
+            .map(|span| span.kind)
+            .collect::<Vec<_>>();
+        for kind in [
+            HighlightKind::Keyword,
+            HighlightKind::Number,
+            HighlightKind::String,
+            HighlightKind::Comment,
         ] {
-            theme.surface_treatment = zeron_theme::SurfaceTreatment::Opaque;
-            let badge = crate::theme::flatten(theme.ink(0.06), base);
-            let icon_well = crate::theme::flatten(crate::file_icons::well_bg(&theme), badge);
-            let contrast = crate::theme::contrast_ratio(icon_well, badge);
-
-            match theme.appearance {
-                crate::theme::Appearance::Dark => assert!(icon_well.l < badge.l),
-                crate::theme::Appearance::Light => assert!(icon_well.l > badge.l),
-            }
-            assert!(contrast > 1.04, "icon well must remain visible: {contrast}");
-            assert!(
-                contrast < 1.20,
-                "icon well must not become a harsh split surface: {contrast}"
-            );
+            assert!(kinds.contains(&kind), "missing {kind:?}: {kinds:?}");
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
-    fn file_badge_icon_well_uses_more_coverage_on_frost() {
-        for mut theme in [Theme::dark(), Theme::light()] {
-            theme.surface_treatment = zeron_theme::SurfaceTreatment::Opaque;
-            let opaque_alpha = crate::file_icons::well_bg(&theme).a;
-            theme.surface_treatment = zeron_theme::SurfaceTreatment::Frosted;
-            let frosted = crate::file_icons::well_bg(&theme);
-            let badge = crate::theme::flatten(theme.ink(0.06), theme.bg);
-            let icon_well = crate::theme::flatten(frosted, badge);
-            let contrast = crate::theme::contrast_ratio(icon_well, badge);
+    #[gpui::test]
+    fn document_notifications_update_rows_and_reset_identity(cx: &mut gpui::TestAppContext) {
+        let document = cx.new(|_| {
+            source::TranscriptDocument::new(
+                "first",
+                vec![assistant(
+                    "reply",
+                    MessageStatus::Streaming,
+                    vec![text_part("text", "Hello")],
+                )],
+            )
+        });
+        let transcript = cx.new(|cx| Transcript::from_document(document.clone(), true, cx));
+        let original_version = cx.read_entity(&transcript, |view, cx| {
+            assert_eq!(view.chat_id.as_deref(), Some("first"));
+            assert!(view.is_pinned());
+            assert!(!view.rows.is_empty());
+            view.with_entries(cx, |entries, echoes| {
+                assert!(echoes.is_empty());
+                assert_eq!(entries.as_ptr(), document.read(cx).entries().as_ptr());
+            });
+            view.rows[0].version
+        });
+        document.update(cx, |doc, cx| {
+            doc.update_entries(
+                |entries| {
+                    entries[0] = assistant(
+                        "reply",
+                        MessageStatus::Complete,
+                        vec![text_part("text", "Hello world")],
+                    );
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.read_entity(&transcript, |view, _| {
+            assert_ne!(view.rows[0].version, original_version);
+            assert_eq!(view.last_source.as_ref().unwrap().2, 1);
+        });
+        document.update(cx, |doc, cx| doc.replace("second", Vec::new(), cx));
+        cx.run_until_parked();
+        cx.read_entity(&transcript, |view, _| {
+            assert_eq!(view.chat_id.as_deref(), Some("second"));
+            assert_eq!(view.doc_override.as_deref(), Some("second"));
+            assert!(view.rows.is_empty());
+            assert!(view.row_cache.is_empty());
+            assert!(view.live_parsers.is_empty());
+            assert_eq!(view.last_source.as_ref().unwrap().2, 2);
+        });
+        document.update(cx, |doc, cx| {
+            doc.update_entries(
+                |entries| {
+                    entries.push(assistant(
+                        "new",
+                        MessageStatus::Complete,
+                        vec![text_part("text", "New doc")],
+                    ));
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.read_entity(&transcript, |view, _| {
+            assert!(!view.rows.is_empty());
+            assert!(view.rows.iter().all(|row| row.entry_id.as_ref() == "new"));
+            assert_eq!(view.last_source.as_ref().unwrap().2, 3);
+        });
+    }
 
-            assert!(opaque_alpha > 0.0 && opaque_alpha < 1.0);
-            assert!(frosted.a > opaque_alpha && frosted.a < 1.0);
-            assert!(
-                contrast > 1.03,
-                "frosted icon well must remain visible: {contrast}"
-            );
-            assert!(
-                contrast < 1.20,
-                "frosted icon well must not become a harsh split surface: {contrast}"
-            );
-        }
+    #[gpui::test]
+    fn frozen_document_switch_does_not_start_following(cx: &mut gpui::TestAppContext) {
+        let document = cx.new(|_| source::TranscriptDocument::new("first", Vec::new()));
+        let transcript = cx.new(|cx| Transcript::from_document(document.clone(), false, cx));
+        document.update(cx, |doc, cx| doc.replace("second", Vec::new(), cx));
+        cx.run_until_parked();
+        cx.read_entity(&transcript, |view, _| {
+            assert!(!view.is_pinned());
+            assert!(view.land_end_pending);
+            assert!(!view.doc_live);
+        });
+    }
+
+    #[gpui::test]
+    fn document_missing_host_services_do_not_start_work(cx: &mut gpui::TestAppContext) {
+        let mut user = assistant(
+            "prompt",
+            MessageStatus::Complete,
+            vec![text_part("text", "hello")],
+        );
+        user.role = MessageRole::User;
+        user.status = None;
+        let document = cx.new(|_| source::TranscriptDocument::new("offline-doc", vec![user]));
+        let transcript = cx.new(|cx| Transcript::from_document(document, true, cx));
+        transcript.update(cx, |view, cx| {
+            assert!(view.render_working_trailer(cx).is_none(), "a local user row is not an in-flight send");
+            let devices = view.attachment_device_ids(cx);
+            assert_eq!(devices, ["offline-doc"]);
+            assert!(matches!(view.attachment_state(&devices, "/missing.png", cx),
+                crate::attachments::AttachmentSnapshot::Error { retry_in } if retry_in == Duration::MAX));
+            assert!(view.attachment_loads.is_empty());
+            assert!(view.attachment_retries.is_empty());
+            assert!(view.blob_details.is_empty());
+        });
     }
 
     #[test]
@@ -9045,211 +8058,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn public_documents_are_not_hidden_in_generic_tool_groups() {
-        let mut document = tool_part("proposal", "");
-        if let MessagePart::Tool { call, output, .. } = &mut document {
-            *call = ToolCall::Document {
-                title: "Implementation plan".into(),
-            };
-            *output = Some(
-                "# Implementation plan\n\n## Delivery\n\n- **Build** the feature\n- Verify it"
-                    .into(),
-            );
-        }
-        let entry = assistant(
-            "proposal-entry",
-            MessageStatus::Complete,
-            vec![
-                tool_part("read", "cat Cargo.toml"),
-                document,
-                tool_part("run", "cargo test"),
-            ],
-        );
-        let rows = rows_for_entry(&entry, false, &mut parse);
-        assert_eq!(
-            rows.len(),
-            3,
-            "a public document separates ordinary tool groups"
-        );
-        let RowKind::Document { title, preview, .. } = &rows[1].kind else {
-            panic!("standalone document")
-        };
-        assert_eq!(title.as_ref(), "Implementation plan");
-        assert!(matches!(
-            &preview.blocks[0].block,
-            Block::Heading { level: 1, .. }
-        ));
-        assert!(matches!(
-            &preview.blocks[1].block,
-            Block::Heading { level: 2, .. }
-        ));
-        assert!(matches!(&preview.blocks[2].block, Block::List { .. }));
-    }
-
-    #[test]
-    fn complete_small_public_output_has_no_useless_fetch_affordance() {
-        let full = "stdout: fixture passed\nstderr: ordinary diagnostic\n";
-        let mut part = tool_part("shell", "printf fixture");
-        if let MessagePart::Tool {
-            output,
-            output_ref,
-            output_bytes,
-            ..
-        } = &mut part
-        {
-            *output = zeron_doc::summarize_tool_output(full);
-            *output_ref = Some("fixture/shell".into());
-            *output_bytes = Some(full.len() as u64);
-        }
-        let rows = rows_for_entry(
-            &assistant("reply", MessageStatus::Complete, vec![part]),
-            false,
-            &mut parse,
-        );
-        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
-            panic!("shell stays a tool")
-        };
-        assert!(
-            tools[0].output_ref.is_none(),
-            "complete small output must not offer a no-op fetch"
-        );
-        assert!(
-            matches!(tools[0].detail.as_deref(), Some(ToolDetail::Output { lines, truncated_by: 0 }) if lines.len() == 2)
-        );
-    }
-
-    #[test]
-    fn document_rendering_is_semantic_not_a_title_or_output_heuristic() {
-        let mut part = tool_part("shell", "printf '# Implementation plan'");
-        if let MessagePart::Tool { output, .. } = &mut part {
-            *output = Some("# Implementation plan\n\n- task".into());
-        }
-        let rows = rows_for_entry(
-            &assistant("ordinary", MessageStatus::Complete, vec![part]),
-            false,
-            &mut parse,
-        );
-        assert!(matches!(&rows[0].kind, RowKind::ToolGroup { .. }));
-        assert!(
-            call_block(&ToolCall::Document {
-                title: "Plan".into()
-            })
-            .is_none(),
-            "documents never duplicate the body in tool input"
-        );
-    }
-
-    #[test]
-    fn answer_stays_a_tool_card_with_markdown_styled_detail() {
-        let mut part = tool_part("answer", "");
-        if let MessagePart::Tool { call, output, .. } = &mut part {
-            *call = ToolCall::Answer {
-                title: "Answered".into(),
-            };
-            *output = Some(
-                "### Result\n\nUse **bold**, a [link](https://example.com), and `code`.\n\n- First"
-                    .into(),
-            );
-        }
-        let rows = rows_for_entry(
-            &assistant("answer-entry", MessageStatus::Complete, vec![part]),
-            false,
-            &mut parse,
-        );
-        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
-            panic!("answer should preserve tool-card identity")
-        };
-        assert_eq!(
-            tool_chip_content(&tools[0].call),
-            ("Answer", "Answered".into())
-        );
-        assert!(
-            tools[0].invocation.is_none(),
-            "input JSON must not be shown"
-        );
-        let Some(ToolDetail::Markdown { source, tree }) = tools[0].detail.as_deref() else {
-            panic!("answer output should be parsed as Markdown")
-        };
-        assert!(source.contains("**bold**"));
-        assert!(source.contains("[link](https://example.com)"));
-        assert!(source.contains("`code`"));
-        assert!(matches!(
-            tree.blocks[0].block,
-            Block::Heading { level: 3, .. }
-        ));
-        assert!(
-            tree.blocks
-                .iter()
-                .any(|block| matches!(block.block, Block::List { .. }))
-        );
-    }
-
-    #[test]
-    fn fetched_semantic_output_keeps_full_measured_markdown_tree() {
-        let body = format!(
-            "### Full report\n\n{}",
-            (0..80)
-                .map(|index| format!("- **Finding {index}** uses `code` and a long explanation that must wrap at narrow widths"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        let Some(ToolDetail::Markdown { source, tree }) = markdown_tool_detail(Some(&body)) else {
-            panic!("fetched semantic output should remain Markdown")
-        };
-        assert_eq!(source.as_ref(), body);
-        assert!(matches!(
-            tree.blocks[0].block,
-            Block::Heading { level: 3, .. }
-        ));
-        assert!(
-            tree.blocks
-                .iter()
-                .any(|block| matches!(block.block, Block::List { .. }))
-        );
-        assert!(
-            source.contains("Finding 79"),
-            "semantic Markdown must not use the 24-line tool-output cap"
-        );
-        assert_eq!(
-            detail_height(&ToolDetail::Markdown { source, tree }),
-            DETAIL_SEPARATOR
-        );
-    }
-
-    #[test]
-    fn delivery_steps_are_separate_rows_and_completion_changes_the_version() {
-        let mut part = tool_part("steps", "");
-        if let MessagePart::Tool { call, .. } = &mut part {
-            *call = ToolCall::Todo {
-                items: vec![zeron_proto::TodoItem {
-                    text: "Ship the feature".into(),
-                    done: false,
-                }],
-            };
-        }
-        let mut entry = assistant(
-            "delivery",
-            MessageStatus::Complete,
-            vec![part, tool_part("test", "cargo test")],
-        );
-        let before = rows_for_entry(&entry, false, &mut parse);
-        assert!(
-            matches!(&before[0].kind, RowKind::Checklist { items } if items.len() == 1 && !items[0].done)
-        );
-        assert!(matches!(&before[1].kind, RowKind::ToolGroup { .. }));
-        if let MessagePart::Tool {
-            call: ToolCall::Todo { items },
-            ..
-        } = &mut entry.parts[0]
-        {
-            items[0].done = true;
-        }
-        let after = rows_for_entry(&entry, false, &mut parse);
-        assert_eq!(before[0].id, after[0].id);
-        assert_ne!(before[0].version, after[0].version);
-    }
-
     fn text_part(id: &str, text: &str) -> MessagePart {
         MessagePart::Text {
             id: id.into(),
@@ -9475,146 +8283,12 @@ mod tests {
             diff: None,
             output_ref: None,
             output_bytes: None,
-            output_digest: None,
             diff_ref: None,
             diff_stats: None,
             subagent_ref: None,
             subagent_status: None,
             subagent_tail: None,
         }
-    }
-
-    #[test]
-    fn same_length_public_output_updates_entry_and_tool_row_versions() {
-        use zeron_doc::fold_event_into_parts;
-        use zeron_proto::AgentEvent;
-
-        for (old, new) in [("one", "two"), ("ab\nc", "a\nbc"), ("😺", "😸")] {
-            let mut parts = Vec::new();
-            fold_event_into_parts(
-                &mut parts,
-                &AgentEvent::ToolCall {
-                    id: "tool".into(),
-                    call: ToolCall::Exec {
-                        command: "cargo test".into(),
-                    },
-                },
-            );
-            fold_event_into_parts(
-                &mut parts,
-                &AgentEvent::ToolProgress {
-                    id: "tool".into(),
-                    output: Some(old.into()),
-                },
-            );
-            let before = assistant("message", MessageStatus::Streaming, parts.clone());
-            fold_event_into_parts(
-                &mut parts,
-                &AgentEvent::ToolProgress {
-                    id: "tool".into(),
-                    output: Some(new.into()),
-                },
-            );
-            let after = assistant("message", MessageStatus::Streaming, parts.clone());
-            assert_eq!(before.parts[0].byte_len(), after.parts[0].byte_len());
-            let before_rows = rows_for_entry(&before, false, &mut parse);
-            let after_rows = rows_for_entry(&after, false, &mut parse);
-            let RowKind::ToolGroup { tools, .. } = &after_rows[0].kind else {
-                panic!("tool row")
-            };
-            assert!(
-                !tools[0].resolved && !tools[0].is_error,
-                "progress is not completion"
-            );
-            let Some(ToolDetail::Output { lines, .. }) = tools[0].detail.as_deref() else {
-                panic!("public output detail")
-            };
-            assert_eq!(
-                lines
-                    .iter()
-                    .map(|line| line.as_ref())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                new
-            );
-            assert_eq!(before_rows[0].id, after_rows[0].id);
-            assert_eq!(
-                (
-                    entry_fingerprint(&before, false) != entry_fingerprint(&after, false),
-                    before_rows[0].version != after_rows[0].version
-                ),
-                (true, true),
-                "both caches must notice replacement {old:?} -> {new:?}"
-            );
-            assert_eq!(diff_rows(&before_rows, &after_rows), Some((0..1, 1)));
-            assert_eq!(
-                diff_rows(&after_rows, &rows_for_entry(&after, false, &mut parse)),
-                None
-            );
-
-            fold_event_into_parts(
-                &mut parts,
-                &AgentEvent::ToolResult {
-                    id: "tool".into(),
-                    is_error: false,
-                    output: Some(new.into()),
-                    diff: None,
-                },
-            );
-            let completed = assistant("message", MessageStatus::Complete, parts);
-            let completed_rows = rows_for_entry(&completed, false, &mut parse);
-            assert_ne!(
-                after_rows[0].version, completed_rows[0].version,
-                "resolution still changes independently of output"
-            );
-            assert_eq!(after.status, Some(MessageStatus::Streaming));
-        }
-    }
-
-    #[test]
-    fn same_length_inline_diff_updates_entry_and_tool_row_versions() {
-        let entry = |new_text: &str| {
-            let mut part = tool_part("tool", "edit");
-            if let MessagePart::Tool { diff, .. } = &mut part {
-                *diff = Some(zeron_proto::ToolDiff {
-                    path: "/work/file.txt".into(),
-                    old_text: Some("old\n".into()),
-                    new_text: new_text.into(),
-                });
-            }
-            assistant("message", MessageStatus::Complete, vec![part])
-        };
-        let before = entry("one\n");
-        let after = entry("two\n");
-        assert_eq!(before.parts[0].byte_len(), after.parts[0].byte_len());
-        let before_rows = rows_for_entry(&before, false, &mut parse);
-        let after_rows = rows_for_entry(&after, false, &mut parse);
-        let RowKind::ToolGroup { tools, .. } = &after_rows[0].kind else {
-            panic!("tool row")
-        };
-        let Some(ToolDetail::Diff { file, .. }) = tools[0].detail.as_deref() else {
-            panic!("inline diff")
-        };
-        assert_eq!((file.additions, file.deletions), (1, 1));
-        assert!(
-            file.hunks[0]
-                .lines
-                .iter()
-                .any(|line| line.kind == crate::changes::LineKind::Add && line.text == "two")
-        );
-        assert_eq!(
-            (
-                entry_fingerprint(&before, false) != entry_fingerprint(&after, false),
-                before_rows[0].version != after_rows[0].version
-            ),
-            (true, true),
-            "equal-length inline edits must invalidate both caches"
-        );
-        assert_eq!(diff_rows(&before_rows, &after_rows), Some((0..1, 1)));
-        assert_eq!(
-            diff_rows(&after_rows, &rows_for_entry(&after, false, &mut parse)),
-            None
-        );
     }
 
     const MD: &str = "# Title\n\npara one\n\n```rust\nlet x = 1;\n```";
@@ -9731,7 +8405,6 @@ mod tests {
             diff: None,
             output_ref: None,
             output_bytes: None,
-            output_digest: None,
             diff_ref: None,
             diff_stats: None,
             subagent_ref: Some(format!("chat--sub--{id}")),
@@ -10004,581 +8677,6 @@ mod tests {
             .unwrap();
         }
 
-        #[test]
-        fn same_ref_owner_replacement_invalidates_cache_and_rejects_stale_fetches() {
-            with_transcript(|this, cx| {
-                let shell = |tail: &str| {
-                    let output = (1..=25)
-                        .map(|ix| format!("unchanged preview line {ix}"))
-                        .chain(std::iter::once(tail.to_owned()))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let mut parts = Vec::new();
-                    zeron_doc::fold_event_into_parts(
-                        &mut parts,
-                        &zeron_proto::AgentEvent::ToolCall {
-                            id: "shell".into(),
-                            call: ToolCall::Exec {
-                                command: "printf fixture".into(),
-                            },
-                        },
-                    );
-                    zeron_doc::fold_event_into_parts(
-                        &mut parts,
-                        &zeron_proto::AgentEvent::ToolResult {
-                            id: "shell".into(),
-                            is_error: false,
-                            output: Some(output),
-                            diff: None,
-                        },
-                    );
-                    zeron_doc::apply_sidecar_refs("chat", &mut parts);
-                    assistant("reply", MessageStatus::Complete, parts)
-                };
-                feed(this, vec![shell("same-size-tail-OLD")], cx);
-                let old_generation = this.blob_generation("chat/shell");
-                this.finish_blob_fetch(
-                    "chat/shell".into(),
-                    old_generation,
-                    BlobFetch::Ready(Arc::new(blob_detail("full OLD", false).unwrap())),
-                    cx,
-                );
-                assert!(matches!(
-                    this.blob_details.get("chat/shell"),
-                    Some(BlobFetch::Ready(_))
-                ));
-
-                // Only line 26 changes, with equal length and the same blob ref.
-                // The bounded 24-line ToolDetail projection is byte-identical.
-                feed(this, vec![shell("same-size-tail-NEW")], cx);
-                let new_generation = this.blob_generation("chat/shell");
-                assert_ne!(new_generation, old_generation);
-                assert!(!this.blob_details.contains_key("chat/shell"));
-                this.finish_blob_fetch(
-                    "chat/shell".into(),
-                    old_generation,
-                    BlobFetch::Ready(Arc::new(blob_detail("stale OLD", false).unwrap())),
-                    cx,
-                );
-                assert!(!this.blob_details.contains_key("chat/shell"));
-                this.finish_blob_fetch(
-                    "chat/shell".into(),
-                    new_generation,
-                    BlobFetch::Ready(Arc::new(blob_detail("fresh NEW", false).unwrap())),
-                    cx,
-                );
-                let ready = match this.blob_details.get("chat/shell") {
-                    Some(BlobFetch::Ready(detail)) => detail.clone(),
-                    _ => panic!("new generation must install its fetched output"),
-                };
-                let ToolDetail::Output { lines, .. } = ready.as_ref() else {
-                    panic!("shell output detail")
-                };
-                assert_eq!(lines[0].as_ref(), "fresh NEW");
-                // An unchanged owner keeps the one-time fetched value intact.
-                feed(this, vec![shell("same-size-tail-NEW")], cx);
-                assert_eq!(this.blob_generation("chat/shell"), new_generation);
-                assert!(matches!(
-                    this.blob_details.get("chat/shell"),
-                    Some(BlobFetch::Ready(detail)) if Arc::ptr_eq(detail, &ready)
-                ));
-
-                let document = |preview: &str| {
-                    let mut part = tool_part("plan", "");
-                    if let MessagePart::Tool {
-                        call,
-                        output,
-                        output_ref,
-                        ..
-                    } = &mut part
-                    {
-                        *call = ToolCall::Document {
-                            title: "Plan".into(),
-                        };
-                        *output = Some(preview.into());
-                        *output_ref = Some("chat/plan".into());
-                    }
-                    assistant("proposal", MessageStatus::Complete, vec![part])
-                };
-                feed(this, vec![document("# OLD plan")], cx);
-                let old_generation = this.blob_generation("chat/plan");
-                let old_tree = Arc::new(parse_full("# full OLD"));
-                this.finish_blob_fetch(
-                    "chat/plan".into(),
-                    old_generation,
-                    BlobFetch::Document(old_tree),
-                    cx,
-                );
-                feed(this, vec![document("# NEW plan")], cx);
-                let new_generation = this.blob_generation("chat/plan");
-                assert_ne!(new_generation, old_generation);
-                let fresh_tree = Arc::new(parse_full("# full NEW"));
-                this.finish_blob_fetch(
-                    "chat/plan".into(),
-                    old_generation,
-                    BlobFetch::Document(Arc::new(parse_full("# stale OLD"))),
-                    cx,
-                );
-                assert!(!this.blob_details.contains_key("chat/plan"));
-                this.finish_blob_fetch(
-                    "chat/plan".into(),
-                    new_generation,
-                    BlobFetch::Document(fresh_tree.clone()),
-                    cx,
-                );
-                assert!(matches!(
-                    this.blob_details.get("chat/plan"),
-                    Some(BlobFetch::Document(tree)) if Arc::ptr_eq(tree, &fresh_tree)
-                ));
-            });
-        }
-
-        #[test]
-        fn same_ref_digest_refresh_keeps_semantic_sidecars_markdown() {
-            with_transcript(|this, cx| {
-                let semantic = |id: &str, call: ToolCall, digest: u64| {
-                    let mut part = tool_part(id, "");
-                    if let MessagePart::Tool {
-                        call: part_call,
-                        output,
-                        output_ref,
-                        output_bytes,
-                        output_digest,
-                        ..
-                    } = &mut part
-                    {
-                        *part_call = call;
-                        *output = Some("### Preview\n\n- **Finding**".into());
-                        *output_ref = Some(format!("chat/{id}"));
-                        *output_bytes = Some(512);
-                        *output_digest = Some(digest);
-                    }
-                    assistant(&format!("reply-{id}"), MessageStatus::Complete, vec![part])
-                };
-                let assert_fetched_markdown = |fetch: &BlobFetch, expected: &str| {
-                    let BlobFetch::Ready(detail) = fetch else {
-                        panic!("semantic sidecar should be ready")
-                    };
-                    let ToolDetail::Markdown { source, tree } = detail.as_ref() else {
-                        panic!("semantic sidecar should retain Markdown presentation")
-                    };
-                    assert_eq!(source.as_ref(), expected);
-                    assert!(matches!(tree.blocks[0].block, Block::Heading { .. }));
-                };
-
-                for (id, call) in [
-                    (
-                        "answer",
-                        ToolCall::Answer {
-                            title: "Answered".into(),
-                        },
-                    ),
-                    (
-                        "report",
-                        ToolCall::Report {
-                            title: "Report findings".into(),
-                        },
-                    ),
-                ] {
-                    let blob_ref = format!("chat/{id}");
-                    feed(this, vec![semantic(id, call.clone(), 11)], cx);
-                    assert!(this.rows.iter().any(|row| matches!(
-                        &row.kind,
-                        RowKind::ToolGroup { tools, .. }
-                            if matches!(tools[0].detail.as_deref(), Some(ToolDetail::Markdown { .. }))
-                    )));
-                    let old_generation = this.blob_generation(&blob_ref);
-                    let old_presentation = this.blob_owners[blob_ref.as_str()].1;
-                    assert_eq!(old_presentation, BlobPresentation::Markdown);
-                    let old_body = format!("## Initial {id}\n\n- **Old finding**");
-                    let old_fetch = build_blob_fetch(&old_body, false, old_presentation);
-                    assert_fetched_markdown(&old_fetch, &old_body);
-                    this.finish_blob_fetch(blob_ref.clone().into(), old_generation, old_fetch, cx);
-
-                    feed(this, vec![semantic(id, call, 12)], cx);
-                    let new_generation = this.blob_generation(&blob_ref);
-                    assert_ne!(new_generation, old_generation);
-                    let new_presentation = this.blob_owners[blob_ref.as_str()].1;
-                    assert_eq!(new_presentation, BlobPresentation::Markdown);
-                    assert!(
-                        !this.blob_details.contains_key(blob_ref.as_str()),
-                        "digest refresh must invalidate the old fetched sidecar"
-                    );
-                    assert!(this.rows.iter().any(|row| matches!(
-                        &row.kind,
-                        RowKind::ToolGroup { tools, .. }
-                            if matches!(tools[0].detail.as_deref(), Some(ToolDetail::Markdown { .. }))
-                    )));
-
-                    let new_body = format!("## Refreshed {id}\n\n- **New finding**");
-                    let new_fetch = build_blob_fetch(&new_body, false, new_presentation);
-                    assert_fetched_markdown(&new_fetch, &new_body);
-                    this.finish_blob_fetch(blob_ref.clone().into(), new_generation, new_fetch, cx);
-                    assert_fetched_markdown(
-                        this.blob_details.get(blob_ref.as_str()).unwrap(),
-                        &new_body,
-                    );
-                }
-            });
-        }
-
-        #[test]
-        fn fetched_tool_output_remeasures_a_cached_transcript_row() {
-            with_window(|transcript, window, cx| {
-                let full = "stdout start\nstderr detail\nextra line 3\nextra line 4\nextra line 5\nextra line 6\nextra line 7\nextra line 8\nextra line 9\nextra line 10\nextra line 11\nextra line 12: the final verification marker must remain visible after fetching the complete tool output";
-                assert!(full.len() > zeron_doc::TOOL_OUTPUT_SUMMARY_MAX);
-                transcript.update(cx, |this, cx| {
-                    let mut part = tool_part("shell", "printf fixture");
-                    if let MessagePart::Tool {
-                        output,
-                        output_ref,
-                        output_bytes,
-                        ..
-                    } = &mut part
-                    {
-                        *output = zeron_doc::summarize_tool_output(full);
-                        *output_ref = Some("fixture/shell".into());
-                        *output_bytes = Some(full.len() as u64);
-                    }
-                    feed(
-                        this,
-                        vec![assistant("reply", MessageStatus::Complete, vec![part])],
-                        cx,
-                    );
-                    this.folds.entry("reply#g0".into()).or_default().open = Some(true);
-                    this.tool_details
-                        .entry("reply#g0#d0".into())
-                        .or_default()
-                        .open = Some(true);
-                    this.list.reset(1);
-                    this.pinned = false;
-                    this.list.scroll_to(ListOffset::default());
-                    this.rail_enabled = false;
-                    cx.notify();
-                });
-                draw(window, cx);
-                draw(window, cx);
-                let before = transcript.read(cx).list.offset_for_item(1);
-                transcript.update(cx, |this, cx| {
-                    this.blob_fetch_order.insert("fixture/shell".into(), 1);
-                    this.finish_blob_fetch(
-                        "fixture/shell".into(),
-                        this.blob_generation("fixture/shell"),
-                        BlobFetch::Ready(Arc::new(blob_detail(full, false).unwrap())),
-                        cx,
-                    );
-                });
-                draw(window, cx);
-                let after = transcript.read(cx).list.offset_for_item(1);
-                // Eleven extra 18px lines, with the 24px fetch link retired.
-                assert_eq!(
-                    after - before,
-                    px(174.0),
-                    "full output replaces the summary and removes its fetch affordance"
-                );
-            });
-        }
-
-        #[test]
-        fn clicked_tool_detail_stays_open_after_its_tween_and_allows_full_output() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    let mut part = tool_part("shell", "printf 'MIMIR_STDOUT_READY\\n'; printf 'MIMIR_STDERR_READY\\n' >&2; seq 1 80");
-                    if let MessagePart::Tool { output, output_ref, output_bytes, .. } = &mut part {
-                        *output = Some("Process completed, exit code 0…".into());
-                        *output_ref = Some("fixture/shell".into());
-                        *output_bytes = Some(300);
-                    }
-                    feed(this, vec![assistant("reply", MessageStatus::Complete,
-                        vec![part, tool_part("failure", "exit 7"), text_part("tail", &"Exit statuses: 0 and 7.\n\n".repeat(40))])], cx);
-                    this.rail_enabled = false;
-                    this.pinned = false;
-                    this.list.scroll_to(ListOffset::default());
-                    cx.notify();
-                });
-                let click = |position, cx: &mut gpui::App| {
-                    cx.update_window(window.into(), |_, window, cx| {
-                        window.dispatch_event(
-                            gpui::PlatformInput::MouseMove(MouseMoveEvent {
-                                position,
-                                ..Default::default()
-                            }),
-                            cx,
-                        );
-                        window.dispatch_event(
-                            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                                button: MouseButton::Left,
-                                position,
-                                click_count: 1,
-                                ..Default::default()
-                            }),
-                            cx,
-                        );
-                        window.dispatch_event(
-                            gpui::PlatformInput::MouseUp(MouseUpEvent {
-                                button: MouseButton::Left,
-                                position,
-                                ..Default::default()
-                            }),
-                            cx,
-                        );
-                    })
-                    .unwrap();
-                };
-                let settle = |cx: &mut gpui::App| {
-                    for _ in 0..15 {
-                        std::thread::sleep(Duration::from_millis(40));
-                        draw(window, cx);
-                    }
-                };
-                draw(window, cx);
-                let group_origin = |cx: &gpui::App| {
-                    // Keep the tool visible above a long transcript, like the
-                    // reported live scene; use its actual laid-out row bounds.
-                    let bounds = transcript.read(cx).list.bounds_for_item(0).unwrap();
-                    gpui::point(
-                        bounds.center().x - px(MAX_CONTENT_WIDTH / 2.0),
-                        bounds.top() + px(Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0),
-                    )
-                };
-                click(group_origin(cx) + gpui::point(px(40.0), px(13.0)), cx);
-                settle(cx);
-                assert_eq!(transcript.read(cx).folds["reply#g0"].open, Some(true));
-                let closed = transcript.read(cx).list.offset_for_item(1);
-                let header_y = 26.0 + CHIPS_TOP_PAD + CHIP_HEIGHT / 2.0;
-                // Click the command text, not just unused header whitespace.
-                click(group_origin(cx) + gpui::point(px(100.0), px(header_y)), cx);
-                settle(cx);
-                assert_eq!(
-                    transcript.read(cx).tool_details["reply#g0#d0"].open,
-                    Some(true)
-                );
-                let expanded = transcript.read(cx).list.offset_for_item(1);
-                assert!(
-                    expanded > closed + px(40.0),
-                    "the clicked detail must remain laid out after the animation: {closed:?} -> {expanded:?}"
-                );
-                settle(cx);
-                assert_eq!(transcript.read(cx).list.offset_for_item(1), expanded);
-                let detail_h = match &transcript.read(cx).rows[0].kind {
-                    RowKind::ToolGroup { tools, .. } => {
-                        tools[0].invocation.as_deref().map_or(0.0, detail_height)
-                            + tools[0].detail.as_deref().map_or(0.0, detail_height)
-                    }
-                    _ => panic!("tool group"),
-                };
-                let fetch_y = 26.0
-                    + CHIPS_TOP_PAD
-                    + (CHIP_HEIGHT - CHIP_CARD_HEIGHT) / 2.0
-                    + CHIP_CARD_HEIGHT
-                    + detail_h
-                    + BLOB_AFFORDANCE_HEIGHT / 2.0;
-                click(group_origin(cx) + gpui::point(px(100.0), px(fetch_y)), cx);
-                assert_eq!(
-                    transcript.read(cx).blob_fetch_order.get("fixture/shell"),
-                    Some(&1),
-                    "the visible full-output affordance must receive an actual click"
-                );
-            });
-        }
-
-        #[test]
-        fn fetched_document_replaces_the_painted_preview_heading() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    let mut part = tool_part("plan", "");
-                    if let MessagePart::Tool {
-                        call,
-                        output,
-                        output_ref,
-                        ..
-                    } = &mut part
-                    {
-                        *call = ToolCall::Document {
-                            title: "Submit plan: python-todo-cli".into(),
-                        };
-                        *output = Some("# python-todo-cli…".into());
-                        *output_ref = Some("fixture/plan".into());
-                    }
-                    feed(
-                        this,
-                        vec![assistant("proposal", MessageStatus::Complete, vec![part])],
-                        cx,
-                    );
-                    this.rail_enabled = false;
-                    cx.notify();
-                });
-                let select_heading = |cx: &mut gpui::App| {
-                    let position = render::selection_test_bounds("proposal#plan:0").origin
-                        + gpui::point(px(2.0), px(8.0));
-                    cx.update_window(window.into(), |_, window, cx| {
-                        window.dispatch_event(
-                            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
-                                button: MouseButton::Left,
-                                position,
-                                click_count: 3,
-                                ..Default::default()
-                            }),
-                            cx,
-                        );
-                        window.dispatch_event(
-                            gpui::PlatformInput::MouseUp(MouseUpEvent {
-                                button: MouseButton::Left,
-                                position,
-                                ..Default::default()
-                            }),
-                            cx,
-                        );
-                    })
-                    .unwrap();
-                    let selected = crate::markdown::selection::selected_text();
-                    crate::markdown::selection::clear_if_owner("proposal#plan:0");
-                    selected
-                };
-                draw(window, cx);
-                assert_eq!(select_heading(cx).as_deref(), Some("python-todo-cli…"));
-                transcript.update(cx, |this, cx| {
-                    this.finish_blob_fetch(
-                        "fixture/plan".into(),
-                        this.blob_generation("fixture/plan"),
-                        BlobFetch::Document(Arc::new(parse_full(
-                            "# python-todo-cli\n\n## Requirements\n\nThe full proposal body.",
-                        ))),
-                        cx,
-                    );
-                });
-                draw(window, cx);
-                assert_eq!(
-                    select_heading(cx).as_deref(),
-                    Some("python-todo-cli"),
-                    "painted/copied heading must come from the full body, not the cached preview"
-                );
-            });
-        }
-
-        #[test]
-        fn semantic_answer_expansion_uses_measured_height_inside_task_tree() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    let mut part = tool_part("answer", "");
-                    if let MessagePart::Tool { call, output, .. } = &mut part {
-                        *call = ToolCall::Answer { title: "Result".into() };
-                        *output = Some("# Result\n\n## Details\n\nA measured paragraph.\n\n- First result\n- Second result\n\n## Verification\n\nAll checks passed.".into());
-                    }
-                    feed(this, vec![assistant("reply", MessageStatus::Complete, vec![part])], cx);
-                    let row_id = this.rows[0].id.clone();
-                    this.folds.entry(row_id).or_default().open = Some(true);
-                    this.rail_enabled = false;
-                    cx.notify();
-                });
-                draw(window, cx);
-                let closed = transcript.read(cx).list.offset_for_item(1);
-                transcript.update(cx, |this, cx| {
-                    let key = format!("{}#d0", this.rows[0].id);
-                    this.tool_details.entry(key.into()).or_default().open = Some(true);
-                    cx.notify();
-                });
-                draw(window, cx);
-                assert!(
-                    transcript.read(cx).list.offset_for_item(1) > closed + px(100.0),
-                    "task-tree card and group must not clip measured Mimir Markdown"
-                );
-            });
-        }
-
-        #[test]
-        fn document_sidecars_and_collapsing_use_actual_markdown_layout() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    let mut part = tool_part("plan", "");
-                    if let MessagePart::Tool {
-                        call,
-                        output,
-                        output_ref,
-                        ..
-                    } = &mut part
-                    {
-                        *call = ToolCall::Document {
-                            title: "Implementation plan".into(),
-                        };
-                        *output = Some("# Plan\n\nPreview".into());
-                        *output_ref = Some("fixture/plan".into());
-                    }
-                    feed(
-                        this,
-                        vec![assistant("proposal", MessageStatus::Complete, vec![part])],
-                        cx,
-                    );
-                    this.rail_enabled = false;
-                    cx.notify();
-                });
-                draw(window, cx);
-                let preview_height = transcript.read(cx).list.offset_for_item(1);
-                transcript.update(cx, |this, cx| {
-                    let body = "# Implementation plan\n\n## Requirements\n\nA real paragraph with **bold** and `code`.\n\n## Design\n\n- Model the data\n- Store it atomically\n\n## Verification\n\nRun the regression suite.\n\n```rust\nfn main() {}\n```";
-                    this.finish_blob_fetch(
-                        "fixture/plan".into(),
-                        this.blob_generation("fixture/plan"),
-                        BlobFetch::Document(Arc::new(parse_full(body))),
-                        cx,
-                    );
-                });
-                draw(window, cx);
-                let full_height = transcript.read(cx).list.offset_for_item(1);
-                assert!(
-                    full_height > preview_height + px(100.0),
-                    "Markdown sidecar must expand the measured card"
-                );
-                transcript.update(cx, |this, cx| {
-                    this.toggle_artifact("proposal#plan".into(), true, cx)
-                });
-                draw(window, cx);
-                assert!(
-                    transcript.read(cx).list.offset_for_item(1) < preview_height,
-                    "document fold must actually collapse its layout"
-                );
-            });
-        }
-
-        #[test]
-        fn delivery_checklist_defaults_open_until_all_steps_complete() {
-            with_window(|transcript, window, cx| {
-                let make_entry = |done| {
-                    let mut part = tool_part("steps", "");
-                    if let MessagePart::Tool { call, .. } = &mut part {
-                        *call = ToolCall::Todo {
-                            items: ["Model and storage", "CLI commands", "Regression tests"]
-                                .into_iter()
-                                .map(|text| zeron_proto::TodoItem {
-                                    text: text.into(),
-                                    done,
-                                })
-                                .collect(),
-                        };
-                    }
-                    assistant("delivery", MessageStatus::Complete, vec![part])
-                };
-                transcript.update(cx, |this, cx| feed(this, vec![make_entry(false)], cx));
-                draw(window, cx);
-                let active_height = transcript.read(cx).list.offset_for_item(1);
-                transcript.update(cx, |this, cx| feed(this, vec![make_entry(true)], cx));
-                draw(window, cx);
-                let completed_height = transcript.read(cx).list.offset_for_item(1);
-                assert!(
-                    active_height > completed_height + px(50.0),
-                    "active checklist is readable; completed checklist is compact"
-                );
-                transcript.update(cx, |this, cx| {
-                    this.toggle_artifact("delivery#steps".into(), false, cx)
-                });
-                draw(window, cx);
-                assert!(
-                    transcript.read(cx).list.offset_for_item(1) > completed_height + px(50.0),
-                    "completed delivery steps can be reopened"
-                );
-            });
-        }
-
         // These exercise frame-by-frame geometry, including the first paint
         // after a row append. Eventual settling alone misses visible jumps.
         #[test]
@@ -10660,12 +8758,15 @@ mod tests {
             entries: Vec<SessionMessageEntry>,
             cx: &mut Context<Transcript>,
         ) {
-            this.state.update(cx, |state, _| {
-                state.selected_chat = Some("chat".into());
-                state.transcript_replayed = true;
-                state.transcript = entries;
-                state.transcript_revision += 1;
-            });
+            this.source
+                .native()
+                .expect("native test source")
+                .update(cx, |state, _| {
+                    state.selected_chat = Some("chat".into());
+                    state.transcript_replayed = true;
+                    state.transcript = entries;
+                    state.transcript_revision += 1;
+                });
             this.sync(cx);
         }
 
@@ -10791,18 +8892,19 @@ mod tests {
                 transcript.update(cx, |this, cx| {
                     feed(this, vec![prompt("prompt")], cx);
                     this.rail_enabled = false;
-                    this.state.update(cx, |state, _| {
-                        state.sessions.push(zeron_proto::Session {
-                            goal: None,
-                            goal_control: false,
-                            last_completed_turn: None,
-                            chat_id: "chat".into(),
-                            device_id: "test".into(),
-                            status: zeron_proto::SessionStatus::Working,
-                            started_at: Some(chrono::Utc::now()),
-                            updated_at: chrono::Utc::now(),
-                        })
-                    });
+                    this.source
+                        .native()
+                        .expect("native test source")
+                        .update(cx, |state, _| {
+                            state.sessions.push(zeron_proto::Session {
+                                last_completed_turn: None,
+                                chat_id: "chat".into(),
+                                device_id: "test".into(),
+                                status: zeron_proto::SessionStatus::Working,
+                                started_at: Some(chrono::Utc::now()),
+                                updated_at: chrono::Utc::now(),
+                            })
+                        });
                     this.on_own_send("chat".into(), "prompt".into(), cx);
                 });
                 let entries = |status, text: &str| {
@@ -11204,7 +9306,13 @@ mod tests {
                 assert!(!transcript.read(cx).own_turn.as_ref().unwrap().held);
                 let before = transcript.read(cx).list.logical_scroll_top();
                 transcript.update(cx, |this, cx| {
-                    let mut entries = this.state.read(cx).transcript.clone();
+                    let mut entries = this
+                        .source
+                        .native()
+                        .expect("native test source")
+                        .read(cx)
+                        .transcript
+                        .clone();
                     entries.push(assistant(
                         "reply",
                         MessageStatus::Streaming,
@@ -11414,7 +9522,13 @@ mod tests {
                         assert!(!transcript.read(cx).pinned);
                         let before = transcript.read(cx).list.logical_scroll_top();
                         transcript.update(cx, |this, cx| {
-                            let mut entries = this.state.read(cx).transcript.clone();
+                            let mut entries = this
+                                .source
+                                .native()
+                                .expect("native test source")
+                                .read(cx)
+                                .transcript
+                                .clone();
                             entries.push(assistant(
                                 "reply",
                                 MessageStatus::Streaming,
@@ -12018,7 +10132,7 @@ mod tests {
 
     #[test]
     fn tool_diff_builds_real_hunks_with_context_and_numbers() {
-        use crate::changes::LineKind;
+        use crate::changes::presentation::LineKind;
         let old = (1..=20).map(|i| format!("line {i}")).collect::<Vec<_>>();
         let mut new = old.clone();
         new[9] = "LINE 10".into();
@@ -12072,7 +10186,7 @@ mod tests {
         else {
             panic!("expected diff detail");
         };
-        assert_eq!(file.status, crate::changes::FileStatus::Added);
+        assert_eq!(file.status, crate::changes::presentation::FileStatus::Added);
         assert!(old_text.is_none());
         assert_eq!(new_text.as_deref(), Some("only\n"));
 
@@ -12292,19 +10406,6 @@ mod tests {
     }
 
     #[test]
-    fn file_action_badges_show_only_the_file_name() {
-        assert_eq!(file_badge_name("/Users/me/project/src/main.rs"), "main.rs");
-        assert_eq!(
-            file_badge_name("crates/ui/src/transcript.rs"),
-            "transcript.rs"
-        );
-        assert_eq!(file_badge_name(r"C:\project\src\main.rs"), "main.rs");
-        assert_eq!(file_badge_name("src/components/"), "components");
-        assert_eq!(file_badge_name("main.rs"), "main.rs");
-        assert_eq!(file_badge_name(""), "");
-    }
-
-    #[test]
     fn multiline_command_flattens_to_one_chip_line() {
         // The user's breaker: a multi-line script in a Run chip. The detail
         // must come out as ONE sanitized line — the chip's fixed 30px card
@@ -12478,107 +10579,6 @@ mod tests {
         assert_eq!(
             chips_height(3),
             CHIPS_TOP_PAD + 3.0 * CHIP_HEIGHT + 2.0 * CHIP_GAP
-        );
-    }
-
-    #[test]
-    fn tool_row_reveal_honors_delay_easing_and_reduced_motion() {
-        let epoch = Instant::now();
-        let start = epoch + Duration::from_millis(TOOL_ROW_STAGGER_MS);
-        assert_eq!(tool_row_reveal_progress(Some(start), epoch, false), 0.0);
-        let halfway = tool_row_reveal_progress(
-            Some(start),
-            start + Duration::from_millis(TOOL_ROW_REVEAL.duration_ms / 2),
-            false,
-        );
-        assert!(halfway > 0.5 && halfway < 1.0);
-        assert_eq!(
-            tool_row_reveal_progress(Some(start), start + TOOL_ROW_REVEAL.total(), false,),
-            1.0
-        );
-        assert_eq!(tool_row_reveal_progress(Some(start), epoch, true), 1.0);
-        assert_eq!(tool_row_reveal_progress(None, epoch, false), 1.0);
-    }
-
-    #[test]
-    fn tool_connector_draws_continuously_before_revealing_the_branch() {
-        let epoch = Instant::now();
-        let start = epoch + Duration::from_millis(TOOL_ROW_STAGGER_MS);
-        assert_eq!(
-            tool_connector_reveal_progress(Some(start), epoch, false),
-            0.0
-        );
-        assert_eq!(
-            tool_connector_reveal_progress(Some(start), epoch, true),
-            1.0
-        );
-        assert_eq!(tool_connector_reveal_progress(None, epoch, false), 1.0);
-        let halfway = tool_connector_reveal_progress(
-            Some(start),
-            start + Duration::from_millis(TOOL_CONNECTOR_REVEAL.duration_ms / 2),
-            false,
-        );
-        assert!(halfway > 0.9 && halfway < 1.0);
-
-        assert_eq!(tool_connector_parts(0.0, false), (0.0, 0.0));
-        assert_eq!(tool_connector_parts(0.44, true), (0.0, 0.0));
-        assert_eq!(tool_connector_continuation(Some(0.0)), 0.0);
-        assert!(tool_connector_continuation(Some(0.3)) > 0.0);
-        assert_eq!(tool_connector_continuation(Some(0.45)), 1.0);
-
-        let (incoming, branch) = tool_connector_parts(0.60, true);
-        assert!(incoming > 0.0 && incoming < 1.0);
-        assert_eq!(branch, 0.0);
-        assert_eq!(tool_connector_parts(1.0, true), (1.0, 1.0));
-        assert_eq!(tool_connector_continuation(None), 0.0);
-    }
-
-    #[test]
-    fn tool_branch_reveal_tracks_distance_through_the_bend() {
-        let length = |points: &[Point<f32>]| -> f32 {
-            points
-                .windows(2)
-                .map(|p| (p[1].x - p[0].x).hypot(p[1].y - p[0].y))
-                .sum()
-        };
-        let full = activity_branch_points(1.0);
-        assert_eq!(activity_branch_points(0.0), vec![point(0.0, 0.0)]);
-        let end = full.last().unwrap();
-        assert!((end.x - (ACTIVITY_BRANCH_END_X - ACTIVITY_TRUNK_X)).abs() < 0.0001);
-        assert!((end.y - ACTIVITY_BEND_RADIUS).abs() < 0.0001);
-        for progress in [0.1, 0.25, 0.5, 0.75, 0.9] {
-            let partial = activity_branch_points(progress);
-            assert!((length(&partial) / length(&full) - progress).abs() < 0.0001);
-            assert!(
-                partial
-                    .windows(2)
-                    .all(|p| p[1].x >= p[0].x && p[1].y >= p[0].y)
-            );
-        }
-    }
-
-    #[test]
-    fn tool_title_shimmer_crosses_the_title_without_a_loop_seam() {
-        assert_eq!(tool_title_shimmer_amount(0.5, 0.5), 1.0);
-        assert_eq!(tool_title_shimmer_amount(0.0, 0.5), 0.0);
-        assert_eq!(tool_title_shimmer_amount(1.0, 0.5), 0.0);
-        assert!(tool_title_shimmer_amount(0.3, 0.5) > 0.4);
-        assert!(tool_title_shimmer_amount(0.7, 0.5) > 0.4);
-        for x in [0.0, 0.25, 0.5, 0.75, 1.0] {
-            assert_eq!(
-                tool_title_shimmer_amount(x, 0.0),
-                tool_title_shimmer_amount(x, 1.0),
-                "the repeating background must meet itself at x={x}"
-            );
-        }
-
-        let start = Instant::now();
-        assert_eq!(tool_title_shimmer_phase(start, start), 0.0);
-        let halfway = start + TOOL_GROUP_SHIMMER_DURATION / 2;
-        assert!((tool_title_shimmer_phase(start, halfway) - 0.5).abs() < f32::EPSILON);
-        assert_eq!(
-            tool_title_shimmer_phase(start, start + TOOL_GROUP_SHIMMER_DURATION),
-            0.0
         );
     }
 

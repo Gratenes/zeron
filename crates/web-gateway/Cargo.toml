@@ -14,6 +14,7 @@ zeron-engine.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs"] }
 futures.workspace = true
 reqwest.workspace = true
 anyhow.workspace = true

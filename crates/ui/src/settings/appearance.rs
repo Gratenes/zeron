@@ -4,10 +4,18 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast as _, closure::Closure};
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
 use gpui::{
-    AnyElement, Context, Entity, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent,
-    ObjectFit, Render, SharedString, StyledImage as _, Subscription, Window, div, img, prelude::*,
-    px,
+    AnyElement, Context, Entity, FocusHandle, Focusable, Hsla, IntoElement, KeyDownEvent, Render,
+    SharedString, Subscription, Window, div, prelude::*, px,
 };
 use zeron_theme::vscode::{ImportReport, SourceCompilation};
 use zeron_theme::{
@@ -43,14 +51,13 @@ pub struct AppearancePage {
     size_focus: FocusHandle,
     font_menu: Popup<()>,
     size_menu: Popup<()>,
-    font_menu_dismissed_at: Option<std::time::Instant>,
-    size_menu_dismissed_at: Option<std::time::Instant>,
+    font_menu_dismissed_at: Option<Instant>,
+    size_menu_dismissed_at: Option<Instant>,
     light_theme_menu: Popup<()>,
     dark_theme_menu: Popup<()>,
     import_dialog: Option<ImportDialog>,
     review_entry: Option<String>,
     library_error: Option<SharedString>,
-    background_error: Option<SharedString>,
 }
 
 impl AppearancePage {
@@ -69,7 +76,6 @@ impl AppearancePage {
             import_dialog: None,
             review_entry: None,
             library_error: None,
-            background_error: None,
         }
     }
 
@@ -102,12 +108,12 @@ impl AppearancePage {
     }
 
     fn dismiss_font_menu(&mut self, cx: &mut Context<Self>) {
-        self.font_menu_dismissed_at = Some(std::time::Instant::now());
+        self.font_menu_dismissed_at = Some(Instant::now());
         self.close_font_menu(cx);
     }
 
     fn dismiss_size_menu(&mut self, cx: &mut Context<Self>) {
-        self.size_menu_dismissed_at = Some(std::time::Instant::now());
+        self.size_menu_dismissed_at = Some(Instant::now());
         self.close_size_menu(cx);
     }
 
@@ -308,6 +314,7 @@ impl AppearancePage {
         cx.notify();
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn compile_import(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = self.import_dialog.as_mut() else {
             return;
@@ -322,24 +329,38 @@ impl AppearancePage {
         let family_name = source_name(&path);
         let family_id = format!("custom-{}", slug(&family_name));
         match theme_library::compile(&path, &family_id, &family_name) {
-            Ok(compilation) => {
-                dialog.selected = compilation
-                    .family
-                    .variants
-                    .iter()
-                    .map(|variant| variant.id.clone())
-                    .collect();
-                // Mapping diagnostics are useful, but they are an advanced
-                // inspection surface rather than part of the happy path.
-                dialog.review_variant = None;
-                dialog.compilation = Some(compilation);
-                dialog.error = None;
+            Ok(compilation) => self.set_import_compilation(compilation, cx),
+            Err(error) => {
+                dialog.error = Some(error.to_string().into());
+                cx.notify();
             }
-            Err(error) => dialog.error = Some(error.to_string().into()),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn compile_import(&mut self, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.import_dialog.as_mut() {
+            dialog.error = Some("Choose a theme JSON file with Browse….".into());
         }
         cx.notify();
     }
 
+    fn set_import_compilation(&mut self, compilation: SourceCompilation, cx: &mut Context<Self>) {
+        if let Some(dialog) = self.import_dialog.as_mut() {
+            dialog.selected = compilation
+                .family
+                .variants
+                .iter()
+                .map(|variant| variant.id.clone())
+                .collect();
+            dialog.review_variant = None;
+            dialog.compilation = Some(compilation);
+            dialog.error = None;
+        }
+        cx.notify();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn choose_import_source(&mut self, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
@@ -367,38 +388,49 @@ impl AppearancePage {
         .detach();
     }
 
-    fn choose_new_thread_background(&mut self, cx: &mut Context<Self>) {
-        self.background_error = None;
-        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Choose New Thread Composer Background".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            let path = match receiver.await {
-                Ok(Ok(Some(mut paths))) => paths.pop(),
-                _ => None,
-            };
-            let Some(path) = path else {
-                return;
-            };
-            let _ = this.update(cx, |page, cx| {
-                page.background_error =
-                    crate::settings::install_new_thread_composer_background(&path, cx)
-                        .err()
-                        .map(SharedString::from);
+    #[cfg(target_arch = "wasm32")]
+    fn choose_import_source(&mut self, cx: &mut Context<Self>) {
+        let selected = match pick_browser_theme_file() {
+            Ok(selected) => selected,
+            Err(error) => {
+                if let Some(dialog) = self.import_dialog.as_mut() {
+                    dialog.error = Some(error.into());
+                }
                 cx.notify();
+                return;
+            }
+        };
+        cx.spawn(async move |this, cx| {
+            let selected = selected.await;
+            let _ = this.update(cx, |page, cx| match selected {
+                Ok(Some((name, bytes))) => {
+                    if let Some(dialog) = page.import_dialog.as_mut() {
+                        dialog
+                            .input
+                            .update(cx, |input, cx| input.set_text(name.clone(), cx));
+                    }
+                    let family_name = source_name(Path::new(&name));
+                    let family_id = format!("custom-{}", slug(&family_name));
+                    match theme_library::compile_bytes(&name, &bytes, &family_id, &family_name) {
+                        Ok(compilation) => page.set_import_compilation(compilation, cx),
+                        Err(error) => {
+                            if let Some(dialog) = page.import_dialog.as_mut() {
+                                dialog.error = Some(error.to_string().into());
+                            }
+                            cx.notify();
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if let Some(dialog) = page.import_dialog.as_mut() {
+                        dialog.error = Some(error.into());
+                    }
+                    cx.notify();
+                }
             });
         })
         .detach();
-    }
-
-    fn remove_new_thread_background(&mut self, cx: &mut Context<Self>) {
-        self.background_error = crate::settings::remove_new_thread_composer_background(cx)
-            .err()
-            .map(SharedString::from);
-        cx.notify();
     }
 
     fn finish_import(&mut self, cx: &mut Context<Self>) {
@@ -457,6 +489,74 @@ fn slug(value: &str) -> String {
     } else {
         result
     }
+}
+
+/// Open a browser file input and return the selected theme's actual bytes.
+/// Browser `File` objects are not host paths, so imported themes are always
+/// snapshots rather than reloadable links.
+#[cfg(target_arch = "wasm32")]
+fn pick_browser_theme_file()
+-> Result<impl std::future::Future<Output = Result<Option<(String, Vec<u8>)>, String>>, String> {
+    let window = web_sys::window().ok_or_else(|| "Browser window is unavailable.".to_string())?;
+    let document = window
+        .document()
+        .ok_or_else(|| "Browser document is unavailable.".to_string())?;
+    let body = document
+        .body()
+        .ok_or_else(|| "Browser document body is unavailable.".to_string())?;
+    let input: web_sys::HtmlInputElement = document
+        .create_element("input")
+        .map_err(|error| format!("Could not open the theme picker: {error:?}"))?
+        .dyn_into()
+        .map_err(|_| "Could not create the theme picker.".to_string())?;
+    input.set_type("file");
+    input.set_accept(".json,.jsonc,.code-theme");
+    input.set_hidden(true);
+    body.append_child(&input)
+        .map_err(|error| format!("Could not open the theme picker: {error:?}"))?;
+
+    let (sender, receiver) =
+        futures::channel::oneshot::channel::<Result<Option<web_sys::File>, String>>();
+    let sender = std::rc::Rc::new(RefCell::new(Some(sender)));
+    let change_sender = sender.clone();
+    let change_input = input.clone();
+    let change = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+        if let Some(sender) = change_sender.borrow_mut().take() {
+            let _ = sender.send(Ok(change_input.files().and_then(|files| files.item(0))));
+        }
+    }) as Box<dyn FnMut(_)>);
+    let cancel = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+        if let Some(sender) = sender.borrow_mut().take() {
+            let _ = sender.send(Ok(None));
+        }
+    }) as Box<dyn FnMut(_)>);
+    input
+        .add_event_listener_with_callback("change", change.as_ref().unchecked_ref())
+        .map_err(|error| format!("Could not open the theme picker: {error:?}"))?;
+    input
+        .add_event_listener_with_callback("cancel", cancel.as_ref().unchecked_ref())
+        .map_err(|error| format!("Could not open the theme picker: {error:?}"))?;
+    // Open before returning to the GPUI executor so browser user activation survives.
+    input.click();
+
+    Ok(async move {
+        let selected = receiver
+            .await
+            .map_err(|_| "The theme picker closed unexpectedly.".to_string())?;
+        let _ =
+            input.remove_event_listener_with_callback("change", change.as_ref().unchecked_ref());
+        let _ =
+            input.remove_event_listener_with_callback("cancel", cancel.as_ref().unchecked_ref());
+        let _ = body.remove_child(&input);
+        let Some(file) = selected? else {
+            return Ok(None);
+        };
+        let name = file.name();
+        let bytes = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+            .await
+            .map_err(|_| format!("{name} could not be read."))?;
+        Ok(Some((name, js_sys::Uint8Array::new(&bytes).to_vec())))
+    })
 }
 
 fn step_font(
@@ -579,46 +679,6 @@ fn surface_choice(
             control.hover(|style| style.bg(theme.surface_raised_hover))
         })
         .child(surface_label(surface))
-}
-
-fn background_effect_choice(
-    theme: &Theme,
-    effect: crate::settings::NewThreadBackgroundEffect,
-    selected: bool,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(SharedString::from(format!(
-            "new-thread-background-effect-{}",
-            effect.label().to_lowercase()
-        )))
-        .h(px(28.0))
-        .px(px(9.0))
-        .rounded(px(7.0))
-        .border_1()
-        .border_color(if selected { theme.accent } else { theme.border })
-        .bg(if selected {
-            theme.accent_wash
-        } else {
-            theme.surface_raised.opacity(0.28)
-        })
-        .text_size(crate::typography::ui_rems(11.0))
-        .font_weight(if selected {
-            gpui::FontWeight::MEDIUM
-        } else {
-            gpui::FontWeight::NORMAL
-        })
-        .text_color(if selected {
-            theme.accent
-        } else {
-            theme.text_muted
-        })
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .when(!selected, |control| {
-            control.hover(|style| style.bg(theme.surface_raised_hover))
-        })
-        .child(effect.label())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1210,6 +1270,7 @@ impl AppearancePage {
         let dialog = self.import_dialog.as_ref()?;
         let input = dialog.input.clone();
         let focus = dialog.focus.clone();
+        #[cfg(not(target_arch = "wasm32"))]
         let mode = dialog.mode;
         let compilation = dialog.compilation.clone();
         let selected = dialog.selected.clone();
@@ -1218,6 +1279,7 @@ impl AppearancePage {
         let ready = compilation.is_some() && !selected.is_empty();
         let hairline = crate::theme::hairline(0.08);
 
+        #[cfg(not(target_arch = "wasm32"))]
         let mode_control = |label: &'static str, description: &'static str, value: InstallMode| {
             let active = mode == value;
             div()
@@ -1325,8 +1387,11 @@ impl AppearancePage {
                             .flex_none()
                             .on_click(cx.listener(|this, _, _, cx| this.choose_import_source(cx))),
                     ),
-            )
-            .child(
+            );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            main = main.child(
                 div()
                     .mt(px(16.0))
                     .child(section_label("Keep it up to date"))
@@ -1346,6 +1411,19 @@ impl AppearancePage {
                             )),
                     ),
             );
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            main = main.child(
+                div()
+                    .mt(px(16.0))
+                    .text_size(crate::typography::ui_rems(11.0))
+                    .line_height(px(16.0))
+                    .text_color(theme.text_muted.opacity(0.72))
+                    .child("Browser imports are saved as independent copies."),
+            );
+        }
 
         if let Some(ref compilation) = compilation {
             main = main.child(
@@ -1990,9 +2068,6 @@ impl Render for AppearancePage {
         let current_themes = appearance::themes(cx);
         let current_accent = appearance::accent(cx);
         let current_surface = appearance::surface(cx);
-        let ui_settings = crate::settings::current(cx);
-        let current_background = ui_settings.new_thread_composer_background;
-        let current_background_effect = ui_settings.new_thread_background_effect;
         let cards = AppearanceMode::ALL
             .into_iter()
             .map(|mode| {
@@ -2130,159 +2205,6 @@ impl Render for AppearancePage {
                 )
                 .into_any_element(),
         );
-        let background_available = current_background
-            .as_ref()
-            .is_some_and(|background| Path::new(&background.path).is_file());
-        let background_tile: AnyElement = if let Some(background) =
-            current_background.as_ref().filter(|_| background_available)
-        {
-            div()
-                .flex_none()
-                .size(px(36.0))
-                .rounded(px(10.0))
-                .overflow_hidden()
-                .border_1()
-                .border_color(crate::theme::hairline(0.10))
-                .child(
-                    img(PathBuf::from(background.path.clone()))
-                        .size(px(34.0))
-                        .rounded(px(9.0))
-                        .object_fit(ObjectFit::Cover),
-                )
-                .into_any_element()
-        } else {
-            widgets::row_tile(&theme, icons::FILE_IMAGE).into_any_element()
-        };
-        let background_meta = match current_background.as_ref() {
-            Some(background) if background_available => vec![
-                div()
-                    .child(SharedString::from(background.name.clone()))
-                    .into_any_element(),
-                div()
-                    .child("Softened automatically on frosted themes.")
-                    .into_any_element(),
-            ],
-            Some(_) => vec![
-                div().child("Image unavailable").into_any_element(),
-                div()
-                    .child("Choose a replacement or remove it.")
-                    .into_any_element(),
-            ],
-            None => vec![
-                div()
-                    .child("Add an image behind the composer on empty new threads.")
-                    .into_any_element(),
-            ],
-        };
-        settings_rows.push(
-            widgets::card_row(&theme, false)
-                .child(background_tile)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(widgets::row_title(&theme, "New thread composer background"))
-                        .child(widgets::meta_line(&theme, background_meta)),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .ml(px(10.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .when(current_background.is_some(), |actions| {
-                            actions
-                                .child(
-                                    compact_action(
-                                        &theme,
-                                        "Replace image",
-                                        "new-thread-background-replace",
-                                    )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| this.choose_new_thread_background(cx),
-                                    )),
-                                )
-                                .child(
-                                    compact_action(
-                                        &theme,
-                                        "Remove",
-                                        "new-thread-background-remove",
-                                    )
-                                    .text_color(theme.danger)
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| this.remove_new_thread_background(cx),
-                                    )),
-                                )
-                        })
-                        .when(current_background.is_none(), |actions| {
-                            actions.child(
-                                compact_action(
-                                    &theme,
-                                    "Choose image",
-                                    "new-thread-background-choose",
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| this.choose_new_thread_background(cx),
-                                )),
-                            )
-                        }),
-                )
-                .into_any_element(),
-        );
-        if background_available {
-            let effect_controls = crate::settings::NewThreadBackgroundEffect::ALL
-                .into_iter()
-                .map(|effect| {
-                    background_effect_choice(&theme, effect, effect == current_background_effect)
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            crate::settings::set_new_thread_background_effect(effect, cx);
-                            cx.notify();
-                        }))
-                })
-                .collect::<Vec<_>>();
-            settings_rows.push(
-                widgets::card_row(&theme, false)
-                    .child(widgets::row_tile(&theme, icons::TUNING))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(widgets::row_title(&theme, "Background effect"))
-                            .child(widgets::meta_line(
-                                &theme,
-                                vec![
-                                    div()
-                                        .child(current_background_effect.description())
-                                        .into_any_element(),
-                                ],
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .ml(px(10.0))
-                            .max_w(px(430.0))
-                            .flex()
-                            .flex_wrap()
-                            .justify_end()
-                            .gap(px(6.0))
-                            .children(effect_controls),
-                    )
-                    .into_any_element(),
-            );
-        }
-        if let Some(error) = self.background_error.clone() {
-            settings_rows.push(
-                div()
-                    .px(px(20.0))
-                    .py(px(10.0))
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(widgets::error_strip(&theme, error))
-                    .into_any_element(),
-            );
-        }
         settings_rows.extend(self.render_theme_library_rows(&theme, cx));
         let library_warning = self
             .library_error

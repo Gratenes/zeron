@@ -298,6 +298,10 @@ fn main() -> anyhow::Result<()> {
                     .ok()
                     .and_then(|p| p.parse().ok())
                     .unwrap_or(27654),
+                edge_url: String::new(),
+                edge_token: None,
+                org_id: None,
+                workos_client_id: None,
                 default_harness: zeron_ui::HarnessId::ClaudeCode,
                 initial_url: cli.open_url,
             });

@@ -984,7 +984,9 @@ fn remotely_permitted(method: &str) -> bool {
     forwardable(method)
         || matches!(
             method,
-            methods::RELAY_COMMAND
+            methods::ENGINE_INFO
+                | methods::ENGINE_READY
+                | methods::RELAY_COMMAND
                 | methods::MUTATE
                 | methods::WATCH_CHATS
                 | methods::WATCH_DEVICES
@@ -1001,11 +1003,12 @@ impl RpcService for RemoteEngineRpc {
                 "method is available only over local IPC".into(),
             ));
         }
-        // A peer cannot use this engine as a confused deputy to route elsewhere.
+        // Remote callers may route only explicitly forwardable operations to a
+        // trusted device. Everything else remains pinned to this engine.
         if params
             .get("targetDeviceId")
             .and_then(|v| v.as_str())
-            .is_some_and(|target| target != self.0.doc_host.device_id())
+            .is_some_and(|target| target != self.0.doc_host.device_id() && !forwardable(method))
         {
             return Err(RpcError::BadParams(
                 "remote target does not name this device".into(),
@@ -2304,8 +2307,6 @@ mod tests {
     #[test]
     fn remote_surface_excludes_ipc_and_unknown_methods() {
         for method in [
-            methods::ENGINE_INFO,
-            methods::ENGINE_READY,
             methods::LOCAL_DEVICE,
             methods::STOP_ENGINE,
             methods::AUTH_STATUS,
@@ -2319,6 +2320,8 @@ mod tests {
             assert!(!remotely_permitted(method), "remotely exposed {method}");
         }
         for method in [
+            methods::ENGINE_INFO,
+            methods::ENGINE_READY,
             methods::RELAY_COMMAND,
             methods::MUTATE,
             methods::QUEUE_COMMAND,

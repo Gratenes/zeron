@@ -23,13 +23,11 @@ pub mod changes;
 mod comment_ui;
 pub mod comments;
 pub mod composer;
-mod composer_dock;
 mod context_usage;
 pub mod edge_fade;
 pub mod file_icons;
 pub mod files;
 pub mod frost;
-mod goal;
 pub mod history;
 pub mod icons;
 pub(crate) mod image_media;
@@ -38,9 +36,7 @@ pub mod links;
 pub mod loaders;
 pub mod markdown;
 pub mod motion;
-mod new_thread_background_effects;
 mod new_thread_background_image;
-mod new_thread_background_mask;
 pub mod notify;
 pub mod pickers;
 pub mod popover;
@@ -59,28 +55,24 @@ pub mod transcript;
 pub mod typography;
 mod workspace_links;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
+#[cfg(not(target_arch = "wasm32"))]
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 pub use state::EngineBootConfig;
-
 pub mod pairing;
 pub use zeron_proto::HarnessId;
 
-/// Whether a control whose primary action is click activation may also start
-/// a GPUI drag from the same hitbox. GPUI promotes pointer travel above 2 px
-/// to a drag. Normal Windows click jitter can cross that threshold, cancel the
-/// click, and leave the drag ghost following the pointer instead of activating
-/// the control. Drag-first controls (resize handles, scrollbars, queue rows)
-/// intentionally do not use this policy.
 pub(crate) const fn click_activation_drag_enabled() -> bool {
     !cfg!(target_os = "windows")
 }
 
-/// Shared contract between main-window creation and shell client-decoration chrome.
 pub(crate) const MAIN_WINDOW_RESIZABLE: bool = true;
+
+#[cfg(not(target_arch = "wasm32"))]
 
 /// Everything the headed binary passes in (config/env resolution lives in
 /// `apps/zeron`, not here).
@@ -90,21 +82,38 @@ pub struct UiConfig {
     pub data_dir: PathBuf,
     /// Localhost IPC port: connect if an engine daemon is listening, embed if not.
     pub ipc_port: u16,
+    /// Edge base URL for the embedded engine.
+    pub edge_url: String,
+    /// Edge bearer; `None` runs offline.
+    pub edge_token: Option<String>,
+    /// Workspace org override for explicit dev-mode runs.
+    pub org_id: Option<String>,
+    /// WorkOS client id; `Some` makes the embedded headed engine require a
+    /// production session before opening identity-scoped stores.
+    pub workos_client_id: Option<String>,
     /// Harness for doc-command runs until per-chat config lands (M4).
     pub default_harness: HarnessId,
     /// Conversation URL passed by the OS on a cold launch.
     pub initial_url: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+
 impl UiConfig {
     fn boot(&self) -> EngineBootConfig {
         EngineBootConfig {
             data_dir: self.data_dir.clone(),
             ipc_port: self.ipc_port,
+            edge_url: self.edge_url.clone(),
+            edge_token: self.edge_token.clone(),
+            org_id: self.org_id.clone(),
+            workos_client_id: self.workos_client_id.clone(),
             default_harness: self.default_harness,
         }
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
 
 /// What a dock-icon reopen needs to rebuild the main window after ⌘W closed it
 /// (macOS keeps the process alive with just the menu bar, like zed).
@@ -113,7 +122,11 @@ struct ReopenState {
     boot: EngineBootConfig,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+
 impl gpui::Global for ReopenState {}
+
+#[cfg(not(target_arch = "wasm32"))]
 
 /// Run the headed app: tokio bridge up, engine bootstrap kicked off (probe →
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
@@ -237,6 +250,7 @@ pub fn run_app(config: UiConfig) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// A clicked banner: bring Zeron forward on that chat through the sidebar's
 /// own path (chat route + composer focus), reopening the main window first if
 /// ⌘W closed it.
@@ -288,22 +302,21 @@ fn open_main_window(
                 // the titlebar, not the menu bar.
                 // macOS: frameless-inset chrome like the original Electron app
                 // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,15 —
-                // feature-inventory §1.1). The strip is custom-drawn. Windows
-                // still needs a native title for taskbar previews and Alt+Tab. On
+                // feature-inventory §1.1). No title text — the strip is
+                // custom-drawn (zed sets `title: None` the same way). On
                 // Linux/Windows `appears_transparent` hides the system titlebar
                 // for our custom-drawn chrome; harmless where unsupported.
                 titlebar: Some(TitlebarOptions {
-                    title: cfg!(target_os = "windows").then(|| "Zeron".into()),
+                    title: None,
                     appears_transparent: true,
-                    // Native lights are 14px tall: top 14 → center 21, matching
-                    // the 38px titlebar row with 4px top-only content padding.
+                    // Centered on the titlebar's content line (40px bar, content
+                    // shifted 4px down, lights ~12px tall → center 22).
                     traffic_light_position: Some(gpui::point(px(14.), px(14.))),
                 }),
                 // Our own titlebar strip drags the window (WindowControlArea::
                 // Drag + start_window_move) — mark the content view app-owned
                 // so AppKit neither dead-zones the strip nor delays clicks.
                 app_owns_titlebar_drag: true,
-                is_resizable: MAIN_WINDOW_RESIZABLE,
                 // Linux: request client-side decorations — zeron draws its own
                 // unified titlebar and (under CSD) its own caption buttons
                 // (shell.rs `render_linux_caption_controls`). Leaving this unset

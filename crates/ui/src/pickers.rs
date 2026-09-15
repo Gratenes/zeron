@@ -14,15 +14,19 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, SharedString,
     Subscription, Task, Window, div, prelude::*, px,
 };
 
-use zeron_engine::registry::HarnessDescriptor;
 use zeron_proto::{
-    ChatConfig, FolderListing, HarnessId, Model, ReasoningLevel, RepoRef, SandboxLevel, Space,
+    ChatConfig, FolderListing, HarnessDescriptor, HarnessId, Model, ReasoningLevel, RepoRef,
+    SandboxLevel, Space, descriptor_enabled,
 };
 use zeron_rpc::methods;
 
@@ -30,20 +34,6 @@ use zeron_rpc::methods;
 /// footer; a flat cap + "Showing X of Y refs" reads the same without
 /// pagination plumbing).
 const MAX_REF_ROWS: usize = 300;
-
-const FOOTER_CHIP_RADIUS: f32 = 6.0;
-
-/// Both sides of the composer handoff share one leading-aligned workspace
-/// cluster. Available width belongs after the pair, never between its labels.
-fn workspace_footer_row() -> gpui::Div {
-    div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-}
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion;
@@ -488,12 +478,6 @@ pub struct Pickers {
     model_rail: ModelRail,
     harnesses: Loadable<Vec<HarnessDescriptor>>,
     models: HashMap<HarnessId, Loadable<Vec<Model>>>,
-    /// Mimir's dependent traits are fetched only for the selected model. Keep
-    /// the catalog visible during refresh and coalesce picks while it loads.
-    mimir_model_selection: Option<String>,
-    /// Only a completed selected-model query can verify an empty effort ladder.
-    mimir_verified_model: Option<String>,
-    mimir_models_loading: bool,
     refs: Loadable<Vec<RepoRef>>,
     /// Space id the `refs` slot belongs to (invalidated on space change).
     refs_space: Option<String>,
@@ -607,9 +591,6 @@ impl Pickers {
                 // a space switch may land on another device, so refetch.
                 this.harnesses = Loadable::Idle;
                 this.models.clear();
-                this.mimir_model_selection = None;
-                this.mimir_verified_model = None;
-                this.mimir_models_loading = false;
                 this.catalog_rev += 1;
             }
             cx.notify();
@@ -662,9 +643,6 @@ impl Pickers {
             model_rail: ModelRail::default(),
             harnesses: Loadable::Idle,
             models: HashMap::new(),
-            mimir_model_selection: None,
-            mimir_verified_model: None,
-            mimir_models_loading: false,
             refs: Loadable::Idle,
             refs_space: None,
             active: 0,
@@ -779,15 +757,9 @@ impl Pickers {
                 None => self.defaults.reasoning,
             }
         });
-        let Some(model) = self.selected_model(cx) else {
-            return explicit;
-        };
-        if self.effective_harness(cx) == Some(HarnessId::Mimir)
-            && model.reasoning_levels.is_empty()
-            && self.mimir_verified_model.as_deref() != Some(model.id.as_str())
-        {
-            // Pending metadata hides menu choices, not the user's submitted
-            // intent. An explicit effort still rides a send during discovery.
+        if self.selected_model(cx).is_none() {
+            // Catalog not loaded yet: show the explicit value as-is (nothing
+            // to clamp against); it resolves to a concrete level on load.
             return explicit;
         }
         clamp_reasoning(explicit, &self.trait_ladder(cx))
@@ -1125,49 +1097,7 @@ impl Pickers {
         }
     }
 
-    fn model_catalog_selection(&self, harness: HarnessId, cx: &App) -> Option<String> {
-        if harness != HarnessId::Mimir || self.effective_harness(cx) != Some(harness) {
-            return None;
-        }
-        self.selected_model(cx)
-            .map(|model| model.id.as_str())
-            .or_else(|| self.effective_model_id(cx))
-            .map(str::to_owned)
-    }
-
-    fn accepts_model_response(
-        &mut self,
-        harness: HarnessId,
-        generation: u64,
-        selection: Option<&str>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.target_generation != generation {
-            return false;
-        }
-        if harness == HarnessId::Mimir {
-            self.mimir_models_loading = false;
-            if self.model_catalog_selection(harness, cx).as_deref() != selection {
-                // A pick made during Loading must get its own details. Never
-                // replace current rows with a response for the previous pick.
-                if matches!(self.models.get(&harness), Some(Loadable::Loading)) {
-                    self.models.insert(harness, Loadable::Idle);
-                }
-                self.ensure_models(harness, true, cx);
-                cx.notify();
-                return false;
-            }
-        }
-        true
-    }
-
     fn ensure_models(&mut self, harness: HarnessId, force: bool, cx: &mut Context<Self>) {
-        let selection = self.model_catalog_selection(harness, cx);
-        if harness == HarnessId::Mimir && self.mimir_models_loading {
-            return; // completion rechecks the current selection and refetches
-        }
-        let force =
-            force || (harness == HarnessId::Mimir && self.mimir_model_selection != selection);
         // Normal prefetches load absent/Idle slots once. Picker-open refreshes
         // also retry Ready/Error slots, while an in-flight load is always
         // reused. Ready rows stay visible until the replacement lands.
@@ -1184,19 +1114,12 @@ impl Pickers {
         };
         let target = self.space_target(cx);
         let generation = self.target_generation;
-        if harness == HarnessId::Mimir {
-            self.mimir_model_selection = selection.clone();
-            self.mimir_models_loading = true;
-        }
         if !matches!(self.models.get(&harness), Some(Loadable::Ready(_))) {
             self.models.insert(harness, Loadable::Loading);
             self.catalog_rev += 1;
         }
         cx.spawn(async move |this, cx| {
             let mut params = serde_json::json!({ "harness": harness });
-            if let Some(model) = &selection {
-                params["model"] = serde_json::Value::String(model.clone());
-            }
             if let (Some(target), Some(object)) = (&target, params.as_object_mut()) {
                 object.insert(
                     "targetDeviceId".into(),
@@ -1235,7 +1158,7 @@ impl Pickers {
                 cx.background_executor().timer(delay).await;
             }
             this.update(cx, |pickers, cx| {
-                if !pickers.accepts_model_response(harness, generation, selection.as_deref(), cx) {
+                if pickers.target_generation != generation {
                     return;
                 }
                 let loaded = match result {
@@ -1256,22 +1179,8 @@ impl Pickers {
                         pickers.save_defaults();
                     }
                 }
-                let catalog_ready = matches!(&loaded, Loadable::Ready(_));
                 pickers.models.insert(harness, loaded);
                 pickers.catalog_rev += 1;
-                // First catalog load may resolve the default row for the first
-                // time; enrich that row without enumerating every model.
-                if harness == HarnessId::Mimir {
-                    if catalog_ready {
-                        pickers.mimir_verified_model = selection.clone();
-                        pickers.ensure_models(harness, false, cx);
-                    } else {
-                        // An error can remove the default row from view. Do not
-                        // turn that into an automatic discovery/retry loop.
-                        pickers.mimir_model_selection =
-                            pickers.model_catalog_selection(harness, cx);
-                    }
-                }
                 // A list that landed while its popover is open re-anchors the
                 // keyboard highlight onto the selected row (it sat at 0 while
                 // loading).
@@ -1500,9 +1409,6 @@ impl Pickers {
                 self.save_defaults();
             }
         }
-        if self.effective_harness(cx) == Some(HarnessId::Mimir) {
-            self.ensure_models(HarnessId::Mimir, true, cx);
-        }
         cx.notify();
     }
 
@@ -1525,10 +1431,6 @@ impl Pickers {
         default: bool,
         cx: &mut Context<Self>,
     ) {
-        // Mode is session state: selecting Build must override a warm Plan
-        // session even when Build was the discovery session's default.
-        let default = default
-            && !(self.effective_harness(cx) == Some(HarnessId::Mimir) && option_id == "mimir.mode");
         if self.state.read(cx).selected_chat.is_some() {
             self.update_chat_config(cx, move |config| {
                 if default {
@@ -1592,7 +1494,6 @@ impl Pickers {
                 .map(|m| m.reasoning_levels.clone())
                 .unwrap_or_default();
             if ladder.is_empty()
-                && config.harness != HarnessId::Mimir
                 && let Some(descriptor) = self
                     .harnesses
                     .ready()
@@ -1641,9 +1542,7 @@ impl Pickers {
         let Some(model) = self.selected_model(cx) else {
             return Vec::new();
         };
-        if !model.reasoning_levels.is_empty()
-            || self.effective_harness(cx) == Some(HarnessId::Mimir)
-        {
+        if !model.reasoning_levels.is_empty() {
             return model.reasoning_levels.clone();
         }
         self.effective_harness(cx)
@@ -2348,39 +2247,7 @@ impl Pickers {
         // Ghost pill (zeron composer/styles.tsx `pill`): `h-8 rounded-lg px-2.5
         // gap-1.5 text-[12px] font-medium text-muted-foreground`, icons size-4,
         // hover/open wash — no border, no caret; the actions row stays quiet.
-        div()
-            .id(id)
-            .h(px(32.0))
-            .max_w(px(248.0))
-            // Shrinkable under row pressure — four footer chips share one
-            // line; without min_w_0 they overflowed and painted overlapped.
-            .min_w_0()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .px(px(10.0))
-            .rounded(px(8.0))
-            .text_size(crate::typography::ui_rems(12.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            // zeron composer/styles.tsx `pill`: `transition-colors` — the wash
-            // and text brighten fade over 150ms.
-            .text_color(motion::hover_blend(
-                id,
-                if set {
-                    theme.text.opacity(0.9)
-                } else {
-                    theme.text_muted
-                },
-                theme.text,
-            ))
-            .bg(if open {
-                theme.element_hover
-            } else {
-                motion::hover_blend(id, gpui::transparent_black(), theme.element_hover)
-            })
-            .on_hover(motion::hover_listener(id))
-            .cursor_pointer()
+        presentation::trigger_chip(id, set, open, theme)
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |this, _, _, _| {
@@ -2452,7 +2319,7 @@ impl Pickers {
             .items_center()
             .gap(px(6.0))
             .px(px(8.0))
-            .rounded(px(FOOTER_CHIP_RADIUS))
+            .rounded(px(6.0))
             .text_size(crate::typography::ui_rems(12.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(motion::hover_blend(
@@ -2477,14 +2344,12 @@ impl Pickers {
             .child(
                 crate::icons::icon(icon_path)
                     .size(px(12.0))
-                    .flex_none()
                     .text_color(theme.text_muted.opacity(0.7)),
             )
             .child(div().min_w_0().truncate().child(label))
             .child(
                 crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
                     .size(px(12.0))
-                    .flex_none()
                     .text_color(theme.text_muted.opacity(0.5)),
             )
     }
@@ -2516,9 +2381,11 @@ impl Pickers {
             .child(div().min_w_0().truncate().child(label))
     }
 
-    /// New-session destination controls. Machine and project form the
-    /// original chip-only cluster floating above the composer's trailing edge.
-    pub fn render_new_thread_target_selectors(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// The new-session target row — device + project selector chips rendered
+    /// ABOVE the composer pill, left-aligned like the checkout toolbar (the
+    /// composer footer carries only checkout + ref, and sessions show their
+    /// target in the titlebar instead).
+    pub fn render_target_selectors(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let closing = self.open.closing_since();
         let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
@@ -2569,12 +2436,17 @@ impl Pickers {
             &theme,
             cx,
         );
+        // Same left-edge geometry as the checkout toolbar under the pill
+        // (`render_footer`'s row): full-width, 10px inset, chips hugging the
+        // left. The row sits just above the composer pill, so the menus open
+        // UPWARD.
         div()
-            .flex_none()
+            .w_full()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(4.0))
+            .px(px(10.0))
             .child(attach_overlay(
                 device_chip,
                 &mut overlay,
@@ -2582,7 +2454,7 @@ impl Pickers {
                 "device-popover",
                 closing,
             ))
-            .child(attach_overlay_end(
+            .child(attach_overlay(
                 project_chip,
                 &mut overlay,
                 PickerKind::Space,
@@ -2592,77 +2464,10 @@ impl Pickers {
             .into_any_element()
     }
 
-    /// New-session Git controls. Checkout mode and branch form the original
-    /// chip-only cluster floating below the composer's leading edge.
-    pub fn render_new_thread_git_selectors(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let git = self
-            .state
-            .read(cx)
-            .selected_space_row()
-            .is_some_and(|space| space.git_detected);
-        if !git {
-            return None;
-        }
-        self.ensure_refs(false, cx);
-        let theme = Theme::of(cx).clone();
-        let closing = self.open.closing_since();
-        let mut overlay: Option<(PickerKind, AnyElement)> = match self.mounted_kind() {
-            Some(PickerKind::Branch) => {
-                let content = self.render_branch_popover(cx);
-                Some((PickerKind::Branch, self.popover_frame(320.0, content, cx)))
-            }
-            Some(PickerKind::Checkout) => {
-                let content = self.render_checkout_popover(cx);
-                Some((PickerKind::Checkout, self.popover_frame(224.0, content, cx)))
-            }
-            _ => None,
-        };
-        let kind_icon = match (self.config.checkout, self.selected_ref_worktree().is_some()) {
-            (CheckoutKind::Local, false) => crate::icons::FOLDER,
-            _ => crate::icons::FOLDER_WITH_FILES,
-        };
-        let checkout_chip = self.footer_chip(
-            PickerKind::Checkout,
-            "picker-checkout",
-            kind_icon,
-            SharedString::from(self.checkout_label()),
-            &theme,
-            cx,
-        );
-        let branch_chip = self.footer_chip(
-            PickerKind::Branch,
-            "picker-branch",
-            crate::icons::GIT_BRANCH,
-            self.ref_label(),
-            &theme,
-            cx,
-        );
-        Some(
-            workspace_footer_row()
-                .child(attach_overlay_below(
-                    checkout_chip,
-                    &mut overlay,
-                    PickerKind::Checkout,
-                    "checkout-popover",
-                    closing,
-                ))
-                .child(attach_overlay_below(
-                    branch_chip,
-                    &mut overlay,
-                    PickerKind::Branch,
-                    "branch-popover",
-                    closing,
-                ))
-                .into_any_element(),
-        )
-    }
-
     /// The composer footer row: checkout-kind + ref, LEFT-aligned, only when
-    /// the picked (or session's) project has git. New sessions use the floating
-    /// chip clusters; sessions name their target in the titlebar.
+    /// the picked (or session's) project has git. Device + project moved to
+    /// the row above the pill ([`Self::render_target_selectors`]); sessions
+    /// name their target in the titlebar.
     pub fn render_footer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
         // A selected chat whose workspace row hasn't synced yet (the moment
@@ -2682,15 +2487,22 @@ impl Pickers {
             (space, session, change_request)
         };
         let row = || {
-            // The composer owns the row's animated reveal and negative bottom
-            // margin. Keeping that geometry outside this reusable content
-            // lets the new-thread route handoff collapse the footer without
-            // clipping its controls or changing its steady-state spacing.
+            // Symmetric: the container's 8px gap sits above the toolbar;
+            // bleeding 8 of the container's 16px bottom padding (mb -8)
+            // leaves 8 below — equal air on both sides of the row.
             // `w_full` is load-bearing: without it the canvas layout sizes
             // the row to CONTENT, and the left cluster's flex_1 (basis 0)
             // collapsed to zero width — both clusters painted from the same
             // origin, chips overlapping (user report).
-            workspace_footer_row().px(px(10.0))
+            div()
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(8.0))
+                .px(px(10.0))
+                .mb(px(-8.0))
         };
 
         if let Some(chat) = &session {
@@ -2706,7 +2518,8 @@ impl Pickers {
             } else {
                 (crate::icons::FOLDER, "Local checkout")
             };
-            // Keep the same reading order and leading edge as the draft.
+            // Mirrors the draft chips: checkout hugs the left edge, ref the
+            // right.
             let left = div()
                 .flex()
                 .flex_row()
@@ -2723,6 +2536,14 @@ impl Pickers {
                 .items_center()
                 .gap(px(4.0))
                 .min_w_0()
+                .when_some(change_request, |el, summary| {
+                    el.child(crate::change_requests::pull_request_badge(
+                        "composer-pull-request".into(),
+                        summary,
+                        crate::change_requests::ChangeRequestBadgeSurface::Composer,
+                        &theme,
+                    ))
+                })
                 .child(Self::footer_label(
                     crate::icons::GIT_BRANCH,
                     chat.branch
@@ -2731,26 +2552,9 @@ impl Pickers {
                         .unwrap_or_else(|| SharedString::from("No ref")),
                     &theme,
                 ));
-            // Checkout + branch stay together. PR and usage form the trailing
-            // status group, independently of the branch label's length.
-            return Some(
-                row()
-                    .pr_0()
-                    .child(left)
-                    .child(right)
-                    .child(div().flex_1().min_w_0())
-                    .when_some(change_request, |el, summary| {
-                        el.child(div().flex_none().child(
-                            crate::change_requests::pull_request_badge(
-                                "composer-pull-request".into(),
-                                summary,
-                                crate::change_requests::ChangeRequestBadgeSurface::Composer,
-                                &theme,
-                            ),
-                        ))
-                    })
-                    .into_any_element(),
-            );
+            // The context indicator follows this footer in the composer;
+            // its own padding supplies the spacing after the branch label.
+            return Some(row().pr_0().child(left).child(right).into_any_element());
         }
 
         // New-session draft: checkout + ref only, LEFT-aligned (device +
@@ -2771,7 +2575,8 @@ impl Pickers {
                 let content = self.render_checkout_popover(cx);
                 Some((PickerKind::Checkout, self.popover_frame(224.0, content, cx)))
             }
-            // Space/Device popovers mount in the floating row above the pill.
+            // Space/Device popovers mount on the target row above the pill
+            // (`render_target_selectors`), not here.
             _ => None,
         };
 
@@ -2796,8 +2601,8 @@ impl Pickers {
             &theme,
             cx,
         );
-        // Match the floating draft's adjacent checkout/ref pair, including
-        // while the newly created session is waiting for its workspace row.
+        // Checkout on the left edge, ref on the right — the row's
+        // justify_between splits them (user request).
         let left = div()
             .flex()
             .flex_row()
@@ -2815,7 +2620,7 @@ impl Pickers {
             .flex_row()
             .items_center()
             .min_w_0()
-            .child(attach_overlay(
+            .child(attach_overlay_end(
                 ref_chip,
                 &mut overlay,
                 PickerKind::Branch,
@@ -2827,32 +2632,34 @@ impl Pickers {
 
     fn popover_frame(&self, width: f32, content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        popover::popover_card(&theme)
-            .w(px(width))
-            // zeron caps its tallest picker at min(640px, 75vh).
-            .max_h(px(640.0))
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.on_key_down(event, window, cx)
-            }))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    if this.is_open() && !this.focus.contains_focused(window, cx) {
-                        window.focus(&this.focus, cx);
+        popover::viewport_menu(
+            popover::popover_card(&theme)
+                .w(px(width))
+                // zeron caps its tallest picker at min(640px, 75vh).
+                .max_h(px(640.0))
+                .track_focus(&self.focus)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    this.on_key_down(event, window, cx)
+                }))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        if this.is_open() && !this.focus.contains_focused(window, cx) {
+                            window.focus(&this.focus, cx);
+                        }
+                    }),
+                )
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                    this.dismiss(cx);
+                    if this.focus.contains_focused(window, cx) {
+                        window.blur();
                     }
-                }),
-            )
-            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                this.dismiss(cx);
-                if this.focus.contains_focused(window, cx) {
-                    window.blur();
-                }
-            }))
-            .flex()
-            .flex_col()
-            .child(content)
-            .into_any_element()
+                }))
+                .flex()
+                .flex_col()
+                .child(div().flex_none().min_w_0().child(content)),
+        )
+        .into_any_element()
     }
 
     /// [`Self::popover_frame`] without the p-1 inset — the harness/model
@@ -2865,30 +2672,32 @@ impl Pickers {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        popover::popover_card_flush(&theme)
-            .w(px(width))
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.on_key_down(event, window, cx)
-            }))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    if this.is_open() && !this.focus.contains_focused(window, cx) {
-                        window.focus(&this.focus, cx);
+        popover::viewport_menu(
+            popover::popover_card_flush(&theme)
+                .w(px(width))
+                .track_focus(&self.focus)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    this.on_key_down(event, window, cx)
+                }))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        if this.is_open() && !this.focus.contains_focused(window, cx) {
+                            window.focus(&this.focus, cx);
+                        }
+                    }),
+                )
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                    this.dismiss(cx);
+                    if this.focus.contains_focused(window, cx) {
+                        window.blur();
                     }
-                }),
-            )
-            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                this.dismiss(cx);
-                if this.focus.contains_focused(window, cx) {
-                    window.blur();
-                }
-            }))
-            .flex()
-            .flex_col()
-            .child(content)
-            .into_any_element()
+                }))
+                .flex()
+                .flex_col()
+                .child(div().flex_none().min_w_0().child(content)),
+        )
+        .into_any_element()
     }
 
     fn search_box(&self, theme: &Theme) -> AnyElement {
@@ -2921,7 +2730,6 @@ impl Pickers {
                         PickerKind::HarnessModel => {
                             this.harnesses = Loadable::Idle;
                             this.models.clear();
-                            this.mimir_verified_model = None;
                             this.catalog_rev += 1;
                             this.ensure_harnesses(false, cx);
                         }
@@ -3325,16 +3133,7 @@ impl Pickers {
         //    viewed tab wears a 2px accent bar sitting on the row's bottom
         //    hairline. Tabs never hide: a live search only filters the
         //    viewed tab's list, so switching tabs re-scopes the same query.
-        let mut tabs = div()
-            .flex_none()
-            .h(px(40.0))
-            .px(px(6.0))
-            .border_b_1()
-            .border_color(crate::theme::hairline(0.08))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(2.0));
+        let mut tabs = presentation::models::tabs();
         tabs = tabs.child(
             div()
                 .id("model-tab-favorites")
@@ -3374,65 +3173,26 @@ impl Pickers {
             let harness = descriptor.id;
             let is_viewed = !favorites_view && effective == Some(harness);
             let is_disabled = locked && effective != Some(harness);
-            let (icon_path, tint) = harness_brand_icon(harness);
-            tabs =
-                tabs.child(
-                    div()
-                        .id(("harness-tab", ix))
-                        .relative()
-                        .w(px(32.0))
-                        .h(px(32.0))
-                        .rounded(px(8.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .when(is_disabled, |el| el.opacity(0.35))
-                        .when(!is_disabled, |el| el.cursor_pointer())
-                        .when(!is_disabled && !is_viewed, |el| {
-                            el.hover(|s| s.bg(crate::theme::ink(0.06)))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.model_rail = ModelRail::Harness;
-                            this.pick_harness(harness, cx);
-                            cx.notify();
-                        }))
-                        .child(crate::icons::icon(icon_path).size(px(16.0)).text_color(
-                            tint.unwrap_or(if is_viewed {
-                                theme.text
-                            } else {
-                                theme.text_muted
-                            }),
-                        ))
-                        .when(is_viewed, |el| el.child(tab_indicator(theme.accent))),
-                );
+            tabs = tabs.child(
+                presentation::models::harness_tab(
+                    ("harness-tab", ix),
+                    harness,
+                    is_viewed,
+                    is_disabled,
+                    &theme,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.model_rail = ModelRail::Harness;
+                    this.pick_harness(harness, cx);
+                    cx.notify();
+                })),
+            );
         }
 
         // ── search row: icon + borderless input over a full-bleed hairline.
         //    The placeholder names the scope — the query never leaves the
         //    viewed tab (user request; the old global search hid the rail).
-        let search_row = div()
-            .flex_none()
-            .h(px(40.0))
-            .px(px(10.0))
-            .border_b_1()
-            .border_color(crate::theme::hairline(0.08))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .child(
-                crate::icons::icon(crate::icons::MAGNIFER)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(theme.text_muted.opacity(0.7)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .child(self.search.clone()),
-            );
+        let search_row = presentation::models::search_row(self.search.clone(), &theme);
 
         // ── model rows: a VIRTUALIZED uniform list — only the visible slice
         //    renders, so a 7k-model catalog scrolls as smoothly as seven
@@ -3498,15 +3258,7 @@ impl Pickers {
         };
 
         let model_scrollbar = self.render_model_scrollbar(&theme, cx);
-        let list_host = div()
-            .id("model-list-scroll-host")
-            .relative()
-            .flex_none()
-            .h(px(LIST_HEIGHT))
-            .py(px(6.0))
-            // A whisper of wash keeps the scrolling band readable between
-            // the pinned chrome above and the traits tray below.
-            .bg(crate::theme::ink(0.02))
+        let list_host = presentation::models::list_host()
             .on_hover(cx.listener(Self::on_model_list_hover))
             .child(match model_list {
                 Some(list) => list,
@@ -3549,12 +3301,7 @@ impl Pickers {
                 .into_any_element()
         });
 
-        div()
-            .flex()
-            .flex_col()
-            .child(tabs)
-            .child(search_row)
-            .child(list_host)
+        presentation::models::content(tabs, search_row, list_host)
             .children(tray)
             .into_any_element()
     }
@@ -3594,27 +3341,7 @@ impl Pickers {
             .filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case(harness_name.as_ref()))
             .map(|d| SharedString::from(d.to_owned()));
         let compact = self.model_rail == ModelRail::Harness;
-        let mut el = div()
-            .id(("model-row", ix))
-            .px(px(8.0))
-            .py(px(if compact { 5.0 } else { 6.0 }))
-            .rounded(px(6.0))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(10.0))
-            .cursor_pointer();
-        // ONE moving highlight (t3/Base-UI combobox): hovering moves the
-        // keyboard cursor instead of painting its own wash, so hover + arrow
-        // cursor can never wear two washes at once. Selection is the
-        // distinct stronger treatment (wash + ring).
-        if is_selected {
-            el = el
-                .bg(crate::theme::card_selected_bg())
-                .shadow(crate::theme::card_selected_shadows());
-        } else if is_active {
-            el = el.bg(crate::theme::ink(0.05));
-        }
+        let mut el = presentation::models::row(ix, compact, is_selected, is_active);
         el = el.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
             if *hovered && this.active != ix {
                 this.active = ix;
@@ -3628,34 +3355,7 @@ impl Pickers {
         // visible). The favorites tab mixes harnesses and keeps the
         // two-line layout with the brand subline.
         let body: AnyElement = if compact {
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex_none()
-                        .max_w_full()
-                        .truncate()
-                        .text_size(crate::typography::ui_rems(12.5))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(label),
-                )
-                .when_some(attribution, |el, attribution| {
-                    el.child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_muted.opacity(0.7))
-                            .child(attribution),
-                    )
-                })
-                .into_any_element()
+            presentation::models::compact_body(label, attribution, &theme)
         } else {
             div()
                 .flex_1()
@@ -3937,17 +3637,7 @@ fn scoped_model_rows<'a>(
                 if !in_scope(descriptor, model) {
                     continue;
                 }
-                let by_label = popover::match_rank(query, &model.label);
-                let by_description = popover::match_rank(
-                    query,
-                    &format!(
-                        "{} {}",
-                        model.description.as_deref().unwrap_or(""),
-                        model.label
-                    ),
-                )
-                .map(|rank| rank + 2);
-                if let Some(rank) = by_label.into_iter().chain(by_description).min() {
+                if let Some(rank) = presentation::models::match_rank(query, model) {
                     let starred = !is_favorite(descriptor.id, &model.id);
                     ranked.push((rank, starred as usize, input_ix, row(descriptor, model)));
                 }
@@ -3991,17 +3681,7 @@ fn scoped_model_rows<'a>(
     }
 }
 
-/// Centered muted note filling an empty model list ("No models found").
-fn empty_list_note(theme: &Theme, copy: &str) -> AnyElement {
-    div()
-        .px(px(8.0))
-        .py(px(24.0))
-        .text_size(crate::typography::ui_rems(12.0))
-        .text_color(theme.text_muted.opacity(0.6))
-        .text_center()
-        .child(SharedString::from(copy.to_string()))
-        .into_any_element()
-}
+use presentation::models::empty_list_note;
 
 /// Display-side model-list hygiene, mirroring the engine's discovery-side
 /// fold (`models_from_session`) for catalogs served by OLDER engines (the
@@ -4022,8 +3702,11 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
             .collect::<String>()
             .to_ascii_lowercase()
     }
-    let catalog = match harness {
+    let catalog: Vec<Model> = match harness {
+        #[cfg(not(target_arch = "wasm32"))]
         HarnessId::ClaudeCode => zeron_harness::claude::catalog::static_models(),
+        #[cfg(target_arch = "wasm32")]
+        HarnessId::ClaudeCode => Vec::new(),
         _ => Vec::new(),
     };
     // Curated label for an id: exact normalized match, else — for bare
@@ -4089,26 +3772,8 @@ pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Ve
         .collect()
 }
 
-pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
-    match harness {
-        HarnessId::ClaudeCode | HarnessId::Mock => (
-            crate::icons::CLAUDE_MARK,
-            Some(crate::icons::claude_brand()),
-        ),
-        HarnessId::Codex => (crate::icons::OPENAI_MARK, None),
-        HarnessId::Cursor => (crate::icons::CURSOR_MARK, None),
-        // Cognition's mark (the Devin product icon), monochrome.
-        HarnessId::Devin => (crate::icons::DEVIN_MARK, None),
-        // Monochrome mark, tinted by the surface like OpenAI's.
-        HarnessId::Grok => (crate::icons::GROK_MARK, None),
-        // Nous Research's mark (the Hermes product icon), monochrome.
-        HarnessId::Hermes => (crate::icons::HERMES_MARK, None),
-        HarnessId::Pi => (crate::icons::PI_MARK, None),
-        HarnessId::Mimir => (crate::icons::MIMIR_MARK, None),
-        // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
-        HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
-    }
-}
+pub(crate) mod presentation;
+pub(crate) use presentation::harness_brand_icon;
 
 /// `ZERON_HARNESS=mock` (the e2e/dev rig) opts the mock harness into the UI;
 /// production launches never set it, so the mock never surfaces there.
@@ -4158,20 +3823,18 @@ fn offered_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<H
     visible_harnesses_impl(list, allow_mock)
         .into_iter()
         .filter(|d| {
-            d.installed
-                && (zeron_engine::registry::descriptor_enabled(d)
-                    || (allow_mock && d.id == HarnessId::Mock))
+            d.installed && (descriptor_enabled(d) || (allow_mock && d.id == HarnessId::Mock))
         })
         .collect()
 }
 
-/// Attach the (single) open popover above a selector trigger.
+/// Attach the (single) open popover overlay to its trigger chip.
 fn attach_overlay(
     chip: gpui::Stateful<gpui::Div>,
     overlay: &mut Option<(PickerKind, AnyElement)>,
     kind: PickerKind,
     id: &'static str,
-    closing: Option<std::time::Instant>,
+    closing: Option<Instant>,
 ) -> gpui::Stateful<gpui::Div> {
     if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
         && let Some((_, element)) = overlay.take()
@@ -4181,30 +3844,14 @@ fn attach_overlay(
     chip
 }
 
-/// Attach the (single) open popover below a selector trigger.
-fn attach_overlay_below(
-    chip: gpui::Stateful<gpui::Div>,
-    overlay: &mut Option<(PickerKind, AnyElement)>,
-    kind: PickerKind,
-    id: &'static str,
-    closing: Option<std::time::Instant>,
-) -> gpui::Stateful<gpui::Div> {
-    if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
-        && let Some((_, element)) = overlay.take()
-    {
-        return chip.child(popover::anchored_menu_below(id, element, closing));
-    }
-    chip
-}
-
-/// Attach the menu ABOVE and RIGHT-ALIGNED to the trigger (t3code
-/// `align="end"` — right-edge controls like the model picker open leftward).
+/// [`attach_overlay`] with the menu RIGHT-ALIGNED to the trigger (t3code
+/// `align="end"` — right-edge triggers like the ref picker open leftward).
 fn attach_overlay_end(
     chip: gpui::Stateful<gpui::Div>,
     overlay: &mut Option<(PickerKind, AnyElement)>,
     kind: PickerKind,
     id: &'static str,
-    closing: Option<std::time::Instant>,
+    closing: Option<Instant>,
 ) -> gpui::Stateful<gpui::Div> {
     if overlay.as_ref().is_some_and(|(k, _)| *k == kind)
         && let Some((_, element)) = overlay.take()
@@ -4432,93 +4079,6 @@ impl Render for Pickers {
 mod tests {
     use super::*;
     use zeron_proto::{FolderEntry, Model, ModelOption, ModelOptionChoice};
-
-    #[test]
-    fn mimir_identity_uses_its_own_mark_and_standard_catalog_gates() {
-        assert_eq!(
-            harness_brand_icon(HarnessId::Mimir),
-            (crate::icons::MIMIR_MARK, None)
-        );
-        assert_eq!(
-            crate::settings::harnesses::cli_name(HarnessId::Mimir),
-            "mimir"
-        );
-        let mut descriptor = HarnessDescriptor {
-            id: HarnessId::Mimir,
-            name: "Mimir".into(),
-            supports_steering: true,
-            steering_mode: zeron_proto::SteeringMode::TurnBoundary,
-            reasoning_levels: vec![],
-            installed: true,
-            enabled: Some(true),
-        };
-        assert_eq!(
-            visible_harnesses_impl(&[descriptor.clone()], false)[0].id,
-            HarnessId::Mimir
-        );
-        assert_eq!(
-            offered_harnesses_impl(&[descriptor.clone()], false)[0].id,
-            HarnessId::Mimir
-        );
-        descriptor.enabled = Some(false);
-        assert!(offered_harnesses_impl(&[descriptor.clone()], false).is_empty());
-        descriptor.enabled = Some(true);
-        descriptor.installed = false;
-        assert!(offered_harnesses_impl(&[descriptor], false).is_empty());
-    }
-
-    #[gpui::test]
-    fn workspace_footer_pair_keeps_its_leading_edge_and_gap(cx: &mut gpui::TestAppContext) {
-        struct Fixture {
-            width: f32,
-            bounds: std::rc::Rc<std::cell::RefCell<Vec<gpui::Bounds<gpui::Pixels>>>>,
-        }
-        impl gpui::Render for Fixture {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let chip = |width| {
-                    let measured = self.bounds.clone();
-                    gpui::canvas(
-                        move |bounds, _, _| measured.borrow_mut().push(bounds),
-                        |_, _, _, _| {},
-                    )
-                    .w(px(width))
-                    .h(px(20.0))
-                    .flex_none()
-                };
-                div().w(px(self.width)).child(
-                    workspace_footer_row()
-                        .px(px(10.0))
-                        .child(chip(120.0))
-                        .child(chip(90.0))
-                        .child(div().flex_1().min_w_0())
-                        .child(chip(60.0)),
-                )
-            }
-        }
-        let bounds = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let handle = cx.add_window(|_, _| Fixture {
-            width: 320.0,
-            bounds: bounds.clone(),
-        });
-        let mut first_left = None;
-        for width in [320.0, 680.0, 1000.0, 320.0] {
-            handle
-                .update(cx, |fixture, _, cx| {
-                    fixture.width = width;
-                    cx.notify();
-                })
-                .unwrap();
-            bounds.borrow_mut().clear();
-            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
-                .unwrap();
-            let measured = bounds.borrow();
-            let pair = &measured[measured.len() - 3..];
-            assert_eq!(pair[0].left(), *first_left.get_or_insert(pair[0].left()));
-            assert!((f32::from(pair[1].left() - pair[0].right()) - 4.0).abs() < 0.1);
-            assert_eq!(pair[0].top(), pair[1].top());
-            assert!((f32::from(pair[2].right() - pair[0].left()) - (width - 20.0)).abs() < 0.1);
-        }
-    }
 
     #[gpui::test]
     fn picker_completion_and_dismissal_have_distinct_focus_behavior(cx: &mut gpui::TestAppContext) {
@@ -5141,121 +4701,6 @@ mod tests {
         assert!(default_model(&[]).is_none());
     }
 
-    #[gpui::test]
-    fn mimir_model_refresh_rejects_old_selection_and_old_device_responses(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let state = cx.new(|_| AppState::new());
-        let pickers = cx.new(|cx| Pickers::new(state, cx));
-        pickers.update(cx, |pickers, cx| {
-            pickers.config.harness = Some(HarnessId::Mimir);
-            pickers.config.model = Some("provider/a".into());
-            assert_eq!(
-                pickers
-                    .model_catalog_selection(HarnessId::Mimir, cx)
-                    .as_deref(),
-                Some("provider/a")
-            );
-            assert_eq!(pickers.model_catalog_selection(HarnessId::Codex, cx), None);
-            pickers.models.insert(HarnessId::Mimir, Loadable::Loading);
-            pickers.mimir_model_selection = Some("provider/a".into());
-            pickers.mimir_models_loading = true;
-            pickers.pick_model("provider/b".into(), cx);
-            assert!(
-                pickers.mimir_models_loading,
-                "a pick coalesces behind the in-flight request"
-            );
-            assert_eq!(pickers.mimir_model_selection.as_deref(), Some("provider/a"));
-            assert!(!pickers.accepts_model_response(HarnessId::Mimir, 0, Some("provider/a"), cx));
-            assert_eq!(
-                pickers
-                    .model_catalog_selection(HarnessId::Mimir, cx)
-                    .as_deref(),
-                Some("provider/b")
-            );
-            assert!(
-                matches!(pickers.models.get(&HarnessId::Mimir), Some(Loadable::Idle)),
-                "stale Loading response leaves a reloadable slot"
-            );
-
-            // A reply from the old device must not clear the new device's load.
-            pickers.target_generation = 1;
-            pickers.mimir_models_loading = true;
-            pickers.models.insert(HarnessId::Mimir, Loadable::Loading);
-            assert!(!pickers.accepts_model_response(HarnessId::Mimir, 0, Some("provider/b"), cx));
-            assert!(pickers.mimir_models_loading);
-            assert!(pickers.accepts_model_response(HarnessId::Mimir, 1, Some("provider/b"), cx));
-            assert!(!pickers.mimir_models_loading);
-
-            let model: Model = serde_json::from_value(serde_json::json!({
-                "id": "provider/b", "label": "B", "reasoningLevels": ["off", "high"]
-            }))
-            .unwrap();
-            pickers
-                .models
-                .insert(HarnessId::Mimir, Loadable::Ready(vec![model]));
-            assert!(!pickers.accepts_model_response(HarnessId::Mimir, 1, Some("provider/a"), cx));
-            assert_eq!(
-                pickers.trait_ladder(cx),
-                vec![ReasoningLevel::Off, ReasoningLevel::High],
-                "stale refresh leaves the current catalog intact"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn mimir_unverified_model_does_not_inherit_the_global_effort_ladder(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let state = cx.new(|_| AppState::new());
-        let pickers = cx.new(|cx| Pickers::new(state, cx));
-        pickers.update(cx, |pickers, cx| {
-            pickers.config.harness = Some(HarnessId::Mimir);
-            pickers.models.insert(
-                HarnessId::Mimir,
-                Loadable::Ready(vec![Model {
-                    id: "chatgpt/gpt-5.6-luna".into(),
-                    label: "Luna".into(),
-                    description: None,
-                    reasoning_levels: vec![],
-                    options: vec![],
-                }]),
-            );
-            pickers.harnesses = Loadable::Ready(vec![HarnessDescriptor {
-                id: HarnessId::Mimir,
-                name: "Mimir".into(),
-                supports_steering: true,
-                steering_mode: zeron_proto::SteeringMode::TurnBoundary,
-                reasoning_levels: vec![ReasoningLevel::Off, ReasoningLevel::High],
-                installed: true,
-                enabled: Some(true),
-            }]);
-            assert!(
-                pickers.trait_ladder(cx).is_empty(),
-                "unverified per-model efforts are not offered"
-            );
-        });
-    }
-
-    #[test]
-    fn mimir_off_reasoning_is_an_explicit_visible_choice() {
-        use ReasoningLevel::*;
-        let model: Model = serde_json::from_value(serde_json::json!({
-            "id": "chatgpt/gpt-5.6-luna", "label": "Luna",
-            "reasoningLevels": ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
-        }))
-        .unwrap();
-        let ladder = model.reasoning_levels;
-        assert_eq!(reasoning_label(Off), "Off");
-        assert_eq!(clamp_reasoning(Some(Off), &ladder), Some(Off));
-        assert_eq!(clamp_reasoning(None, &ladder), Some(High));
-        assert_eq!(clamp_reasoning(Some(Off), &[Low, Medium, High]), Some(High));
-        assert_eq!(
-            traits_summary(None, Some(Off), &serde_json::Map::new()),
-            Some("Off".to_owned())
-        );
-    }
-
     #[test]
     fn default_reasoning_prefers_high_then_medium() {
         use ReasoningLevel::*;
@@ -5284,96 +4729,6 @@ mod tests {
         // No pick at all resolves to the concrete default too.
         assert_eq!(clamp_reasoning(None, &ladder), Some(High));
         assert_eq!(clamp_reasoning(Some(High), &[]), None);
-    }
-
-    #[gpui::test]
-    fn mimir_submit_during_delayed_details_keeps_saved_model_and_medium(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let state = cx.new(|_| AppState::new());
-        let pickers = cx.new(|cx| Pickers::new(state, cx));
-        pickers.update(cx, |pickers, cx| {
-            let id = "chatgpt/gpt-5.6-luna";
-            pickers.defaults.harness = Some(HarnessId::Mimir);
-            pickers
-                .defaults
-                .remember_model(HarnessId::Mimir, id.into(), "Luna".into());
-            pickers.defaults.reasoning = Some(ReasoningLevel::Medium);
-            pickers.models.insert(
-                HarnessId::Mimir,
-                Loadable::Ready(vec![Model {
-                    id: id.into(),
-                    label: "Luna".into(),
-                    description: None,
-                    reasoning_levels: vec![],
-                    options: vec![],
-                }]),
-            );
-            pickers.mimir_models_loading = true;
-            pickers.mimir_model_selection = Some(id.into());
-            assert!(
-                pickers.trait_ladder(cx).is_empty(),
-                "pending details must not offer unverified choices"
-            );
-            // This is the exact resolved payload consumed by composer submit,
-            // not the label or menu state.
-            let submitted = pickers.resolved(cx).chat_config().unwrap();
-            assert_eq!(submitted.model.as_deref(), Some(id));
-            assert_eq!(submitted.reasoning, Some(ReasoningLevel::Medium));
-            assert_eq!(
-                serde_json::to_value(submitted).unwrap()["reasoning"],
-                "medium"
-            );
-            // A verified empty ladder is different: the selected model really
-            // has no reasoning control, so the resolved submission omits it.
-            pickers.mimir_models_loading = false;
-            pickers.mimir_verified_model = Some(id.into());
-            assert_eq!(pickers.resolved(cx).reasoning, None);
-        });
-    }
-
-    #[gpui::test]
-    fn mimir_build_pick_is_explicit_in_resumed_chat_run_config(cx: &mut gpui::TestAppContext) {
-        let state = cx.new(|_| {
-            let mut state = AppState::new();
-            state.chats.push(
-                serde_json::from_value(serde_json::json!({
-                    "id": "mode-chat", "deviceId": "local", "archived": false,
-                    "createdAt": "2026-09-12T00:00:00Z",
-                    "config": {"harness": "mimir", "model": "chatgpt/gpt-5.6-luna",
-                               "reasoning": "medium", "sandbox": "workspace-write",
-                               "modelOptions": {"mimir.mode": "mode-plan"}}
-                }))
-                .unwrap(),
-            );
-            state.selected_chat = Some("mode-chat".into());
-            state
-        });
-        let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
-        pickers.update(cx, |pickers, cx| {
-            pickers.pick_option("mimir.mode".into(), "mode-build".into(), true, cx);
-            let submitted = pickers.resolved(cx).chat_config().unwrap();
-            assert_eq!(
-                submitted.model_options.get("mimir.mode"),
-                Some(&serde_json::json!("mode-build"))
-            );
-            assert_eq!(
-                state
-                    .read(cx)
-                    .selected_chat_row()
-                    .unwrap()
-                    .config
-                    .as_ref()
-                    .unwrap()
-                    .model_options,
-                submitted.model_options,
-                "the optimistic persisted row must retain the explicit Build choice"
-            );
-            assert_eq!(
-                serde_json::to_value(submitted).unwrap()["modelOptions"]["mimir.mode"],
-                "mode-build"
-            );
-        });
     }
 
     #[test]

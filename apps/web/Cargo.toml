@@ -1,0 +1,36 @@
+[workspace]
+
+[package]
+name = "zeron-browser"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+strip = "symbols"
+opt-level = "s"
+
+[dependencies]
+zeron-ui = { path = "../../crates/ui" }
+zeron-proto = { path = "../../crates/proto" }
+zeron-rpc = { path = "../../crates/rpc", default-features = false, features = ["client"] }
+gpui = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_platform = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "Node", "HtmlElement", "Location", "WebSocket", "BinaryType", "MessageEvent", "Event", "CloseEvent", "ErrorEvent", "Request", "RequestInit", "Response", "Headers"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-wasm-bindgen = "0.6"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+[patch."https://github.com/zeronsh/zui"]
+gpui = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_macros = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_platform = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_tokio = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_web = { git = "https://github.com/Gratenes/zui", rev = "c0a25683519a5b87be45de544fff0a40e1946eb1" }

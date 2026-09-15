@@ -97,6 +97,7 @@ not built yet).
 
 ## Deferred (cross-cutting)
 
+- **Web UI follow-ups** — image preview fails for images already present in a chat; text paste and image paste do not reach the browser composer; device and agent-tab presence indicators must reflect live peer connectivity rather than stale registry metadata.
 - **Mobile platform execution** — iOS native bridge and storage code are present; App Store/device validation remains platform-gated.
 - **Content encryption beyond transport** — Tailcat/WireGuard encrypts traffic between
   nodes and application authentication authorizes every peer route. Data is not

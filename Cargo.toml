@@ -63,14 +63,14 @@ loro = "1.13"
 # b68970e rasterizes BackdropBlur in the wgpu renderer (frosted floats on
 # Linux — the Metal path's snapshot/blur/composite, ported).
 # Paint-time rounded image masks (zeronsh/zui#9); includes our Windows DirectX fix.
-gpui = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui_platform = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2", features = [
+gpui = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_platform = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb", features = [
     "wayland",
     "x11",
     "font-kit",
     "runtime_shaders",
 ] }
-gpui_tokio = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
+gpui_tokio = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
 # Keep gpui-base and the app on the same Zui revision to share GPUI types.
 gpui-base = { git = "https://github.com/zeronsh/gpui-component", rev = "94c1bbaf6311b9f36f5e7438aaf5aeadd38740da" }
 
@@ -115,7 +115,7 @@ chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 notify = "7"
 portable-pty = "0.8"
-alacritty_terminal = "0.26"
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
 pulldown-cmark = "0.12"
 unicode-segmentation = "1"
 unicode-width = "0.2"
@@ -140,23 +140,23 @@ opt-level = 2
 
 # Keep gpui-component dependencies on the same Windows-capable ZUI revision.
 [patch."https://github.com/zeronsh/zui"]
-collections = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui_linux = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui_macos = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui_macros = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui_platform = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui_shared_string = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui_tokio = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui_util = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui_web = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui_wgpu = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-gpui_windows = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-http_client = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-media = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-refineable = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-derive_refineable = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-scheduler = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-sum_tree = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-util_macros = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
-perf = { git = "https://github.com/wasimysaid/zui", rev = "61b9da61d975f0b71641969a0e27631a7a0078b2" }
+collections = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_linux = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_macos = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_macros = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_platform = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_shared_string = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_tokio = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_util = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_web = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_wgpu = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+gpui_windows = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+http_client = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+media = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+refineable = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+derive_refineable = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+scheduler = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+sum_tree = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+util_macros = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
+perf = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }

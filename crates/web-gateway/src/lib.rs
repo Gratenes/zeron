@@ -7,16 +7,14 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use futures::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tower_http::services::ServeDir;
 use zeron_engine::auth::{Auth, AuthConfig};
 
-const INDEX: &str = include_str!("../../../apps/web/index.html");
-const APP: &str = include_str!("../../../apps/web/app.js");
-const STYLE: &str = include_str!("../../../apps/web/style.css");
 const MAX_PROXY_BODY: usize = 32 * 1024;
 const RPC_PROTOCOL: &str = "kratos-rpc";
 const BEARER_PROTOCOL: &str = "kratos-bearer.";
@@ -54,39 +52,35 @@ pub async fn serve(
 
 fn gateway_router(state: Gateway) -> Router {
     Router::new()
-        .route(
-            "/",
-            get(|| async { ([(header::CACHE_CONTROL, "no-store")], Html(INDEX)) }),
-        )
-        .route(
-            "/app.js",
-            get(|| async {
-                (
-                    [
-                        (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
-                        (header::CACHE_CONTROL, "no-store"),
-                    ],
-                    APP,
-                )
-            }),
-        )
-        .route(
-            "/style.css",
-            get(|| async {
-                (
-                    [
-                        (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-                        (header::CACHE_CONTROL, "no-store"),
-                    ],
-                    STYLE,
-                )
-            }),
-        )
         .route("/healthz", get(health))
         .route("/pair/{*path}", any(proxy_pair))
         .route("/device/{device_id}/ws", get(proxy_socket))
+        .fallback_service(ServeDir::new(web_assets_dir()).append_index_html_on_directories(true))
+        .layer(middleware::from_fn(web_headers))
         .layer(middleware::from_fn_with_state(state.clone(), enforce_host))
         .with_state(state)
+}
+
+fn web_assets_dir() -> std::path::PathBuf {
+    std::env::var_os("ZERON_WEB_ASSETS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("apps/web/dist"))
+}
+
+async fn web_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        HeaderName::from_static("cross-origin-embedder-policy"),
+        HeaderValue::from_static("require-corp"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 async fn enforce_host(State(state): State<Gateway>, request: Request, next: Next) -> Response {
