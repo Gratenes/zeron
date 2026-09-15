@@ -29,8 +29,30 @@ serde-wasm-bindgen = "0.6"
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [patch."https://github.com/zeronsh/zui"]
-gpui = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
-gpui_macros = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
-gpui_platform = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
-gpui_tokio = { git = "https://github.com/wasimysaid/zui", rev = "81326d19c596d8a717e79c4fab231d3f1b580ceb" }
-gpui_web = { git = "https://github.com/Gratenes/zui", rev = "c0a25683519a5b87be45de544fff0a40e1946eb1" }
+gpui = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_macros = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_platform = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_tokio = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_web = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+
+[patch."https://github.com/wasimysaid/zui"]
+collections = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+derive_refineable = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_linux = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_macos = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_macros = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_platform = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_shared_string = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_tokio = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_util = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_web = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_wgpu = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+gpui_windows = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+http_client = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+media = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+perf = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+refineable = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+scheduler = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+sum_tree = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }
+util_macros = { git = "https://github.com/Gratenes/zui", rev = "7a7b5c7" }

@@ -4437,7 +4437,6 @@ impl Transcript {
             // Document fixtures may seed the real cache; no host reads are made.
             return self.chat_id.iter().cloned().collect();
         }
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(state) = self.source.native() {
             // A native override must not guess the primary chat's device.
             if self.doc_override.is_some() {

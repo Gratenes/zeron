@@ -802,7 +802,7 @@ dependencies = [
  "bitflags 2.13.2",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.12.1",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1330,7 +1330,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "gpui_util",
  "indexmap",
@@ -1879,7 +1879,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3018,7 +3018,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3130,7 +3130,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3182,7 +3182,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3231,7 +3231,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3242,7 +3242,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "console_error_panic_hook",
  "gpui",
@@ -3255,7 +3255,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "schemars",
  "serde",
@@ -3265,7 +3265,7 @@ dependencies = [
 [[package]]
 name = "gpui_tokio"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3276,7 +3276,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "anyhow",
  "log",
@@ -3286,7 +3286,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3311,7 +3311,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3340,7 +3340,7 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3647,7 +3647,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -4095,15 +4095,6 @@ name = "itertools"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
 dependencies = [
  "either",
 ]
@@ -4762,7 +4753,7 @@ checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 [[package]]
 name = "media"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -5253,7 +5244,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 3.5.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -5843,7 +5834,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "collections",
  "serde",
@@ -6762,7 +6753,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "derive_refineable",
 ]
@@ -7097,7 +7088,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "async-task",
  "backtrace",
@@ -7852,7 +7843,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "heapless 0.9.3",
  "log",
@@ -9098,7 +9089,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "util_macros"
 version = "0.1.0"
-source = "git+https://github.com/wasimysaid/zui?rev=81326d19c596d8a717e79c4fab231d3f1b580ceb#81326d19c596d8a717e79c4fab231d3f1b580ceb"
+source = "git+https://github.com/Gratenes/zui?rev=7a7b5c7#7a7b5c7aff5d0e1d83ff5ad1146e63d14ce43971"
 dependencies = [
  "perf",
  "quote",
@@ -11197,8 +11188,3 @@ dependencies = [
  "syn 3.0.5",
  "winnow 1.0.4",
 ]
-
-[[patch.unused]]
-name = "gpui_web"
-version = "0.1.0"
-source = "git+https://github.com/Gratenes/zui?rev=c0a25683519a5b87be45de544fff0a40e1946eb1#c0a25683519a5b87be45de544fff0a40e1946eb1"
