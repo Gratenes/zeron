@@ -29,30 +29,30 @@ serde-wasm-bindgen = "0.6"
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [patch."https://github.com/zeronsh/zui"]
-gpui = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_macros = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_platform = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_tokio = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_web = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
+gpui = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_macros = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_platform = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_tokio = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_web = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
 
 [patch."https://github.com/wasimysaid/zui"]
-collections = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-derive_refineable = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_linux = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_macos = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_macros = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_platform = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_shared_string = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_tokio = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_util = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_web = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_wgpu = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-gpui_windows = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-http_client = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-media = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-perf = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-refineable = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-scheduler = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-sum_tree = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
-util_macros = { git = "https://github.com/Gratenes/zui", rev = "cecfbdd" }
+collections = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+derive_refineable = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_linux = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_macos = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_macros = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_platform = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_shared_string = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_tokio = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_util = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_web = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_wgpu = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+gpui_windows = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+http_client = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+media = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+perf = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+refineable = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+scheduler = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+sum_tree = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
+util_macros = { git = "https://github.com/Gratenes/zui", rev = "fdb273c" }
