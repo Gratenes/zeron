@@ -606,6 +606,26 @@ impl AuthStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(AuthError::from)
     }
 
+    pub fn discover_engines(&self, principal: &Principal) -> Result<Vec<DeviceRecord>, AuthError> {
+        let connection = self.connection();
+        let mut statement = connection.prepare(
+            "SELECT device_id, display_name, is_owner, created_at, revoked_at
+             FROM auth_devices
+             WHERE profile_id = ?1 AND is_owner = 1 AND revoked_at IS NULL
+             ORDER BY created_at, device_id",
+        )?;
+        let rows = statement.query_map([&principal.profile_id], |row| {
+            Ok(DeviceRecord {
+                device_id: row.get(0)?,
+                display_name: row.get(1)?,
+                owner: row.get::<_, i64>(2)? != 0,
+                created_at: row.get(3)?,
+                revoked_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AuthError::from)
+    }
+
     pub fn revoke_device(
         &self,
         principal: &Principal,
@@ -791,6 +811,7 @@ pub fn router(store: AuthStore) -> Router {
         .route("/pair/authenticate", post(http_authenticate))
         .route("/pair/invite", post(http_invite))
         .route("/pair/devices", get(http_devices))
+        .route("/pair/engines", get(http_engines))
         .route("/pair/revoke", post(http_revoke))
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .with_state(store)
@@ -871,8 +892,21 @@ async fn http_invite(
 }
 
 async fn http_devices(State(store): State<AuthStore>, headers: HeaderMap) -> Response {
+    let result = authenticated(&store, &headers).and_then(|principal| {
+        store.list_devices(&principal).or_else(|error| match error {
+            AuthError::OwnerRequired => store.discover_engines(&principal),
+            error => Err(error),
+        })
+    });
+    match result {
+        Ok(devices) => Json(devices).into_response(),
+        Err(error) => api_error(error),
+    }
+}
+
+async fn http_engines(State(store): State<AuthStore>, headers: HeaderMap) -> Response {
     let result =
-        authenticated(&store, &headers).and_then(|principal| store.list_devices(&principal));
+        authenticated(&store, &headers).and_then(|principal| store.discover_engines(&principal));
     match result {
         Ok(devices) => Json(devices).into_response(),
         Err(error) => api_error(error),

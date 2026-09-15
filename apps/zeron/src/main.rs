@@ -34,6 +34,15 @@ struct Cli {
 enum Command {
     /// Run the engine without a UI (local-only unless a saved session enables sync).
     Headless,
+    /// Serve the browser relay probe through the running local peer.
+    Web {
+        /// External hostname accepted from the HTTPS tunnel.
+        #[arg(long, default_value = "dev.embedez.com")]
+        hostname: String,
+        /// Loopback port exposed to the local tunnel.
+        #[arg(long, default_value_t = 3000)]
+        port: u16,
+    },
     /// Pair using an invitation from stdin or a private file (never a command-line secret).
     Pair {
         #[arg(long)]
@@ -150,7 +159,10 @@ fn main() -> anyhow::Result<()> {
     // journald on every snapshot export — enough to fill a disk on a
     // long-running headless host. Quiet them by default (RUST_LOG still
     // overrides the whole filter).
-    let long_running = matches!(&cli.command, None | Some(Command::Headless));
+    let long_running = matches!(
+        &cli.command,
+        None | Some(Command::Headless) | Some(Command::Web { .. })
+    );
     let default_filter = if long_running {
         "info,loro_internal=warn,loro=warn"
     } else {
@@ -210,6 +222,10 @@ fn main() -> anyhow::Result<()> {
                 let engine = zeron_engine::Engine::new(engine_config_from_env());
                 engine.run().await
             })
+        }
+        Some(Command::Web { hostname, port }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(zeron_web_gateway::serve(paths::data_dir(), hostname, port))
         }
         Some(Command::Pair { code_file }) => {
             let runtime = tokio::runtime::Runtime::new()?;

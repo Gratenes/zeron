@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Kratos relay probe</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js?v=3"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">Kratos web gateway</p>
+      <h1>Relay probe</h1>
+      <p>Pair this browser, connect to the engine, and measure real RPC round trips.</p>
+    </header>
+
+    <section id="pair-card">
+      <label for="invite">One-use invitation</label>
+      <textarea id="invite" rows="5" spellcheck="false" placeholder="kratos-pair:…"></textarea>
+      <label for="device-name">Device name</label>
+      <input id="device-name" value="Web relay probe" maxlength="128">
+      <button id="pair">Pair this browser</button>
+    </section>
+
+    <section id="probe-card" hidden>
+      <div class="status"><span id="dot"></span><strong id="status">Disconnected</strong></div>
+      <p id="identity"></p>
+      <div class="actions">
+        <button id="connect">Connect</button>
+        <button id="measure" disabled>Measure 25 RPC calls</button>
+      </div>
+      <dl>
+        <div><dt>Latest</dt><dd id="latest">—</dd></div>
+        <div><dt>Median</dt><dd id="median">—</dd></div>
+        <div><dt>p95</dt><dd id="p95">—</dd></div>
+        <div><dt>Range</dt><dd id="range">—</dd></div>
+      </dl>
+      <pre id="engine">No engine response yet.</pre>
+    </section>
+
+    <p id="error" role="alert"></p>
+  </main>
+</body>
+</html>

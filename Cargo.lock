@@ -10982,6 +10982,7 @@ dependencies = [
  "zeron-sync",
  "zeron-ui",
  "zeron-update",
+ "zeron-web-gateway",
 ]
 
 [[package]]
@@ -11271,6 +11272,21 @@ dependencies = [
  "tracing",
  "windows-sys 0.61.2",
  "zip",
+]
+
+[[package]]
+name = "zeron-web-gateway"
+version = "0.2.65"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures",
+ "reqwest",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "zeron-engine",
 ]
 
 [[package]]

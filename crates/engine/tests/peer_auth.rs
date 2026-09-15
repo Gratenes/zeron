@@ -158,6 +158,34 @@ async fn http_pairing_uses_real_proofs_and_enforces_replay_revocation_and_isolat
         paired
     );
 
+    let engines = client
+        .get(format!("{}/pair/engines", server.url))
+        .bearer_auth(&member_token.token)
+        .send()
+        .await
+        .expect("member engine discovery")
+        .error_for_status()
+        .expect("member engine discovery status")
+        .json::<Vec<zeron_engine::peer_auth::DeviceRecord>>()
+        .await
+        .expect("member engine discovery body");
+    assert_eq!(engines.len(), 1);
+    assert_eq!(engines[0].device_id, owner_principal.device_id);
+
+    let cached_client_devices = client
+        .get(format!("{}/pair/devices", server.url))
+        .bearer_auth(&member_token.token)
+        .send()
+        .await
+        .expect("cached client device discovery")
+        .error_for_status()
+        .expect("cached client device discovery status")
+        .json::<Vec<zeron_engine::peer_auth::DeviceRecord>>()
+        .await
+        .expect("cached client device discovery body");
+    assert_eq!(cached_client_devices.len(), 1);
+    assert_eq!(cached_client_devices[0].device_id, engines[0].device_id);
+
     let protected = client
         .get(format!("{}/protected", server.url))
         .bearer_auth(&member_token.token)

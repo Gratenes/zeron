@@ -1,0 +1,21 @@
+[package]
+name = "zeron-web-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "zeron-web"
+path = "src/main.rs"
+
+[dependencies]
+zeron-engine.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+futures.workspace = true
+reqwest.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+clap.workspace = true
