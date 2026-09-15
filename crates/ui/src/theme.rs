@@ -903,7 +903,11 @@ impl Theme {
     /// can still use native Acrylic independently of these scene-level blurs.
     pub fn is_frost(&self) -> bool {
         self.surface_treatment == SurfaceTreatment::Frosted
-            && cfg!(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+            && cfg!(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "windows"
+            ))
     }
 
     /// Theme-owned hover wash for chrome that sits on glass (sidebar rows,

@@ -10460,11 +10460,12 @@ mod tests {
                     cx.notify();
                 });
                 draw(window, cx);
-                assert!(transcript.read(cx).list.offset_for_item(1) > closed + px(100.0),
-                    "task-tree card and group must not clip measured Mimir Markdown");
+                assert!(
+                    transcript.read(cx).list.offset_for_item(1) > closed + px(100.0),
+                    "task-tree card and group must not clip measured Mimir Markdown"
+                );
             });
         }
-
 
         #[test]
         fn document_sidecars_and_collapsing_use_actual_markdown_layout() {

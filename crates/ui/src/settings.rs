@@ -1637,8 +1637,15 @@ mod tests {
         let path = UiSettings::path(dir.path());
         let json: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        for key in ["appshotsEnabled", "appshotSoundEnabled", "appshotDestination"] {
-            assert!(json.get(key).is_none(), "unsupported setting {key} must be omitted");
+        for key in [
+            "appshotsEnabled",
+            "appshotSoundEnabled",
+            "appshotDestination",
+        ] {
+            assert!(
+                json.get(key).is_none(),
+                "unsupported setting {key} must be omitted"
+            );
         }
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
 
@@ -1651,7 +1658,6 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
         assert_eq!(UiSettings::load(dir.path()), UiSettings::default());
     }
-
 
     #[test]
     fn stale_revision_cannot_be_considered_the_latest_save() {
