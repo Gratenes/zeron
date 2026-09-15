@@ -1,6 +1,8 @@
 #[cfg(target_os = "linux")]
 #[path = "browser-fixture/linux.rs"]
 mod linux;
+#[path = "browser-fixture/transcript_links.rs"]
+mod transcript_links;
 // Real shell + native WebKit smoke test and screenshot fixture. Synthetic
 // chat data, isolated temp storage, loopback-only website, no engine services.
 use gpui::{AppContext, AsyncApp, Bounds, WindowBounds, WindowOptions, px, size};
@@ -200,6 +202,9 @@ fn main() -> anyhow::Result<()> {
         cx.spawn(async move |cx| {
             let run: anyhow::Result<()> = async {
                 pause(cx, 1200).await;
+                if std::env::var_os("ZERON_TRANSCRIPT_LINK_FIXTURE_ONLY").is_some() {
+                    return transcript_links::exercise(window, state.clone(), &_origin, &output, cx).await;
+                }
                 state.update(cx, |s, cx| {
                     let entries = serde_json::from_value(serde_json::json!([
                         {"id":"fixture-user","role":"user","parts":[{"id":"text","kind":"text","text":"Build a calm, thoughtful workspace for Fieldnotes. Let’s preview the landing page beside this conversation."}],"createdAt":1788900000000_i64,"deviceId":"local"},

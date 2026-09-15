@@ -3,13 +3,15 @@
 <plist version="1.0">
 <dict>
 	<key>application-identifier</key>
-	<string>sh.zeron.ios</string>
+	<string>5XY3M483YQ.sh.zeron.ios</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>5XY3M483YQ</string>
 
 	<key>get-task-allow</key>
 	<true/>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>sh.zeron.ios</string>
+		<string>5XY3M483YQ.sh.zeron.ios</string>
 	</array>
 </dict>
 </plist>

@@ -171,9 +171,11 @@ jobs:
           set -euo pipefail
           DERIVED_DATA="$RUNNER_TEMP/ios-derived-data"
           CI_ENTITLEMENTS="$GITHUB_WORKSPACE/apps/ios/CI/Simulator.entitlements"
-          # An ad-hoc signature has no Apple team identity. Keep its entitlement
-          # identity exact and self-consistent so taskgated accepts the test host.
-          EXPECTED_APP_ID="sh.zeron.ios"
+          # Let Xcode sign the host and embedded XCTest bundle as one coherent
+          # tree. Re-signing only Zeron.app after build-for-testing invalidates
+          # the launch contract between the host and its nested test bundle.
+          EXPECTED_TEAM_ID="5XY3M483YQ"
+          EXPECTED_APP_ID="$EXPECTED_TEAM_ID.sh.zeron.ios"
           SIGNING_ARGS=(
             CODE_SIGN_IDENTITY="-"
             CODE_SIGN_STYLE=Manual
@@ -187,16 +189,10 @@ jobs:
 
           APP="$DERIVED_DATA/Build/Products/Debug-iphonesimulator/Zeron.app"
           SIGNED_ENTITLEMENTS="$RUNNER_TEMP/zeron-simulator-entitlements.plist"
-          codesign --force --sign - --timestamp=none --generate-entitlement-der \
-            --entitlements "$CI_ENTITLEMENTS" "$APP"
-          codesign --verify --verbose=2 "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
           codesign --display --entitlements - --xml "$APP" > "$SIGNED_ENTITLEMENTS"
           test "$(plutil -extract application-identifier raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_APP_ID"
-
-          if plutil -extract 'com\.apple\.developer\.team-identifier' raw "$SIGNED_ENTITLEMENTS" >/dev/null 2>&1; then
-            echo "Ad-hoc simulator host must not claim an Apple team identity" >&2
-            exit 1
-          fi
+          test "$(plutil -extract 'com\.apple\.developer\.team-identifier' raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_TEAM_ID"
           test "$(plutil -extract get-task-allow raw "$SIGNED_ENTITLEMENTS")" = "true"
           test "$(plutil -extract keychain-access-groups.0 raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_APP_ID"
 
