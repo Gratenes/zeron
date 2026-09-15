@@ -8205,12 +8205,20 @@ mod tests {
     }
     use zeron_doc::MessagePart;
 
+    struct ToolGroupNavigationWindow;
+
+    impl Render for ToolGroupNavigationWindow {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
     fn with_tool_group_navigation(
         cx: &mut gpui::TestAppContext,
-        run: impl FnOnce(Entity<AppState>, Entity<Transcript>, &mut gpui::App),
+        run: impl FnOnce(Entity<AppState>, Entity<Transcript>, &mut Window, &mut gpui::App),
     ) {
         let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
+        let (state, transcript) = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
@@ -8218,8 +8226,13 @@ mod tests {
             let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
             transcript.update(cx, |this, _| this.retain_for_route_exit());
             replay_tool_group(&state, &transcript, "chat-a", cx);
-            run(state, transcript, cx);
+            (state, transcript)
         });
+        let host = cx.add_window(|_, _| ToolGroupNavigationWindow);
+        cx.update_window(host.into(), |_, window, cx| {
+            run(state, transcript, window, cx)
+        })
+        .unwrap();
     }
 
     fn replay_tool_group(
@@ -8241,7 +8254,11 @@ mod tests {
         transcript.update(cx, |this, cx| this.sync(cx));
     }
 
-    fn assert_replayed_group_is_closed(transcript: &Entity<Transcript>, cx: &mut gpui::App) {
+    fn assert_replayed_group_is_closed(
+        transcript: &Entity<Transcript>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
         transcript.update(cx, |this, cx| {
             let row = this
                 .rows
@@ -8253,7 +8270,7 @@ mod tests {
                 unreachable!()
             };
             assert!(!auto_open);
-            let _ = this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), cx);
+            let _ = this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), window, cx);
             let reveal = &this.tool_group_reveals[&row.id];
             assert_eq!(
                 reveal.rendered_open,
@@ -8271,18 +8288,18 @@ mod tests {
 
     #[gpui::test]
     fn tool_groups_stay_closed_on_populated_chat_attach(cx: &mut gpui::TestAppContext) {
-        with_tool_group_navigation(cx, |state, transcript, cx| {
+        with_tool_group_navigation(cx, |state, transcript, window, cx| {
             for chat in ["chat-b", "chat-a", "chat-b"] {
                 // Selection and cached replay can coalesce into a single sync.
                 replay_tool_group(&state, &transcript, chat, cx);
-                assert_replayed_group_is_closed(&transcript, cx);
+                assert_replayed_group_is_closed(&transcript, window, cx);
             }
         });
     }
 
     #[gpui::test]
     fn tool_groups_stay_closed_after_rapid_new_chat_navigation(cx: &mut gpui::TestAppContext) {
-        with_tool_group_navigation(cx, |state, transcript, cx| {
+        with_tool_group_navigation(cx, |state, transcript, window, cx| {
             for finish_exit in [false, true] {
                 transcript.update(cx, |this, _| {
                     // Navigate away during the previous close animation.
@@ -8307,14 +8324,14 @@ mod tests {
                 state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
                 transcript.update(cx, |this, cx| this.sync(cx));
                 replay_tool_group(&state, &transcript, "chat-a", cx);
-                assert_replayed_group_is_closed(&transcript, cx);
+                assert_replayed_group_is_closed(&transcript, window, cx);
             }
         });
     }
 
     #[gpui::test]
     fn tool_group_navigation_keeps_user_pins_and_new_arrivals(cx: &mut gpui::TestAppContext) {
-        with_tool_group_navigation(cx, |state, transcript, cx| {
+        with_tool_group_navigation(cx, |state, transcript, window, cx| {
             transcript.update(cx, |this, _| {
                 this.folds.insert(
                     "tools#g0".into(),
@@ -8333,7 +8350,8 @@ mod tests {
                 let RowKind::ToolGroup { tools, auto_open } = &row.kind else {
                     panic!("expected tools")
                 };
-                let _ = this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), cx);
+                let _ =
+                    this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), window, cx);
                 assert_eq!(this.folds[&row.id].open, Some(true));
                 assert_eq!(this.tool_group_reveals[&row.id].rendered_open, Some(true));
                 assert!(
@@ -8358,7 +8376,8 @@ mod tests {
                     panic!("expected tools")
                 };
                 assert!(*auto_open);
-                let _ = this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), cx);
+                let _ =
+                    this.render_tool_group(&row.id, tools, *auto_open, &Theme::dark(), window, cx);
                 let reveal = &this.tool_group_reveals[&row.id];
                 assert!(reveal.header_started_at.is_some());
                 assert!(reveal.starts.iter().all(Option::is_some));
