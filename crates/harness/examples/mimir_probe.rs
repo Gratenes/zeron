@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
                         .map(|q| UserInputAnswer {
                             question_id: q.id.clone(),
                             labels: vec![answer.clone()],
+                            note: None,
                         })
                         .collect()
                 })

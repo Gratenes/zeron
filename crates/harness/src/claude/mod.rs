@@ -857,6 +857,7 @@ fn parse_questions(input: &Value) -> Vec<UserInputQuestion> {
                             .into(),
                     })
                     .collect(),
+                note: false,
             }
         })
         .collect()
@@ -927,6 +928,7 @@ mod tests {
         let answers = vec![UserInputAnswer {
             question_id: qs[0].id.clone(),
             labels: vec!["B".into()],
+            note: None,
         }];
         let updated = updated_input_with_answers(&input, &qs, &answers);
         assert_eq!(updated["answers"]["Pick one"], json!("B"));

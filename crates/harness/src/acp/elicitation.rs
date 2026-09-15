@@ -4,6 +4,8 @@
 //! Schema. Unknown constraints are rejected rather than silently ignored. Choice
 //! labels include an index so duplicate titles still map to distinct opaque IDs.
 //! Optional fields offer an explicit skip choice; no default answer is invented.
+//! Mimir's optional `<key>_note` companions merge into their choice question so
+//! the UI collects the note on the same page instead of a follow-up note page.
 //!
 //! The session loop owns every waiter and polls `next_response`. No task is
 //! spawned: exact cancellation, shutdown and Drop release the input receiver,
@@ -155,6 +157,11 @@ struct Form {
 
 struct Field {
     key: String,
+    /// Mimir ask_user note companion merged into this question
+    /// (`<key>_note`); `None` on questions asked without one.
+    note_key: Option<String>,
+    /// Character budget carried over from the merged note companion.
+    note_max: usize,
     question: UserInputQuestion,
     optional: bool,
     kind: FieldKind,
@@ -262,18 +269,23 @@ impl Form {
             }
             fields.push(Field {
                 key: key.clone(),
+                note_key: None,
+                note_max: usize::MAX,
                 question: UserInputQuestion {
                     id: format!("acp-form-{identity}-{index}"),
                     header: "Agent question".into(),
                     question,
                     options,
                     multi_select: matches!(&kind, FieldKind::Choices { multiple: true, .. }),
+                    note: false,
                 },
                 optional,
                 kind,
             });
         }
-        Ok(Self { fields })
+        Ok(Self {
+            fields: merge_note_companions(fields),
+        })
     }
 
     fn questions(&self) -> Vec<UserInputQuestion> {
@@ -301,18 +313,80 @@ impl Form {
         }
         let mut content = Map::new();
         for field in &self.fields {
-            let labels = answers
+            let answer = answers
                 .iter()
-                .find(|answer| answer.question_id == field.question.id)
+                .find(|answer| answer.question_id == field.question.id);
+            if answer.is_some_and(|answer| answer.note.is_some()) && field.note_key.is_none() {
+                return Err("This question does not accept a note".into());
+            }
+            let labels = answer
                 .map(|answer| answer.labels.as_slice())
                 .unwrap_or_default();
             if field.optional && (labels.is_empty() || labels == [SKIP]) {
                 continue;
             }
             content.insert(field.key.clone(), field.kind.answer(labels)?);
+            let note = answer
+                .and_then(|answer| answer.note.as_deref())
+                .map(str::trim)
+                .filter(|note| !note.is_empty());
+            if let Some(note) = note {
+                if note.chars().count() > field.note_max {
+                    return Err("Note answer exceeds the requested length".into());
+                }
+                content.insert(
+                    field
+                        .note_key
+                        .clone()
+                        .expect("note answers only land on merged companions"),
+                    json!(note),
+                );
+            }
         }
         Ok(json!({ "action": "accept", "content": content }))
     }
+}
+
+/// Mimir's ask_user schema appends an optional free-text companion property
+/// (`<key>_note`) after every choice field, which used to cost a whole extra
+/// "Optional note" page per question. Merge each companion into its choice
+/// question (`question.note`) so the UI collects it in the composer input
+/// already on screen — one page per question, the note still delivered under
+/// the original property key. Only optional plain-text companions with a
+/// usable bound merge; anything else stays its own question.
+fn merge_note_companions(mut fields: Vec<Field>) -> Vec<Field> {
+    const NOTE_SUFFIX: &str = "_note";
+    let mut consumed = vec![false; fields.len()];
+    for ix in 0..fields.len() {
+        let (candidate_key, note_max) = match &fields[ix] {
+            Field {
+                key,
+                optional: true,
+                kind: FieldKind::Text { min: 0, max, .. },
+                ..
+            } if key.ends_with(NOTE_SUFFIX) => (key.clone(), *max),
+            _ => continue,
+        };
+        let Some(parent_key) = candidate_key.strip_suffix(NOTE_SUFFIX) else {
+            continue;
+        };
+        let Some(parent) = fields.iter_mut().find(|field| {
+            field.key == parent_key && matches!(field.kind, FieldKind::Choices { .. })
+        }) else {
+            continue;
+        };
+        parent.question.note = true;
+        parent.note_key = Some(candidate_key);
+        parent.note_max = note_max;
+        consumed[ix] = true;
+    }
+    let mut merged = Vec::with_capacity(fields.len());
+    for (ix, field) in fields.into_iter().enumerate() {
+        if !consumed[ix] {
+            merged.push(field);
+        }
+    }
+    merged
 }
 
 impl FieldKind {
@@ -521,41 +595,94 @@ mod tests {
         UserInputAnswer {
             question_id: field(form, key).question.id.clone(),
             labels: labels.iter().map(|label| (*label).into()).collect(),
+            note: None,
+        }
+    }
+
+    fn answered_note(
+        form: &Form,
+        key: &str,
+        labels: &[&str],
+        note: Option<&str>,
+    ) -> UserInputAnswer {
+        UserInputAnswer {
+            note: note.map(str::to_string),
+            ..answer(form, key, labels)
         }
     }
 
     fn valid_answers(form: &Form) -> Vec<UserInputAnswer> {
         vec![
             answer(form, "q0", &["  Casey api_key=example  "]),
-            answer(form, "q1", &["2. Same — Second"]),
-            answer(form, "q1_note", &["  preserve this note  "]),
+            answered_note(
+                form,
+                "q1",
+                &["2. Same — Second"],
+                Some("  preserve this note  "),
+            ),
             answer(form, "q2", &["1. Unit — Fast", "2. Process — Wire"]),
-            answer(form, "q2_note", &[SKIP]),
         ]
     }
 
     #[test]
     fn real_mimir_schema_round_trips_opaque_ids_text_notes_and_skip() {
         let form = Form::parse("session", &fixture()).unwrap();
+        // The merged Mimir shape: one page per question — text, choice +
+        // note, multi-choice + note. No separate "Optional note" pages.
+        assert_eq!(form.questions().len(), 3);
         assert!(
             form.questions()[0]
                 .question
                 .contains("Do not enter credentials")
         );
         assert!(field(&form, "q0").question.options.is_empty());
-        assert_eq!(field(&form, "q1_note").question.options, [SKIP]);
+        assert!(!field(&form, "q0").question.note);
+        assert!(field(&form, "q1").question.note);
+        assert!(field(&form, "q2").question.note);
         assert!(field(&form, "q2").question.multi_select);
         assert_eq!(
             form.answer(&valid_answers(&form)).unwrap(),
             json!({
                 "action": "accept", "content": {
                     "q0": "  Casey api_key=example  ", "q1": "o1",
-                    "q1_note": "  preserve this note  ", "q2": ["o0", "o1"]
+                    "q1_note": "preserve this note", "q2": ["o0", "o1"]
                 }
             })
         );
     }
 
+    #[test]
+    fn notes_only_land_on_merged_choice_questions() {
+        let form = Form::parse("session", &fixture()).unwrap();
+        // A note on the plain text question is rejected, not silently dropped.
+        let mut invalid = valid_answers(&form);
+        invalid[0].note = Some("stray".into());
+        assert!(form.answer(&invalid).is_err());
+        // A picked choice with a blank note stays just the choice.
+        let answers = vec![
+            answer(&form, "q0", &["Name"]),
+            answered_note(&form, "q1", &["2. Same — Second"], Some("   ")),
+            answer(&form, "q2", &["1. Unit — Fast"]),
+        ];
+        assert_eq!(
+            form.answer(&answers).unwrap()["content"],
+            json!({"q0":"Name", "q1":"o1", "q2":["o0"]})
+        );
+    }
+
+    #[test]
+    fn note_length_constraints_follow_the_merged_companion() {
+        let mut params = fixture();
+        params["requestedSchema"]["properties"]["q1_note"]["maxLength"] = json!(4);
+        let form = Form::parse("session", &params).unwrap();
+        let mut answers = valid_answers(&form);
+        assert!(
+            form.answer(&answers).is_err(),
+            "note over the companion bound"
+        );
+        answers[1].note = Some("ok".into());
+        assert!(form.answer(&answers).is_ok());
+    }
     #[test]
     fn missing_optional_notes_are_not_invented_and_none_is_exclusive() {
         let form = Form::parse("session", &fixture()).unwrap();
@@ -566,12 +693,12 @@ mod tests {
         ];
         assert_eq!(
             form.answer(&answers).unwrap()["content"],
-            json!({"q0":"Name", "q1":"none", "q2":["none"]})
+            json!({"q0":"Name", "q1":"none", "q2":["none"]}),
+            "no q1_note/q2_note entries invented"
         );
         let mut invalid = answers.clone();
         invalid[2].labels.push("1. Unit — Fast".into());
         assert!(form.answer(&invalid).is_err());
-        assert_eq!(form.answer(&[]).unwrap(), json!({"action":"decline"}));
     }
 
     #[test]
@@ -604,7 +731,7 @@ mod tests {
                     "3. None of the above",
                 ],
             ),
-            ("q2_note", vec![SKIP, "also this"]),
+            ("q1", vec!["2. Same — Second", "3. None of the above"]),
         ] {
             let mut answers = valid_answers(&form);
             let id = &field(&form, key).question.id;

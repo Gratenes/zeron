@@ -2478,6 +2478,7 @@ fn map_questions(props: &Value) -> Vec<UserInputQuestion> {
                             })
                             .unwrap_or_default(),
                         multi_select: q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
+                        note: false,
                     })
                 })
                 .collect()

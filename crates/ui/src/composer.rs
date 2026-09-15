@@ -734,7 +734,14 @@ impl Wizard {
             WizardStep::Stay
         } else {
             *picked = vec![option_ix];
-            WizardStep::AutoAdvance
+            // Note questions (Mimir ask_user) stay put: the note rides in the
+            // composer input already on screen — no auto-advance to a page
+            // that no longer exists.
+            if question.note {
+                WizardStep::Stay
+            } else {
+                WizardStep::AutoAdvance
+            }
         }
     }
 
@@ -779,22 +786,28 @@ impl Wizard {
             .enumerate()
             .map(|(ix, q)| {
                 let typed = self.typed.get(ix).map(|s| s.trim()).unwrap_or("");
-                let labels = if !typed.is_empty() {
-                    vec![typed.to_string()]
-                } else {
-                    self.picked
-                        .get(ix)
-                        .map(|picked| {
-                            picked
-                                .iter()
-                                .filter_map(|&p| q.options.get(p).cloned())
-                                .collect()
-                        })
-                        .unwrap_or_default()
+                let picked: Vec<String> = self
+                    .picked
+                    .get(ix)
+                    .map(|picked| {
+                        picked
+                            .iter()
+                            .filter_map(|&p| q.options.get(p).cloned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Note questions (Mimir ask_user): typed text rides along as
+                // a note ON the picked option; without a pick it IS the
+                // answer, like any other typed override.
+                let (labels, note) = match (!picked.is_empty(), !typed.is_empty()) {
+                    (true, true) if q.note => (picked, Some(typed.to_string())),
+                    (_, true) => (vec![typed.to_string()], None),
+                    (_, false) => (picked, None),
                 };
                 UserInputAnswer {
                     question_id: q.id.clone(),
                     labels,
+                    note,
                 }
             })
             .collect()
@@ -6792,7 +6805,11 @@ impl Composer {
         self.input.update(cx, |input, cx| {
             input.set_placeholder(
                 if has_pick {
-                    "Type your own answer, or leave this blank to use the selected option"
+                    if wizard.current().is_some_and(|q| q.note) {
+                        "Add a note, or leave this blank to use the selected option"
+                    } else {
+                        "Type your own answer, or leave this blank to use the selected option"
+                    }
                 } else {
                     "Type your own answer, or pick an option above"
                 },
@@ -7093,6 +7110,17 @@ impl Composer {
                                 .text_size(crate::typography::ui_rems(12.0))
                                 .text_color(theme.text_muted.opacity(0.65))
                                 .child(SharedString::from("Select one or more options.")),
+                        )
+                    })
+                    .when(question.note, |el| {
+                        el.child(
+                            div()
+                                .mt(px(4.0))
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text_muted.opacity(0.65))
+                                .child(SharedString::from(
+                                    "Optional: add a note in the field below after picking.",
+                                )),
                         )
                     })
                     .child(
@@ -8751,6 +8779,7 @@ mod tests {
             question: format!("Question {id}"),
             options: options.iter().map(|s| s.to_string()).collect(),
             multi_select: multi,
+            note: false,
         }
     }
 
@@ -9556,6 +9585,52 @@ mod tests {
             vec!["custom answer"],
             "typed overrides picked, trimmed"
         );
+    }
+
+    #[test]
+    fn wizard_note_questions_collect_the_note_inline() {
+        let mut w = Wizard::new(
+            "req".into(),
+            vec![question("q1", &["a", "b"], false), {
+                let mut q = question("q2", &["x", "y"], false);
+                q.note = true;
+                q
+            }],
+        );
+        assert_eq!(w.select(1), WizardStep::AutoAdvance);
+        w.advance();
+        // The note question does NOT auto-advance on pick: the note is typed
+        // into the already-visible composer input, then Submit moves on.
+        assert_eq!(w.page, 1);
+        assert_eq!(w.counter(), "2/2");
+        assert_eq!(w.select(0), WizardStep::Stay);
+        assert!(w.is_picked(0));
+        w.set_typed("  extra note  ".into());
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!()
+        };
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0].labels, vec!["b"]);
+        assert_eq!(answers[0].note, None);
+        assert_eq!(
+            answers[1].labels,
+            vec!["x"],
+            "pick survives beside the note"
+        );
+        assert_eq!(answers[1].note.as_deref(), Some("extra note"));
+    }
+
+    #[test]
+    fn wizard_note_question_typed_without_a_pick_is_the_answer() {
+        let mut q = question("q", &["x", "y"], false);
+        q.note = true;
+        let mut w = Wizard::new("req".into(), vec![q]);
+        w.set_typed("custom".into());
+        let WizardStep::Done(answers) = w.advance() else {
+            panic!()
+        };
+        assert_eq!(answers[0].labels, vec!["custom"]);
+        assert_eq!(answers[0].note, None, "no pick: typed is the answer itself");
     }
 
     #[test]

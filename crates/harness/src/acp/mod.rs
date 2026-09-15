@@ -1951,6 +1951,7 @@ fn handle_server_request_live(
             .to_owned(),
         options: names.clone(),
         multi_select: false,
+        note: false,
     };
     let client = client.clone();
     let request_input = std::sync::Arc::clone(request_input);

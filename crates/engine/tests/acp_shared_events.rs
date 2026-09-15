@@ -153,6 +153,7 @@ fn question(id: &str) -> Vec<UserInputQuestion> {
         question: id.into(),
         options: vec![],
         multi_select: false,
+        note: false,
     }]
 }
 

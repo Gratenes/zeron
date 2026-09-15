@@ -102,6 +102,7 @@ impl Harness for HeldHarness {
                 question: "which one?".into(),
                 options: vec!["a".into(), "b".into()],
                 multi_select: false,
+                note: false,
             }]))
         } else {
             None

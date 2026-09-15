@@ -854,12 +854,17 @@ struct QuestionPanel: View {
             picked[question.id] = set
         } else {
             picked[question.id] = [option]
-            // Single-select auto-advances after 220ms (AUTO_ADVANCE_MS).
-            autoAdvanceTask?.cancel()
-            autoAdvanceTask = Task {
-                try? await Task.sleep(nanoseconds: 220_000_000)
-                guard !Task.isCancelled else { return }
-                advance()
+            // Note questions (Mimir ask_user) stay put: the note rides in the
+            // composer input already on screen — no auto-advance to a page
+            // that no longer exists.
+            if question.note != true {
+                // Single-select auto-advances after 220ms (AUTO_ADVANCE_MS).
+                autoAdvanceTask?.cancel()
+                autoAdvanceTask = Task {
+                    try? await Task.sleep(nanoseconds: 220_000_000)
+                    guard !Task.isCancelled else { return }
+                    advance()
+                }
             }
         }
     }
@@ -877,10 +882,17 @@ struct QuestionPanel: View {
         }
         let answers = questions.map { q -> UserInputAnswer in
             let typedAnswer = (typed[q.id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let chosen = Array(picked[q.id, default: []])
+            // Note questions: typed text rides along as a note ON the picked
+            // option; without a pick it IS the answer, like any other typed
+            // override.
             if !typedAnswer.isEmpty {
-                return UserInputAnswer(questionId: q.id, labels: [typedAnswer])
+                if q.note == true, !chosen.isEmpty {
+                    return UserInputAnswer(questionId: q.id, labels: chosen, note: typedAnswer)
+                }
+                return UserInputAnswer(questionId: q.id, labels: [typedAnswer], note: nil)
             }
-            return UserInputAnswer(questionId: q.id, labels: Array(picked[q.id, default: []]))
+            return UserInputAnswer(questionId: q.id, labels: chosen, note: nil)
         }
         respond(requestId, answers)
     }

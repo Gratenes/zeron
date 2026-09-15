@@ -65,6 +65,7 @@ fn controls(
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: vec![answer_label.into()],
+                    note: None,
                 })
                 .collect();
             let _ = tx.send(answers);
@@ -408,6 +409,7 @@ async fn approvals_round_trip_as_input_requests() {
                 .map(|q| UserInputAnswer {
                     question_id: q.id.clone(),
                     labels: vec!["Yes".into()],
+                    note: None,
                 })
                 .collect();
             let _ = tx.send(answers);
