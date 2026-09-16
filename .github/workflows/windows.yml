@@ -10,6 +10,7 @@ on:
       - 'dist/windows/**'
       - 'crates/**'
       - 'scripts/test-windows-*.ps1'
+      - 'scripts/package-windows.ps1'
       - '.github/workflows/windows.yml'
 
       - 'connectivity/tailcat/**'
@@ -25,6 +26,7 @@ on:
       - 'dist/windows/**'
       - 'crates/**'
       - 'scripts/test-windows-*.ps1'
+      - 'scripts/package-windows.ps1'
       - '.github/workflows/windows.yml'
 
       - 'connectivity/tailcat/**'
@@ -84,22 +86,38 @@ jobs:
           if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
           "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-workspace-crates: true
+      - name: Native harness security and integration tests
+        run: cargo test --release --locked -p zeron-harness --features native-fixture --lib --test codex_availability --test windows_native
+      - name: UI tests
+        env:
+          RUST_BACKTRACE: '1'
+        run: |
+          # Native platform initialization runs in its own process. Keep the
+          # real-font assertion and the complete headless suite mandatory.
+          cargo test --release --locked -p zeron-ui --lib native_diff_font_geometry -- --test-threads=1 --nocapture
+          $nativeResult = $LASTEXITCODE
+          cargo test --release --locked -p zeron-ui --lib -- --test-threads=1 --skip native_diff_font_geometry --nocapture
+          $headlessResult = $LASTEXITCODE
+          if ($nativeResult -ne 0 -or $headlessResult -ne 0) { exit 1 }
       - name: Build application
         run: cargo build --release --locked -p zeron
+      - name: Verify portable packaging
+        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
       - name: Shader layout tests
         run: cargo test --release --locked -p gpui_windows --lib layout
       - name: Application and updater tests
         run: cargo test --release --locked -p zeron -p zeron-update
-      - name: Engine and harness unit tests
-        run: cargo test --release --locked -p zeron-engine -p zeron-harness --lib
-      - name: Native harness integration tests
-        run: cargo test --release --locked -p zeron-harness --features native-fixture --test codex_availability --test windows_native
-      - name: Harness catalog tests
-        run: cargo test --release --locked -p zeron-engine --test codex_catalog
+      - name: Engine unit tests
+        run: cargo test --release --locked -p zeron-engine --lib
+      - name: Harness catalog and login tests
+        run: cargo test --release --locked -p zeron-engine --test codex_catalog --test codex_login_resolution
       - name: Auth integration tests
         run: cargo test --release --locked -p zeron-engine --test auth
-      - name: UI tests
-        run: cargo test --release --locked -p zeron-ui --lib -- --test-threads=1
+      - name: GUI subsystem and redirected CLI output
+        run: ./scripts/test-windows-startup.ps1
       - name: CLI startup without HOME
         run: |
           # Exercise real path resolution without touching the runner's account.
@@ -115,6 +133,24 @@ jobs:
           }
           $output = & ./target/release/zeron.exe status
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $probe = [Diagnostics.ProcessStartInfo]::new()
+          $probe.FileName = (Resolve-Path -LiteralPath './target/release/zeron.exe').Path
+          $probe.Arguments = 'status'
+          $probe.UseShellExecute = $false
+          $probe.CreateNoWindow = $true
+          $probe.RedirectStandardOutput = $true
+          $probe.RedirectStandardError = $true
+          $process = [Diagnostics.Process]::Start($probe)
+          try {
+            $stdout = $process.StandardOutput.ReadToEndAsync()
+            $stderr = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(10000)) {
+              $process.Kill()
+              throw 'Isolated status probe timed out'
+            }
+            if ($process.ExitCode -ne 0) { throw "Status failed: $($stderr.Result)" }
+            $output = $stdout.Result -split '\r?\n'
+          } finally { $process.Dispose() }
           $output
           if (-not (Test-Path -LiteralPath $expected -PathType Container)) {
             throw 'Windows startup did not create LOCALAPPDATA/Zeron'

@@ -147,18 +147,28 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
     if !clock.running {
         clock.running = true;
         cx.spawn(async move |cx| {
-            // GPUI's deterministic unit-test scheduler cannot be woken by an
-            // external thread. Keep its virtual timer in unit tests.
-            #[cfg(all(windows, not(test)))]
-            let mut precise_clock = windows_pulse::Clock::new(PULSE_TICK);
+            #[cfg(windows)]
+            let mut precise_clock = if cx
+                .background_executor()
+                .scheduler_executor()
+                .scheduler()
+                .as_test()
+                .is_none()
+            {
+                windows_pulse::Clock::new(PULSE_TICK)
+            } else {
+                // A deterministic scheduler must own its timers and wakeups;
+                // an OS thread cannot schedule its thread-local tasks safely.
+                None
+            };
             loop {
-                #[cfg(all(windows, not(test)))]
+                #[cfg(windows)]
                 let precise_tick = if let Some(clock) = precise_clock.as_mut() {
                     clock.tick().await
                 } else {
                     false
                 };
-                #[cfg(any(not(windows), test))]
+                #[cfg(not(windows))]
                 let precise_tick = false;
                 if !precise_tick {
                     cx.background_executor().timer(PULSE_TICK).await;
