@@ -296,18 +296,6 @@ impl EngineCore {
             uploads.clone(),
             agent_accounts_config.codex_home.join("generated_images"),
         );
-        let local_import = (profile.scope() == WorkspaceScope::Synced).then(|| {
-            local_import::LocalImporter::new(
-                data_dir,
-                &device_id,
-                profile.org_id(),
-                profile.user_id(),
-                store_for_import.clone(),
-                profile.store_root().join("journals"),
-                workspace.clone(),
-                uploads.clone(),
-            )
-        });
         let agent_accounts = AgentAccounts::new(agent_accounts_config);
         sessions.set_titles(TitleGenerator::new(
             workspace.clone(),

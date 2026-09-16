@@ -1243,35 +1243,8 @@ impl TerminalPanel {
         true
     }
 
-    fn on_scrollbar_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(metrics) = self.active_scrollbar_metrics(cx) else {
-            return;
-        };
-        window.focus(&self.focus_handle, cx);
-        let pointer_on_track = f32::from(event.position.y) - metrics.track_top;
-        let grab_offset = if (metrics.thumb_top..=metrics.thumb_top + metrics.thumb_height)
-            .contains(&pointer_on_track)
-        {
-            pointer_on_track - metrics.thumb_top
-        } else {
-            metrics.thumb_height / 2.0
-        };
-        self.scrollbar_drag = Some(ScrollbarDrag { grab_offset });
-        self.scrollbar_to_pointer(event.position.y, grab_offset, cx);
-        cx.stop_propagation();
-    }
-
     fn on_terminal_hover(&mut self, hovered: &bool, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.terminal_hovered != *hovered {
-            self.terminal_hovered = *hovered;
-            if !*hovered {
-                self.scrollbar_hovered = false;
-            }
+        if self.bar.set_list_hovered(*hovered) {
             cx.notify();
         }
     }

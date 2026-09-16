@@ -2071,6 +2071,7 @@ async fn drive_run(
                             segment_started,
                             &folded,
                             MessageStatus::Complete,
+                            &mut agent_tools,
                         ) {
                             tracing::warn!(chat = %chat_id, error = %err, "quiesce segment finish failed");
                         }
@@ -3079,6 +3080,8 @@ mod tests {
         );
         let persisted = doc.read_entries().unwrap();
         assert_eq!(identity(&persisted[0]).3, new_identity.3);
+    }
+
     #[tokio::test]
     async fn generated_image_failure_is_sanitized_even_inside_subagents() {
         use super::*;

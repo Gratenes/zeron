@@ -3109,10 +3109,6 @@ mod project_flow_tests {
                 EngineBootConfig {
                     data_dir: data.path().into(),
                     ipc_port: 0,
-                    edge_url: String::new(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
                     default_harness: zeron_proto::HarnessId::Mock,
                 },
                 cx,

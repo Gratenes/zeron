@@ -2407,6 +2407,7 @@ async fn handle_bus_event(ctx: BusCtx<'_>) -> BusOutcome {
                 question: format!("Allow this OpenCode request once? {}", props),
                 options: vec!["No".into(), "Yes".into()],
                 multi_select: false,
+                note: false,
             };
             tokio::spawn(async move {
                 let server = Server {

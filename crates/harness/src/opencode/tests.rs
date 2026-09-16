@@ -134,7 +134,9 @@ impl TurnWire {
                     let answer = answer.expect("fixture must not ask for input");
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     let _ = tx.send(questions.into_iter().map(|q| UserInputAnswer {
-                        question_id: q.id, labels: vec![if answer { "Yes" } else { "No" }.into()],
+                        question_id: q.id,
+                        labels: vec![if answer { "Yes" } else { "No" }.into()],
+                        note: None,
                     }).collect());
                     rx
                 }),

@@ -18,6 +18,7 @@ use crate::pairing::{
 };
 use crate::popover;
 use crate::popover::Loadable;
+use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -769,36 +770,45 @@ impl Render for DevicesPage {
                 .into_any_element(),
         };
 
+        let scrollbar = popover::rail(self, "devices-page-scrollbar", &theme, cx);
+
         div()
             .id("devices-page-host")
             .relative()
             .size_full()
             .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                widgets::page_column()
-                    .child(widgets::page_header(
-                        &theme,
-                        "Devices",
-                        (count > 0).then_some(count),
-                    ))
-                    .child(widgets::page_subtitle(
-                        &theme,
-                        devices_subtitle(workspace_scope),
-                    ))
-                    .when_some(self.error.clone(), |el, message| {
-                        el.child(
-                            widgets::error_strip(&theme, message)
-                                .id("devices-error")
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.error = None;
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .child(peer_card)
-                    .child(div().h(px(16.0)))
-                    .child(card),
+                div()
+                    .id("devices-page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll.scroll)
+                    .child(
+                        widgets::page_column()
+                            .child(widgets::page_header(
+                                &theme,
+                                "Devices",
+                                (count > 0).then_some(count),
+                            ))
+                            .child(widgets::page_subtitle(
+                                &theme,
+                                devices_subtitle(workspace_scope),
+                            ))
+                            .when_some(self.error.clone(), |el, message| {
+                                el.child(
+                                    widgets::error_strip(&theme, message)
+                                        .id("devices-error")
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.error = None;
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .child(peer_card)
+                            .child(div().h(px(16.0)))
+                            .child(card),
+                    ),
             )
             .children(scrollbar)
             .when_some(dialog, |el, dialog| el.child(dialog))
