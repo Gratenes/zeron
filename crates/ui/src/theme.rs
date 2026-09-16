@@ -739,8 +739,14 @@ pub struct Theme {
     pub font_sans: SharedString,
     /// Fixed Geist chrome for code-adjacent surfaces and recovery controls.
     pub font_sans_fixed: SharedString,
-    /// Monospace family for code/terminal.
+    /// User-selected family for code, diffs, and file editors.
     pub font_mono: SharedString,
+    /// User-selected family for terminal output.
+    pub font_terminal: SharedString,
+    /// Absolute pixel sizes for those two surfaces. They live on the theme
+    /// because every render site that needs them already holds a `Theme`.
+    pub code_font_size: f32,
+    pub terminal_font_size: f32,
     /// Explicit system fallbacks, for callers that want to skip the lookup.
     pub font_sans_fallback: SharedString,
     pub font_mono_fallback: SharedString,
@@ -898,16 +904,12 @@ impl Theme {
     /// backdrop blur and translucent tints. Unlike [`Self::is_glass`] this is
     /// scene-level: the blur runs on in-app content inside the window, not on
     /// the desktop behind it, so it needs no compositor vibrancy — macOS
-    /// rasterizes it in Metal, Linux in wgpu, and Windows in Direct3D (other
-    /// wgpu platforms keep opaque floats until tested). Windows window chrome
-    /// can still use native Acrylic independently of these scene-level blurs.
+    /// rasterizes it in Metal, Linux in wgpu, and Windows in Direct3D.
+    /// Windows window chrome uses native Acrylic independently of these
+    /// scene-level blurs.
     pub fn is_frost(&self) -> bool {
         self.surface_treatment == SurfaceTreatment::Frosted
-            && cfg!(any(
-                target_os = "macos",
-                target_os = "linux",
-                target_os = "windows"
-            ))
+            && cfg!(any(target_os = "macos", target_os = "linux", target_os = "windows"))
     }
 
     /// Theme-owned hover wash for chrome that sits on glass (sidebar rows,
@@ -1012,8 +1014,16 @@ impl Theme {
     /// the re-apply in `appearance::apply` is what restores vibrancy when the
     /// user switches back to dark. See zed's `crates/zed/src/main.rs`, which
     /// runs the same loop on every settings change.
+    ///
+    /// Linux composites with alpha instead: the shell draws CSD chrome, and
+    /// rounded window corners (when floating) need the corner cutouts to be
+    /// genuinely transparent. The frost itself is opaque off macOS
+    /// ([`Self::GLASS_ALPHA`]), so nothing else shows through — only the
+    /// corners.
     pub fn window_background_appearance(&self) -> gpui::WindowBackgroundAppearance {
-        if self.is_glass() {
+        if cfg!(target_os = "linux") {
+            gpui::WindowBackgroundAppearance::Transparent
+        } else if self.is_glass() {
             gpui::WindowBackgroundAppearance::Blurred
         } else {
             gpui::WindowBackgroundAppearance::Opaque
@@ -1087,6 +1097,9 @@ impl Theme {
             font_sans: "Geist".into(),
             font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
+            font_terminal: "Geist Mono".into(),
+            code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
+            terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             font_sans_fallback: system_sans().into(),
             font_mono_fallback: system_mono().into(),
         }
@@ -1183,6 +1196,9 @@ impl Theme {
             font_sans: "Geist".into(),
             font_sans_fixed: "Geist".into(),
             font_mono: "Geist Mono".into(),
+            font_terminal: "Geist Mono".into(),
+            code_font_size: crate::typography::CODE_FONT_SIZE_DEFAULT,
+            terminal_font_size: crate::typography::TERMINAL_FONT_SIZE_DEFAULT,
             font_sans_fallback: system_sans().into(),
             font_mono_fallback: system_mono().into(),
         }
@@ -1202,6 +1218,26 @@ impl Theme {
 
     fn with_font_sans(mut self, family: SharedString) -> Self {
         self.font_sans = family;
+        self
+    }
+
+    fn with_font_mono(mut self, family: SharedString) -> Self {
+        self.font_mono = family;
+        self
+    }
+
+    fn with_font_terminal(mut self, family: SharedString) -> Self {
+        self.font_terminal = family;
+        self
+    }
+
+    fn with_code_font_size(mut self, size: f32) -> Self {
+        self.code_font_size = size;
+        self
+    }
+
+    fn with_terminal_font_size(mut self, size: f32) -> Self {
+        self.terminal_font_size = size;
         self
     }
 
@@ -1341,7 +1377,11 @@ impl Theme {
             .is_some_and(|theme| theme.accent_color != accent);
         set_current_appearance(appearance);
         let next = Self::for_preferences(appearance, accent)
-            .with_font_sans(crate::typography::effective_family_name(cx));
+            .with_font_sans(crate::typography::effective_family_name(cx))
+            .with_font_mono(crate::typography::code_effective_family_name(cx))
+            .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
+            .with_code_font_size(crate::typography::code_font_size(cx))
+            .with_terminal_font_size(crate::typography::terminal_font_size(cx));
         sync_gpui_base_scrollbar(&next, cx);
         cx.set_global(next);
         // An accent-only swap leaves CURRENT_APPEARANCE unchanged, but cached
@@ -1399,7 +1439,11 @@ impl Theme {
     ) {
         let next =
             Self::for_selection(appearance, variant_id, accent_selection, surface_preference)
-                .with_font_sans(crate::typography::effective_family_name(cx));
+                .with_font_sans(crate::typography::effective_family_name(cx))
+                .with_font_mono(crate::typography::code_effective_family_name(cx))
+                .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
+                .with_code_font_size(crate::typography::code_font_size(cx))
+                .with_terminal_font_size(crate::typography::terminal_font_size(cx));
         let changed = cx.try_global::<Theme>().is_some_and(|theme| {
             theme.variant_id != next.variant_id
                 || theme.accent_selection != next.accent_selection
@@ -2539,8 +2583,8 @@ mod tests {
         set_current_appearance(Appearance::Dark);
     }
 
-    /// Both appearances are glass-forward on macOS. Light frost runs heavier
-    /// than dark's (a light tint controls the blur less), and floating cards
+    /// Both appearances are glass-forward on macOS and Windows. Light frost
+    /// runs heavier than dark's (a light tint controls the blur less), and floating cards
     /// step their tint coverage up in light so menu text stays on a
     /// known-enough background — assert both relationships so the frost and
     /// the overlay can't drift apart.

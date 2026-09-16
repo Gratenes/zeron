@@ -18,6 +18,7 @@ use crate::pairing::{
 };
 use crate::popover;
 use crate::popover::Loadable;
+use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
 
@@ -102,6 +103,7 @@ struct RenameDialog {
 
 pub struct DevicesPage {
     state: Entity<AppState>,
+    scroll: widgets::PageScroll,
     rename: Option<RenameDialog>,
     /// Device id whose id-chip shows "Copied" right now.
     copied: Option<String>,
@@ -126,6 +128,7 @@ impl DevicesPage {
         let observe = cx.observe(&state, |_, _, cx| cx.notify());
         let mut page = Self {
             state,
+            scroll: widgets::PageScroll::default(),
             rename: None,
             copied: None,
             error: None,
@@ -384,6 +387,22 @@ impl DevicesPage {
             .into_any_element();
         Some(popover::modal("rename-device-dialog", viewport, card))
     }
+
+    fn on_scroll_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scroll.set_list_hovered(*hovered) {
+            cx.notify();
+        }
+    }
+}
+
+impl popover::ScrollRailHost for DevicesPage {
+    fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
+        self.scroll.rail_bar()
+    }
+
+    fn rail_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.scroll.rail_scroll()
+    }
 }
 
 /// Human platform label (zeron settings.devices.tsx `platformLabel`).
@@ -410,7 +429,6 @@ pub fn short_id(id: &str) -> String {
 
 impl Render for DevicesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use crate::settings::widgets;
         let theme = Theme::of(cx).clone();
         let now = Utc::now();
         let (devices, local_id, workspace_scope) = {
@@ -752,36 +770,47 @@ impl Render for DevicesPage {
                 .into_any_element(),
         };
 
+        let scrollbar = popover::rail(self, "devices-page-scrollbar", &theme, cx);
+
         div()
-            .id("devices-page")
+            .id("devices-page-host")
+            .relative()
             .size_full()
-            .overflow_y_scroll()
+            .on_hover(cx.listener(Self::on_scroll_hovered))
             .child(
-                widgets::page_column()
-                    .child(widgets::page_header(
-                        &theme,
-                        "Devices",
-                        (count > 0).then_some(count),
-                    ))
-                    .child(widgets::page_subtitle(
-                        &theme,
-                        devices_subtitle(workspace_scope),
-                    ))
-                    .when_some(self.error.clone(), |el, message| {
-                        el.child(
-                            widgets::error_strip(&theme, message)
-                                .id("devices-error")
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.error = None;
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .child(peer_card)
-                    .child(div().h(px(16.0)))
-                    .child(card),
+                div()
+                    .id("devices-page")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll.scroll)
+                    .child(
+                        widgets::page_column()
+                            .child(widgets::page_header(
+                                &theme,
+                                "Devices",
+                                (count > 0).then_some(count),
+                            ))
+                            .child(widgets::page_subtitle(
+                                &theme,
+                                devices_subtitle(workspace_scope),
+                            ))
+                            .when_some(self.error.clone(), |el, message| {
+                                el.child(
+                                    widgets::error_strip(&theme, message)
+                                        .id("devices-error")
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.error = None;
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .child(peer_card)
+                            .child(div().h(px(16.0)))
+                            .child(card),
+                    ),
             )
+            .children(scrollbar)
             .when_some(dialog, |el, dialog| el.child(dialog))
     }
 }

@@ -242,6 +242,7 @@ fn run_player(path: &Path) -> Result<(), String> {
         ])
         .creation_flags(0x08000000)
         .env("ZERON_SOUND_PATH", path)
+        .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("powershell failed: {e}"))?;
     if output.status.success() {
