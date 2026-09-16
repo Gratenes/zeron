@@ -1159,6 +1159,9 @@ mod tests {
     }
 }
 
-#[cfg(all(windows, not(test)))]
+// Available in test builds too: the closure below decides at runtime (via
+// the scheduler's test-detection) whether to use the OS precise clock, so
+// the module must exist wherever `#[cfg(windows)]` code compiles.
+#[cfg(windows)]
 #[path = "motion/windows_pulse.rs"]
 mod windows_pulse;
