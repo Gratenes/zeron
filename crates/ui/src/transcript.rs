@@ -4421,7 +4421,6 @@ impl Transcript {
             // Document fixtures may seed the real cache; no host reads are made.
             return self.chat_id.iter().cloned().collect();
         }
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(state) = self.source.native() {
             // A native override must not guess the primary chat's device.
             if self.doc_override.is_some() {
@@ -4468,7 +4467,6 @@ impl Transcript {
         let mut min_retry: Option<Duration> = None;
         for dev in device_ids {
             if begin_load(dev, path) {
-                #[cfg(not(target_arch = "wasm32"))]
                 self.spawn_attachment_load(dev.clone(), path.to_string(), cx);
             }
             match attachment_snapshot(dev, path) {
@@ -4496,7 +4494,6 @@ impl Transcript {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn spawn_attachment_load(&mut self, device_id: String, path: String, cx: &mut Context<Self>) {
         use crate::attachments::{read_attachment_image, store_error, store_loaded};
         let Some(state) = self.source.native() else {
