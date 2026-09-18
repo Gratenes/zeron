@@ -33,7 +33,7 @@ env -u NO_COLOR RUSTUP_TOOLCHAIN=nightly-2026-09-08 \
   trunk serve --port 8080
 ```
 
-`index.html` selects the `comet-web` binary. The bundle is written to `apps/web/dist/` (ignored by git); `--locked` rejects unreviewed dependency or lockfile changes. The manifest pins the published [`Gratenes/zui@8d78b9c2175b66e6881fa1ba0c576fffe847b1d0`](https://github.com/Gratenes/zui/commit/8d78b9c2175b66e6881fa1ba0c576fffe847b1d0), including bundled color emoji, touch and browser focus fixes. All web runtime packages resolve from Git, not the sibling checkout or an ignored local snapshot.
+`index.html` selects the `comet-web` binary. The bundle is written to `apps/web/dist/` (ignored by git); `--locked` rejects unreviewed dependency or lockfile changes. The manifest pins the published [`Gratenes/zui@93ab2ca07d80b5c2fac198086d897ca7c70ed28c`](https://github.com/Gratenes/zui/commit/93ab2ca07d80b5c2fac198086d897ca7c70ed28c), including bundled color emoji, touch and browser focus fixes. All web runtime packages resolve from Git, not the sibling checkout or an ignored local snapshot.
 
 [`trunk.toml`](trunk.toml) binds development serving to `127.0.0.1:8080` and sets the GPUI/WASM headers:
 
