@@ -55,7 +55,14 @@ fn gateway_router(state: Gateway) -> Router {
         .route("/healthz", get(health))
         .route("/pair/{*path}", any(proxy_pair))
         .route("/device/{device_id}/ws", get(proxy_socket))
-        .fallback_service(ServeDir::new(web_assets_dir()).append_index_html_on_directories(true))
+        .fallback_service(
+            // Serves `<file>.zst` / `<file>.gz` siblings (see apps/web/build-release.sh)
+            // when the client accepts them; the plain file remains the fallback.
+            ServeDir::new(web_assets_dir())
+                .append_index_html_on_directories(true)
+                .precompressed_zstd()
+                .precompressed_gzip(),
+        )
         .layer(middleware::from_fn(web_headers))
         .layer(middleware::from_fn_with_state(state.clone(), enforce_host))
         .with_state(state)
@@ -87,6 +94,10 @@ async fn web_headers(request: Request, next: Next) -> Response {
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_control));
+    // ServeDir picks a precompressed sibling per request but does not say so.
+    response
+        .headers_mut()
+        .append(header::VARY, HeaderValue::from_static("accept-encoding"));
     response
 }
 
