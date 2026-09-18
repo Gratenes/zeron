@@ -9551,7 +9551,11 @@ impl Render for Shell {
                 let sidebar_now = self.eval_tween(self.sidebar_tween, self.sidebar_target());
                 // Hairline on its right edge — full height like the tone,
                 // so the sidebar column reads as its own surface.
-                let sidebar_tone = presentation::sidebar_tone(sidebar_now, border_color);
+                // Mobile mounts no docked sidebar (the drawer paints its own
+                // surface), so the persisted desktop width must not leave a
+                // tinted column behind the conversation.
+                let sidebar_tone =
+                    (!mobile).then(|| presentation::sidebar_tone(sidebar_now, border_color));
                 // The content row spans the FULL window height — the titlebar
                 // overlays it (glass, no fill), so the transcript can scroll
                 // under the header and fade out at its edge. Columns that
@@ -9582,7 +9586,7 @@ impl Render for Shell {
                     .child(self.render_titlebar_cluster(cx))
                     .children(mobile_right)
                     .children(overlays);
-                root.child(sidebar_tone)
+                root.children(sidebar_tone)
                     .child(motion::fade_in("phase-app", page))
             }
             GatePhase::Loading => root, // splash overlay covers boot
