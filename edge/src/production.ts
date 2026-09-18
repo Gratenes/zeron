@@ -12,7 +12,8 @@ export default {
     // Only Trunk's entry point and hashed bundles are static routes. Never let
     // asset routing mask an API, native WebSocket, installer, or preview path.
     const staticPath = url.pathname === "/" || url.pathname === "/index.html"
-      || /^\/comet-web-[a-f0-9]+(?:_bg)?\.(?:js|wasm)$/.test(url.pathname);
+      || /^\/comet-web-[a-f0-9]+(?:_bg)?\.(?:js|wasm)$/.test(url.pathname)
+      || /^\/[a-f0-9]+-zeron-browser-initializer\.js$/.test(url.pathname);
     if (url.origin === env.WORKOS_BROWSER_ORIGIN && staticPath
       && (request.method === "GET" || request.method === "HEAD")
       && !request.headers.has("upgrade")) {

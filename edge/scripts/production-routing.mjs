@@ -9,7 +9,7 @@ const { unstable_startWorker } = await import("wrangler");
 process.chdir(fileURLToPath(new URL("..", import.meta.url)));
 const dist = new URL("../../apps/web/dist/", import.meta.url);
 const html = await readFile(new URL("index.html", dist), "utf8");
-const assets = (await readdir(dist)).filter(name => /^comet-web-[a-f0-9]+(?:_bg)?\.(js|wasm)$/.test(name));
+const assets = (await readdir(dist)).filter(name => /^(?:comet-web-[a-f0-9]+(?:_bg)?|[a-f0-9]+-zeron-browser-initializer)\.(js|wasm)$/.test(name));
 assert.ok(assets.some(name => name.endsWith(".js")), "build the JS bundle first");
 assert.ok(assets.some(name => name.endsWith(".wasm")), "build the WASM bundle first");
 const origin = "web.zeron.sh";
@@ -59,6 +59,9 @@ await withWorkers(origin, false, async (production, baseline) => {
         "cross-origin-embedder-policy": "require-corp",
         "cross-origin-resource-policy": "same-origin"
       })) assert.equal(response.headers.get(header), value, path);
+      // Hashed bundle files never change, so they cache forever; the shell must revalidate.
+      if (path === "/") assert.doesNotMatch(response.headers.get("cache-control") ?? "", /immutable/, path);
+      else assert.match(response.headers.get("cache-control") ?? "", /max-age=31536000.*immutable/, path);
       assert.match(response.headers.get("content-type") ?? "", path.endsWith(".wasm") ? /application\/wasm/ : path.endsWith(".js") ? /javascript/ : /text\/html/);
       const body = Buffer.from(await response.arrayBuffer());
       assert.deepEqual(body, method === "HEAD" ? Buffer.alloc(0) : path === "/" ? Buffer.from(html) : await readFile(new URL(path.slice(1), dist)), path);
