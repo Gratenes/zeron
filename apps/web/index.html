@@ -6,11 +6,18 @@
   <title>Zeron</title>
   <link data-trunk rel="copy-file" href="app.js">
   <link data-trunk rel="copy-file" href="_headers">
-  <link data-trunk rel="rust" data-bin="zeron-browser" data-bindgen-target="web" data-wasm-opt="0">
-  <script type="module" src="/app.js?v=6"></script>
+  <link data-trunk rel="rust" data-bin="zeron-browser" data-bindgen-target="web" data-wasm-opt="0" data-initializer="zeron-browser-initializer.js">
+  <script type="module" src="/app.js?v=7"></script>
   <style>
     html,body{margin:0;height:100%;overflow:hidden;background:#18181b;color:#fafafa;font:14px system-ui,sans-serif}
     canvas{display:block;width:100%;height:100%;outline:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+    #loading{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;color:#b8b8c0}
+    #loading[hidden]{display:none}
+    #loading progress{width:min(260px,60vw);height:6px;appearance:none;border:0;border-radius:3px;background:#3f3f46;overflow:hidden}
+    #loading progress::-webkit-progress-bar{background:#3f3f46}
+    #loading progress::-webkit-progress-value{background:#fafafa;transition:width .15s}
+    #loading progress::-moz-progress-bar{background:#fafafa}
+    #loading.failed progress{display:none}
     #pairing{position:fixed;inset:0;z-index:20;display:grid;place-items:center;background:rgba(24,24,27,.88)}
     #pairing[hidden]{display:none}
     #pairing form{box-sizing:border-box;width:min(460px,calc(100vw - 32px));padding:24px;border:1px solid #3f3f46;border-radius:14px;background:#18181b;box-shadow:0 20px 60px #0008}
@@ -23,7 +30,30 @@
   </style>
 </head>
 <body>
-  <section id="pairing">
+  <div id="loading" role="status" aria-live="polite"><progress></progress><span>Loading Kratos…</span></div>
+  <script>
+    // Hide the splash once GPUI attaches its canvas; surface boot failures instead of spinning forever.
+    (() => {
+      const loading = document.getElementById("loading");
+      const watcher = new MutationObserver(() => {
+        if (document.querySelector("canvas")) { loading.hidden = true; stop(); }
+      });
+      const fail = () => {
+        loading.classList.add("failed");
+        loading.querySelector("span").textContent = "Couldn't load Kratos. Reload to try again.";
+        stop();
+      };
+      const stop = () => {
+        watcher.disconnect();
+        removeEventListener("error", fail);
+        removeEventListener("unhandledrejection", fail);
+      };
+      watcher.observe(document.body, { childList: true, subtree: true });
+      addEventListener("error", fail);
+      addEventListener("unhandledrejection", fail);
+    })();
+  </script>
+  <section id="pairing" hidden>
     <form onsubmit="return false">
       <h1>Pair this browser</h1>
       <p>Paste a one-use invitation from <code>zeron peer invite</code>. Your private device key stays non-extractable in IndexedDB.</p>

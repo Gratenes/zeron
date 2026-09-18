@@ -165,5 +165,6 @@ element("pair").onclick = () => run(async () => {
   await redeem();
   await authenticate();
 });
-state.identity = await storedIdentity();
+state.identity = await storedIdentity().catch(() => null);
 if (state.identity) run(authenticate);
+else element("pairing").hidden = false;

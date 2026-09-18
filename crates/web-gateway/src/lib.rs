@@ -68,6 +68,7 @@ fn web_assets_dir() -> std::path::PathBuf {
 }
 
 async fn web_headers(request: Request, next: Next) -> Response {
+    let cache_control = cache_control(request.uri().path());
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         HeaderName::from_static("cross-origin-embedder-policy"),
@@ -77,10 +78,40 @@ async fn web_headers(request: Request, next: Next) -> Response {
         HeaderName::from_static("cross-origin-opener-policy"),
         HeaderValue::from_static("same-origin"),
     );
+    // Never let a missing hashed asset (404) be cached as immutable.
+    let cache_control = if cache_control == IMMUTABLE && !response.status().is_success() {
+        NO_CACHE
+    } else {
+        cache_control
+    };
     response
         .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_control));
     response
+}
+
+const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+const NO_CACHE: &str = "no-cache";
+
+/// Trunk content-hashes its bundle output (`/zeron-browser-<hash>*` from
+/// wasm-bindgen, `/<hash>-<name>` for copied modules), so those are safe to
+/// cache forever. The unhashed shell revalidates; API routes carry tokens.
+fn cache_control(path: &str) -> &'static str {
+    if path == "/healthz" || path.starts_with("/pair/") || path.starts_with("/device/") {
+        "no-store"
+    } else if is_hashed_asset(path) {
+        IMMUTABLE
+    } else {
+        NO_CACHE
+    }
+}
+
+fn is_hashed_asset(path: &str) -> bool {
+    let name = path.trim_start_matches('/');
+    name.starts_with("zeron-browser-")
+        || name.split_once('-').is_some_and(|(hash, _)| {
+            (8..=16).contains(&hash.len()) && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 async fn enforce_host(State(state): State<Gateway>, request: Request, next: Next) -> Response {
@@ -288,6 +319,20 @@ fn valid_external_host(value: &str) -> bool {
 mod tests {
     use super::*;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    #[test]
+    fn caches_hashed_bundle_forever_and_never_caches_api_routes() {
+        assert_eq!(cache_control("/zeron-browser-a9e6_bg.wasm"), IMMUTABLE);
+        assert_eq!(cache_control("/zeron-browser-a9e6.js"), IMMUTABLE);
+        assert_eq!(cache_control("/1f3a9c07d2b45e68-zeron-browser-initializer.js"), IMMUTABLE);
+        assert_eq!(cache_control("/abc-thing.js"), NO_CACHE);
+        assert_eq!(cache_control("/"), NO_CACHE);
+        assert_eq!(cache_control("/index.html"), NO_CACHE);
+        assert_eq!(cache_control("/app.js"), NO_CACHE);
+        assert_eq!(cache_control("/pair/authenticate"), "no-store");
+        assert_eq!(cache_control("/device/abc/ws"), "no-store");
+        assert_eq!(cache_control("/healthz"), "no-store");
+    }
 
     #[test]
     fn parses_websocket_bearer_without_accepting_empty_tokens() {
