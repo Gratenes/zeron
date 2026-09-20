@@ -297,7 +297,7 @@ fn main() -> anyhow::Result<()> {
                 ipc_port: std::env::var("KRATOS_IPC_PORT")
                     .ok()
                     .and_then(|p| p.parse().ok())
-                    .unwrap_or(27654),
+                    .unwrap_or(27655),
                 edge_url: String::new(),
                 edge_token: None,
                 org_id: None,
@@ -361,7 +361,7 @@ fn engine_config_from_env() -> kratos_engine::EngineConfig {
         ipc_port: std::env::var("KRATOS_IPC_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
-            .unwrap_or(27654),
+            .unwrap_or(27655),
         default_harness: harness_from_env(),
     }
 }
