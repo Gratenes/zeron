@@ -91,7 +91,7 @@ async function redeem() {
   const identity = await newIdentity();
   const publicKey = new Uint8Array(identity.publicKey);
   const invite = invitation.invite;
-  const payload = frame("zeron.peer-auth.invite-redeem.v1", [
+  const payload = frame("kratos.peer-auth.invite-redeem.v1", [
     Uint8Array.of(invite.version),
     invite.profileId,
     invite.inviteId,
@@ -118,7 +118,7 @@ async function authenticate() {
     profileId: identity.profileId,
     deviceId: identity.deviceId,
   });
-  const payload = frame("zeron.peer-auth.challenge.v1", [
+  const payload = frame("kratos.peer-auth.challenge.v1", [
     challenge.profileId,
     challenge.deviceId,
     challenge.challengeId,

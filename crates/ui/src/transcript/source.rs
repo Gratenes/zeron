@@ -2,7 +2,7 @@
 //! entries; they do not own an engine, transport, or a second message schema.
 
 use gpui::{App, Context, Entity};
-use zeron_doc::SessionMessageEntry;
+use kratos_doc::SessionMessageEntry;
 
 use super::TranscriptReplayState;
 use crate::state::AppState;

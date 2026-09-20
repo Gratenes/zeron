@@ -19,7 +19,7 @@ use windows_sys::Win32::System::Threading::{
     GetExitCodeProcess, INFINITE, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
     STARTUPINFOEXW, WaitForSingleObject,
 };
-use zeron_harness::windows_process::{Attributes, Job};
+use kratos_harness::windows_process::{Attributes, Job};
 
 /// One teardown operation shared by natural exit, close, and shutdown. Empty
 /// resource slots mean ownership moved, not that ConPTY and its reader closed.
@@ -233,7 +233,7 @@ pub(super) fn open(
     // Quotes cannot occur in a Windows file name; reject instead of interpreting.
     anyhow::ensure!(!shell.contains('"'), "invalid shell executable name");
     // Retain portable-pty's registry-refreshed Windows environment, including
-    // PATH updates made after Zeron started.
+    // PATH updates made after Kratos started.
     let builder = CommandBuilder::new(shell);
     let executable = builder
         .get_env("PATH")
@@ -275,7 +275,7 @@ pub(super) fn open(
     for (key, value) in [
         ("TERM", "xterm-256color"),
         ("COLORTERM", "truecolor"),
-        ("TERM_PROGRAM", "Zeron"),
+        ("TERM_PROGRAM", "Kratos"),
     ] {
         environment.insert(env_key(OsStr::new(key)), (key.into(), value.into()));
     }

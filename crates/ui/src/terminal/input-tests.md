@@ -9,13 +9,13 @@ bridge. The currently committed desktop and web pins predate that bridge.
 With that runtime resolved, run:
 
 ```sh
-cargo test --locked -p zeron-ui --features web-input-tests --lib terminal::panel::input_tests -- --nocapture
-cargo test --locked -p zeron-ui --features web-input-tests --lib terminal:: -- --nocapture
+cargo test --locked -p kratos-ui --features web-input-tests --lib terminal::panel::input_tests -- --nocapture
+cargo test --locked -p kratos-ui --features web-input-tests --lib terminal:: -- --nocapture
 ```
 
 Until the runtime is published, use a disposable workspace under `target/` rather
 than editing release pins/locks: copy the root manifests, `crates/`, and
-`apps/zeron/`; link `vendor/` and `scripts/` to the original workspace; add local
+`apps/kratos/`; link `vendor/` and `scripts/` to the original workspace; add local
 `[patch."https://github.com/zeronsh/zui"]` entries for `gpui`, `gpui_macros`,
 `gpui_platform`, and `gpui_tokio`. Resolve its lock once, then run the commands
 above there. Linux needs the normal WebKitGTK/JSON-GLib and GPUI development

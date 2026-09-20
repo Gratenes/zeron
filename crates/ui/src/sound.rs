@@ -7,7 +7,7 @@
 //!   background thread: `afplay` (macOS), PowerShell `Media.SoundPlayer`
 //!   (Windows), first of `paplay`/`pw-play`/`aplay`/`ffplay`/`mpv` (Linux —
 //!   WAV, so even bare ALSA `aplay` decodes it);
-//! - `ZERON_DISABLE_SOUND` env kill-switch + the `soundEnabled` ui-setting;
+//! - `KRATOS_DISABLE_SOUND` env kill-switch + the `soundEnabled` ui-setting;
 //! - failures are logged and swallowed — a missing player must never bother
 //!   the session flow.
 
@@ -24,7 +24,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
-const DISABLE_ENV: &str = "ZERON_DISABLE_SOUND";
+const DISABLE_ENV: &str = "KRATOS_DISABLE_SOUND";
 #[cfg(not(target_arch = "wasm32"))]
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -239,7 +239,7 @@ fn create_temp_file() -> std::io::Result<(std::fs::File, TempSoundFile)> {
     for _ in 0..128 {
         let id = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path =
-            std::env::temp_dir().join(format!("zeron-sound-{}-{id}.wav", std::process::id()));
+            std::env::temp_dir().join(format!("kratos-sound-{}-{id}.wav", std::process::id()));
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -267,7 +267,7 @@ fn run_player(path: &Path) -> Result<(), String> {
     // SoundPlayer handles WAV natively; PlaySync keeps the process alive for
     // the chime's duration. Pass the path through the child environment rather
     // than interpolating it into PowerShell source (paths may contain quotes).
-    let script = "(New-Object Media.SoundPlayer $env:ZERON_SOUND_PATH).PlaySync()";
+    let script = "(New-Object Media.SoundPlayer $env:KRATOS_SOUND_PATH).PlaySync()";
     let output = std::process::Command::new("powershell.exe")
         .args([
             "-NoLogo",
@@ -277,7 +277,7 @@ fn run_player(path: &Path) -> Result<(), String> {
             script,
         ])
         .creation_flags(0x08000000)
-        .env("ZERON_SOUND_PATH", path)
+        .env("KRATOS_SOUND_PATH", path)
         .output()
         .map_err(|e| format!("powershell failed: {e}"))?;
     if output.status.success() {
@@ -345,7 +345,7 @@ fn run_checked(program: &str, args: &[&str], path: &Path) -> Result<(), String> 
 // Notification decision (shared by sound and desktop banners)
 // ---------------------------------------------------------------------------
 
-use zeron_proto::{
+use kratos_proto::{
     Session,
     view::{Indicator, effective_indicator},
 };
@@ -367,7 +367,7 @@ impl SessionNotificationState {
             fresh: now
                 .signed_duration_since(session.updated_at)
                 .num_milliseconds()
-                <= zeron_proto::view::SESSION_STALE_MS,
+                <= kratos_proto::view::SESSION_STALE_MS,
         }
     }
 
@@ -396,10 +396,10 @@ impl SessionNotificationState {
 /// exposing `Offline` or `Reconnecting`. Notify once when that durable state is
 /// first crossed; booting into an outage is seeded silently by the shell.
 pub(crate) fn connectivity_sound_since(
-    current: zeron_proto::ConnectivityState,
-    previous: zeron_proto::ConnectivityState,
+    current: kratos_proto::ConnectivityState,
+    previous: kratos_proto::ConnectivityState,
 ) -> Option<Sound> {
-    use zeron_proto::ConnectivityState as State;
+    use kratos_proto::ConnectivityState as State;
     let degraded = matches!(current, State::Offline | State::Reconnecting);
     let was_degraded = matches!(previous, State::Offline | State::Reconnecting);
     (degraded && !was_degraded).then_some(Sound::Attention)
@@ -411,7 +411,7 @@ pub(crate) fn connectivity_sound_since(
 /// boot-time outage. Runtime replacement resets the observation flag.
 #[derive(Debug, Default)]
 pub(crate) struct ConnectivityNotificationState {
-    previous: Option<zeron_proto::ConnectivityState>,
+    previous: Option<kratos_proto::ConnectivityState>,
     first_observed_at: Option<Instant>,
     armed: bool,
 }
@@ -421,7 +421,7 @@ impl ConnectivityNotificationState {
 
     pub(crate) fn update(
         &mut self,
-        current: zeron_proto::ConnectivityState,
+        current: kratos_proto::ConnectivityState,
         observed: bool,
         now: Instant,
     ) -> Option<Sound> {
@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn durable_connectivity_degradation_chimes_once_per_outage() {
-        use zeron_proto::ConnectivityState as State;
+        use kratos_proto::ConnectivityState as State;
 
         assert_eq!(
             connectivity_sound_since(State::Connected, State::Disabled),
@@ -589,7 +589,7 @@ mod tests {
 
     #[test]
     fn connectivity_boot_outages_seed_silently_then_later_outages_alert() {
-        use zeron_proto::ConnectivityState as State;
+        use kratos_proto::ConnectivityState as State;
         let t0 = Instant::now();
 
         // Warm daemon: the first authoritative snapshot is already degraded.

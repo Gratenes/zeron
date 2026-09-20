@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::watch;
-use zeron_proto::EngineInfo;
-use zeron_rpc::{RpcClient, RpcError, methods};
+use kratos_proto::EngineInfo;
+use kratos_rpc::{RpcClient, RpcError, methods};
 
 /// How this UI reached its engine.
 #[derive(Debug, Clone, PartialEq, Eq)]

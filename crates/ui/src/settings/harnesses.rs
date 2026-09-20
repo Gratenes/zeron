@@ -25,14 +25,14 @@ use gpui::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
-use zeron_engine::registry::TitleSettings;
+use kratos_engine::registry::TitleSettings;
 #[cfg(not(target_arch = "wasm32"))]
-use zeron_engine::registry::{HarnessDescriptor, descriptor_enabled};
+use kratos_engine::registry::{HarnessDescriptor, descriptor_enabled};
 #[cfg(target_arch = "wasm32")]
-use zeron_proto::{HarnessDescriptor, HarnessId, descriptor_enabled};
+use kratos_proto::{HarnessDescriptor, HarnessId, descriptor_enabled};
 #[cfg(not(target_arch = "wasm32"))]
-use zeron_proto::{HarnessId, Model};
-use zeron_rpc::methods;
+use kratos_proto::{HarnessId, Model};
+use kratos_rpc::methods;
 
 #[cfg(target_arch = "wasm32")]
 use crate::pickers::visible_harnesses;
@@ -368,7 +368,7 @@ impl HarnessesPage {
                             .filter(|h| {
                                 descriptor_enabled(h)
                                     && h.installed
-                                    && zeron_harness::supports_titles(h.id)
+                                    && kratos_harness::supports_titles(h.id)
                                     && h.id != HarnessId::Mock
                             })
                             .map(|h| {

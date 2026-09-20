@@ -4,7 +4,7 @@
 
 use serde_json::json;
 use tokio::sync::mpsc;
-use zeron_rpc::{ClientFrame, RpcClient, RpcError, ServerFrame, decode_server_frame};
+use kratos_rpc::{ClientFrame, RpcClient, RpcError, ServerFrame, decode_server_frame};
 
 #[tokio::test]
 async fn typed_call_uses_the_shared_wire_protocol() {

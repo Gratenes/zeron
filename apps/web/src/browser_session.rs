@@ -5,7 +5,7 @@ use serde::Deserialize;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Headers, Request, RequestInit, Response};
-use zeron_ui::{
+use kratos_ui::{
     shell,
     state::{AppState, EngineHandle},
 };
@@ -66,8 +66,8 @@ impl BrowserSession {
                     let mut closed = handle.client().watch_closed();
                     self.state.clone().update(cx, |state, cx| {
                         state.attach_engine(handle, cx);
-                        state.apply_auth(zeron_proto::AuthState::SignedIn {
-                            user: zeron_proto::UserProfile {
+                        state.apply_auth(kratos_proto::AuthState::SignedIn {
+                            user: kratos_proto::UserProfile {
                                 id: auth.device_id.clone(),
                                 email: "paired-browser@local".into(),
                                 name: Some("Paired browser".into()),

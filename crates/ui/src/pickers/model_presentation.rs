@@ -1,7 +1,7 @@
 //! Actual desktop model-picker paint. Callers own catalogs, filtering and actions.
 use crate::{theme::Theme, typography::ui_rems};
 use gpui::{prelude::*, *};
-use zeron_proto::HarnessId;
+use kratos_proto::HarnessId;
 
 pub const WIDTH: f32 = 304.0;
 pub const LIST_HEIGHT: f32 = 216.0;
@@ -29,7 +29,7 @@ pub fn empty_list_note(theme: &Theme, copy: &str) -> AnyElement {
         .into_any_element()
 }
 /// Native search ranking: model label first, provider attribution second.
-pub fn match_rank(query: &str, model: &zeron_proto::Model) -> Option<usize> {
+pub fn match_rank(query: &str, model: &kratos_proto::Model) -> Option<usize> {
     let by_label = crate::popover::match_rank(query, &model.label);
     let by_description = crate::popover::match_rank(
         query,

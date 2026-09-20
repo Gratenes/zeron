@@ -23,7 +23,7 @@ impl Drop for Server {
 }
 
 async fn protected_principal(
-    axum::Extension(principal): axum::Extension<zeron_sync::peer::PeerPrincipal>,
+    axum::Extension(principal): axum::Extension<kratos_sync::peer::PeerPrincipal>,
 ) -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({
         "profileId": principal.profile_id,
@@ -166,7 +166,7 @@ async fn http_pairing_uses_real_proofs_and_enforces_replay_revocation_and_isolat
         .expect("member engine discovery")
         .error_for_status()
         .expect("member engine discovery status")
-        .json::<Vec<zeron_engine::peer_auth::DeviceRecord>>()
+        .json::<Vec<kratos_engine::peer_auth::DeviceRecord>>()
         .await
         .expect("member engine discovery body");
     assert_eq!(engines.len(), 1);
@@ -180,7 +180,7 @@ async fn http_pairing_uses_real_proofs_and_enforces_replay_revocation_and_isolat
         .expect("cached client device discovery")
         .error_for_status()
         .expect("cached client device discovery status")
-        .json::<Vec<zeron_engine::peer_auth::DeviceRecord>>()
+        .json::<Vec<kratos_engine::peer_auth::DeviceRecord>>()
         .await
         .expect("cached client device discovery body");
     assert_eq!(cached_client_devices.len(), 1);

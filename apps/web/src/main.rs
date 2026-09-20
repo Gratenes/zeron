@@ -8,11 +8,11 @@ use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
-use zeron_proto::HarnessId;
+use kratos_proto::HarnessId;
 #[cfg(target_arch = "wasm32")]
-use zeron_ui::state::AppState;
+use kratos_ui::state::AppState;
 #[cfg(target_arch = "wasm32")]
-use zeron_ui::{
+use kratos_ui::{
     EngineBootConfig, app_menus, appearance, composer, history, settings, shell, terminal,
     theme_library, typography,
 };
@@ -21,7 +21,7 @@ use zeron_ui::{
 fn main() {
     gpui_platform::web_init();
     let app = gpui_platform::application()
-        .with_assets(zeron_ui::icons::Assets)
+        .with_assets(kratos_ui::icons::Assets)
         .run_embedded(|cx: &mut App| {
             let data_dir = settings::browser_preferences_namespace();
             let ui_settings = settings::UiSettings::load(&data_dir);

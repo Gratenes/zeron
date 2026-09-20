@@ -56,8 +56,8 @@ pub struct SourceLineRef {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DiffHighlights {
-    pub old: Option<Arc<zeron_syntax::HighlightedDocument>>,
-    pub new: Option<Arc<zeron_syntax::HighlightedDocument>>,
+    pub old: Option<Arc<kratos_syntax::HighlightedDocument>>,
+    pub new: Option<Arc<kratos_syntax::HighlightedDocument>>,
 }
 
 impl DiffHighlights {
@@ -88,7 +88,7 @@ impl DiffHighlights {
         }
     }
 
-    pub fn spans(&self, line: &DiffLine) -> &[zeron_syntax::HighlightSpan] {
+    pub fn spans(&self, line: &DiffLine) -> &[kratos_syntax::HighlightSpan] {
         let Some(source_ref) = self.source_ref(line) else {
             return &[];
         };
@@ -374,7 +374,7 @@ pub(super) fn code_text_viewport(
 /// paint-only syntax runs.
 pub(super) fn diff_line_row(
     line: &DiffLine,
-    spans: &[zeron_syntax::HighlightSpan],
+    spans: &[kratos_syntax::HighlightSpan],
     theme: &Theme,
     gutter_px: f32,
     code_width: DiffCodeWidth,

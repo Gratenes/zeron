@@ -1,5 +1,5 @@
 [package]
-name = "zeron-rpc"
+name = "kratos-rpc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,11 +10,11 @@ default = ["native"]
 # The same typed client/reducer runs on native and browser executors.
 # Wire-only users still need neither a runtime nor networking dependencies.
 client = ["dep:tokio", "dep:futures", "dep:tracing", "dep:wasm-bindgen-futures"]
-native = ["client", "tokio/full", "dep:zeron-proto", "dep:zeron-sync", "dep:tokio-tungstenite", "dep:anyhow", "dep:async-trait", "dep:uuid"]
+native = ["client", "tokio/full", "dep:kratos-proto", "dep:kratos-sync", "dep:tokio-tungstenite", "dep:anyhow", "dep:async-trait", "dep:uuid"]
 
 [dependencies]
-zeron-proto = { workspace = true, optional = true }
-zeron-sync = { workspace = true, optional = true }
+kratos-proto = { workspace = true, optional = true }
+kratos-sync = { workspace = true, optional = true }
 tokio = { version = "1", default-features = false, features = ["sync", "macros", "rt"], optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
@@ -31,4 +31,4 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 
 
 [dev-dependencies]
-zeron-doc.workspace = true
+kratos-doc.workspace = true

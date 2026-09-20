@@ -11,8 +11,8 @@
 /app.js
   Cache-Control: no-cache
 
-/zeron-browser-*
+/kratos-browser-*
   Cache-Control: public, max-age=31536000, immutable
 
-/*-zeron-browser-initializer.js
+/*-kratos-browser-initializer.js
   Cache-Control: public, max-age=31536000, immutable

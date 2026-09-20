@@ -13,7 +13,7 @@ use futures::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tower_http::services::ServeDir;
-use zeron_engine::auth::{Auth, AuthConfig};
+use kratos_engine::auth::{Auth, AuthConfig};
 
 const MAX_PROXY_BODY: usize = 32 * 1024;
 const RPC_PROTOCOL: &str = "kratos-rpc";
@@ -36,7 +36,7 @@ pub async fn serve(
         .context("--hostname must be an external DNS hostname")?;
     let upstream = Auth::open(AuthConfig::new(data_dir))?
         .peer_endpoint()
-        .context("initialize this installation with `zeron peer init` first")?;
+        .context("initialize this installation with `kratos peer init` first")?;
     let state = Gateway {
         upstream,
         allowed_host,
@@ -69,7 +69,7 @@ fn gateway_router(state: Gateway) -> Router {
 }
 
 fn web_assets_dir() -> std::path::PathBuf {
-    std::env::var_os("ZERON_WEB_ASSETS")
+    std::env::var_os("KRATOS_WEB_ASSETS")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("apps/web/dist"))
 }
@@ -104,7 +104,7 @@ async fn web_headers(request: Request, next: Next) -> Response {
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 const NO_CACHE: &str = "no-cache";
 
-/// Trunk content-hashes its bundle output (`/zeron-browser-<hash>*` from
+/// Trunk content-hashes its bundle output (`/kratos-browser-<hash>*` from
 /// wasm-bindgen, `/<hash>-<name>` for copied modules), so those are safe to
 /// cache forever. The unhashed shell revalidates; API routes carry tokens.
 fn cache_control(path: &str) -> &'static str {
@@ -119,7 +119,7 @@ fn cache_control(path: &str) -> &'static str {
 
 fn is_hashed_asset(path: &str) -> bool {
     let name = path.trim_start_matches('/');
-    name.starts_with("zeron-browser-")
+    name.starts_with("kratos-browser-")
         || name.split_once('-').is_some_and(|(hash, _)| {
             (8..=16).contains(&hash.len()) && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
@@ -333,9 +333,9 @@ mod tests {
 
     #[test]
     fn caches_hashed_bundle_forever_and_never_caches_api_routes() {
-        assert_eq!(cache_control("/zeron-browser-a9e6_bg.wasm"), IMMUTABLE);
-        assert_eq!(cache_control("/zeron-browser-a9e6.js"), IMMUTABLE);
-        assert_eq!(cache_control("/1f3a9c07d2b45e68-zeron-browser-initializer.js"), IMMUTABLE);
+        assert_eq!(cache_control("/kratos-browser-a9e6_bg.wasm"), IMMUTABLE);
+        assert_eq!(cache_control("/kratos-browser-a9e6.js"), IMMUTABLE);
+        assert_eq!(cache_control("/1f3a9c07d2b45e68-kratos-browser-initializer.js"), IMMUTABLE);
         assert_eq!(cache_control("/abc-thing.js"), NO_CACHE);
         assert_eq!(cache_control("/"), NO_CACHE);
         assert_eq!(cache_control("/index.html"), NO_CACHE);

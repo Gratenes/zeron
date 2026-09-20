@@ -3,10 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,interactive-widget=resizes-content">
-  <title>Zeron</title>
+  <title>Kratos</title>
   <link data-trunk rel="copy-file" href="app.js">
   <link data-trunk rel="copy-file" href="_headers">
-  <link data-trunk rel="rust" data-bin="zeron-browser" data-bindgen-target="web" data-wasm-opt="0" data-initializer="zeron-browser-initializer.js">
+  <link data-trunk rel="rust" data-bin="kratos-browser" data-bindgen-target="web" data-wasm-opt="0" data-initializer="kratos-browser-initializer.js">
   <script type="module" src="/app.js?v=7"></script>
   <style>
     html,body{margin:0;height:100%;overflow:hidden;background:#18181b;color:#fafafa;font:14px system-ui,sans-serif}
@@ -56,7 +56,7 @@
   <section id="pairing" hidden>
     <form onsubmit="return false">
       <h1>Pair this browser</h1>
-      <p>Paste a one-use invitation from <code>zeron peer invite</code>. Your private device key stays non-extractable in IndexedDB.</p>
+      <p>Paste a one-use invitation from <code>kratos peer invite</code>. Your private device key stays non-extractable in IndexedDB.</p>
       <label for="invite">Invitation</label>
       <textarea id="invite" rows="5" spellcheck="false" placeholder="kratos-pair:…"></textarea>
       <button id="pair" type="button">Pair and connect</button>

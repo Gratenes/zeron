@@ -8,7 +8,7 @@ use std::path::Path;
 #[cfg(target_arch = "wasm32")]
 use std::io;
 
-const PREFIX: &str = "zeron.ui.preferences.v1";
+const PREFIX: &str = "kratos.ui.preferences.v1";
 
 fn key(namespace: &Path, name: &str) -> String {
     format!("{PREFIX}:{}:{name}", namespace.to_string_lossy())
@@ -46,7 +46,7 @@ mod tests {
         let namespace = Path::new("comet.ui-wasm-fixture.v1");
         assert_eq!(
             key(namespace, "ui-settings.json"),
-            "zeron.ui.preferences.v1:comet.ui-wasm-fixture.v1:ui-settings.json"
+            "kratos.ui.preferences.v1:comet.ui-wasm-fixture.v1:ui-settings.json"
         );
         assert_ne!(
             key(namespace, "ui-settings.json"),

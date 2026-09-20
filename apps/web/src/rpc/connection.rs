@@ -261,7 +261,7 @@ mod browser {
     use tokio::sync::{mpsc, oneshot, watch};
     use wasm_bindgen::{JsCast, closure::Closure};
     use web_sys::{BinaryType, Event, MessageEvent, WebSocket, Window};
-    use zeron_rpc::{
+    use kratos_rpc::{
         RpcClient,
         device_frame::{
             DeviceFrameHeader, ECHO_DEADLINE_MS, ECHO_KIND, PING_INTERVAL_MS, PING_TEXT, PONG_TEXT,
@@ -584,7 +584,7 @@ mod browser {
                             message_liveness.borrow_mut().echoed();
                             String::from_utf8(payload)
                                 .ok()
-                                .filter(|text| zeron_rpc::decode_server_frame(text).is_ok())
+                                .filter(|text| kratos_rpc::decode_server_frame(text).is_ok())
                                 .is_some_and(|text| message_inbox.borrow_mut().push(text))
                         } else {
                             false

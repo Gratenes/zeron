@@ -1,7 +1,7 @@
 //! Picker chrome without catalog or selection ownership.
 use crate::{motion, theme::Theme, typography::ui_rems};
 use gpui::{prelude::*, *};
-use zeron_proto::HarnessId;
+use kratos_proto::HarnessId;
 
 #[path = "model_presentation.rs"]
 pub mod models;

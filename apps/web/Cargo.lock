@@ -10765,7 +10765,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeron-browser"
+name = "kratos-browser"
 version = "0.1.0"
 dependencies = [
  "gpui",
@@ -10778,13 +10778,13 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "zeron-proto",
- "zeron-rpc",
- "zeron-ui",
+ "kratos-proto",
+ "kratos-rpc",
+ "kratos-ui",
 ]
 
 [[package]]
-name = "zeron-doc"
+name = "kratos-doc"
 version = "0.2.65"
 dependencies = [
  "chrono",
@@ -10794,11 +10794,11 @@ dependencies = [
  "similar",
  "thiserror 2.0.20",
  "tracing",
- "zeron-proto",
+ "kratos-proto",
 ]
 
 [[package]]
-name = "zeron-engine"
+name = "kratos-engine"
 version = "0.2.65"
 dependencies = [
  "anyhow",
@@ -10828,17 +10828,17 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
- "zeron-doc",
- "zeron-harness",
- "zeron-preview",
- "zeron-proto",
- "zeron-rpc",
- "zeron-sync",
- "zeron-update",
+ "kratos-doc",
+ "kratos-harness",
+ "kratos-preview",
+ "kratos-proto",
+ "kratos-rpc",
+ "kratos-sync",
+ "kratos-update",
 ]
 
 [[package]]
-name = "zeron-harness"
+name = "kratos-harness"
 version = "0.2.65"
 dependencies = [
  "anyhow",
@@ -10855,11 +10855,11 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
- "zeron-proto",
+ "kratos-proto",
 ]
 
 [[package]]
-name = "zeron-preview"
+name = "kratos-preview"
 version = "0.2.65"
 dependencies = [
  "anyhow",
@@ -10880,11 +10880,11 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "zeron-proto",
+ "kratos-proto",
 ]
 
 [[package]]
-name = "zeron-proto"
+name = "kratos-proto"
 version = "0.2.65"
 dependencies = [
  "chrono",
@@ -10894,7 +10894,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeron-rpc"
+name = "kratos-rpc"
 version = "0.2.65"
 dependencies = [
  "anyhow",
@@ -10908,12 +10908,12 @@ dependencies = [
  "tracing",
  "uuid",
  "wasm-bindgen-futures",
- "zeron-proto",
- "zeron-sync",
+ "kratos-proto",
+ "kratos-sync",
 ]
 
 [[package]]
-name = "zeron-sync"
+name = "kratos-sync"
 version = "0.2.65"
 dependencies = [
  "axum",
@@ -10930,11 +10930,11 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tracing",
  "uuid",
- "zeron-doc",
+ "kratos-doc",
 ]
 
 [[package]]
-name = "zeron-syntax"
+name = "kratos-syntax"
 version = "0.2.65"
 dependencies = [
  "thiserror 2.0.20",
@@ -10968,7 +10968,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeron-theme"
+name = "kratos-theme"
 version = "0.2.65"
 dependencies = [
  "anyhow",
@@ -10982,7 +10982,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeron-ui"
+name = "kratos-ui"
 version = "0.2.65"
 dependencies = [
  "alacritty_terminal",
@@ -11038,18 +11038,18 @@ dependencies = [
  "web-time",
  "wry",
  "x11rb 0.14.0",
- "zeron-doc",
- "zeron-engine",
- "zeron-harness",
- "zeron-proto",
- "zeron-rpc",
- "zeron-syntax",
- "zeron-theme",
- "zeron-update",
+ "kratos-doc",
+ "kratos-engine",
+ "kratos-harness",
+ "kratos-proto",
+ "kratos-rpc",
+ "kratos-syntax",
+ "kratos-theme",
+ "kratos-update",
 ]
 
 [[package]]
-name = "zeron-update"
+name = "kratos-update"
 version = "0.2.65"
 dependencies = [
  "anyhow",
@@ -11062,7 +11062,7 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-sys 0.61.2",
- "zeron-proto",
+ "kratos-proto",
  "zip",
 ]
 
