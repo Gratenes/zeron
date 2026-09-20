@@ -37,8 +37,8 @@ pub use client::{RpcClient, RpcSubscription};
 #[cfg(feature = "native")]
 pub use device_room::{
     DeviceFrameHeader, DeviceLink, FrameHandler, HostRelay, HostRelayConfig, LinkCache,
-    LinkCacheConfig, NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenSource,
-    decode_device_frame, device_room_ws_url, encode_device_frame,
+    LinkCacheConfig, NudgeHandler, PeerLiveness, PeerLivenessProbe, StaticToken, TokenError,
+    TokenSource, decode_device_frame, device_room_ws_url, encode_device_frame,
 };
 #[cfg(feature = "native")]
 pub use server::{serve_connection, serve_ws_listener};
@@ -56,6 +56,7 @@ pub mod methods {
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";
+    pub const TAKE_PROJECT_ACTION_SETUP: &str = "TakeProjectActionSetup";
     /// Peer-to-peer delivery fallback: the SENDER's engine forwards a queued
     /// command entry (client-minted id and all) straight over the device-room
     /// link when its chat2 rows can't reach the edge but the host's peer link
@@ -108,6 +109,7 @@ pub mod methods {
     /// the sending thumbnail's percent-ring feed. No params; IPC-only.
     pub const WATCH_TRANSFERS: &str = "WatchTransfers";
     pub const WATCH_CHATS: &str = "WatchChats";
+    pub const WATCH_SIDEBAR_PREFERENCES: &str = "WatchSidebarPreferences";
     pub const WATCH_DEVICES: &str = "WatchDevices";
     pub const WATCH_SESSIONS: &str = "WatchSessions";
     /// Spaces registry (device+folder pairs) from the workspace doc.
@@ -171,6 +173,11 @@ pub mod methods {
     pub const WATCH_WORKSPACE_FILES: &str = "WatchWorkspaceFiles";
     pub const CREATE_WORKTREE: &str = "CreateWorktree";
     pub const DELETE_WORKTREE: &str = "DeleteWorktree";
+    // Project Actions are private state on the device that owns the project.
+    pub const LIST_PROJECT_ACTIONS: &str = "ListProjectActions";
+    pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
+    pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
+    pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";
@@ -234,7 +241,7 @@ pub struct ClientFrame {
 }
 
 /// A server-originated frame. Exactly one of `ok` / `err` / `item` / `done` is meaningful.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerFrame {
     pub id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,61 +257,13 @@ pub struct ServerFrame {
 /// Decode one server frame while preserving the presence of `ok: null` and
 /// `item: null`. `Option<Value>` alone cannot represent that distinction.
 pub fn decode_server_frame(text: &str) -> Result<ServerFrame, String> {
-    let value = serde_json::from_str(text).map_err(|_| "Invalid RPC JSON".to_string())?;
-    parse_server_frame(value)
+    serde_json::from_str(text).map_err(|_| "Invalid RPC JSON".to_string())
 }
 
-impl<'de> Deserialize<'de> for ServerFrame {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        parse_server_frame(value).map_err(serde::de::Error::custom)
-    }
-}
 
-fn parse_server_frame(value: serde_json::Value) -> Result<ServerFrame, String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| "Invalid RPC envelope".to_string())?;
-    let id = serde_json::from_value(
-        object
-            .get("id")
-            .cloned()
-            .ok_or_else(|| "Invalid RPC envelope".to_string())?,
-    )
-    .map_err(|_| "Invalid RPC envelope".to_string())?;
-    let done = match object.get("done") {
-        None => false,
-        Some(serde_json::Value::Bool(done)) => *done,
-        Some(_) => return Err("Invalid RPC envelope".into()),
-    };
-    let ok = object.get("ok").cloned();
-    let item = object.get("item").cloned();
-    let err = match object.get("err") {
-        None => None,
-        Some(serde_json::Value::String(err)) => Some(err.clone()),
-        Some(_) => return Err("Invalid RPC error".into()),
-    };
-    let count = usize::from(ok.is_some())
-        + usize::from(item.is_some())
-        + usize::from(err.is_some())
-        + usize::from(done);
-    if count != 1 {
-        return Err("Invalid RPC envelope".into());
-    }
-    Ok(ServerFrame {
-        id,
-        ok,
-        err,
-        item,
-        done,
-    })
-}
+#[cfg(feature = "native")]
 
 /// What a service returns for one invocation.
-#[cfg(feature = "native")]
 pub enum RpcReply {
     /// Unary response — sent as `{id, ok}`.
     Value(serde_json::Value),
@@ -313,6 +272,7 @@ pub enum RpcReply {
 }
 
 #[cfg(feature = "native")]
+
 impl RpcReply {
     /// Serialize a value into a unary reply.
     pub fn value<T: Serialize>(value: &T) -> Result<Self, RpcError> {
@@ -322,12 +282,15 @@ impl RpcReply {
     }
 }
 
-/// Server-side dispatch: one implementation serves every transport.
 #[cfg(feature = "native")]
+
+/// Server-side dispatch: one implementation serves every transport.
 #[async_trait]
 pub trait RpcService: Send + Sync + 'static {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError>;
 }
+
+#[cfg(feature = "native")]
 
 /// Deserialize typed params out of the envelope's `params` value.
 pub fn parse_params<T: serde::de::DeserializeOwned>(
@@ -336,10 +299,11 @@ pub fn parse_params<T: serde::de::DeserializeOwned>(
     serde_json::from_value(params).map_err(|e| RpcError::BadParams(e.to_string()))
 }
 
+#[cfg(feature = "native")]
+
 /// Spawn an in-memory server for `service` and return a connected client.
 /// Same envelopes, same dispatch loop as the WebSocket path — the in-process UI
 /// transport (ARCHITECTURE §1 "zero serialization shortcuts").
-#[cfg(feature = "native")]
 pub fn memory_client(service: Arc<dyn RpcService>) -> RpcClient {
     let (client_out, server_in) = tokio::sync::mpsc::channel::<String>(256);
     let (server_out, client_in) = tokio::sync::mpsc::channel::<String>(256);

@@ -23,8 +23,10 @@ pub mod changes;
 mod comment_ui;
 pub mod comments;
 pub mod composer;
+mod composer_dock;
 mod context_usage;
 pub mod edge_fade;
+pub mod file_icons;
 pub mod files;
 pub mod frost;
 pub mod history;
@@ -35,9 +37,14 @@ pub mod links;
 pub mod loaders;
 pub mod markdown;
 pub mod motion;
+mod new_thread_background_effects;
+mod new_thread_background_image;
+mod new_thread_background_mask;
+mod notice;
 pub mod notify;
 pub mod pickers;
 pub mod popover;
+pub mod project_actions;
 pub mod queue;
 pub mod rail;
 pub mod settings;
@@ -54,14 +61,26 @@ pub mod typography;
 mod workspace_links;
 
 #[cfg(not(target_arch = "wasm32"))]
+
 use std::path::PathBuf;
 
 #[cfg(not(target_arch = "wasm32"))]
+
 use futures::{FutureExt as _, StreamExt as _};
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 pub use state::EngineBootConfig;
 pub use zeron_proto::HarnessId;
+
+/// Whether a control whose primary action is click activation may also start
+/// a GPUI drag from the same hitbox. GPUI promotes pointer travel above 2 px
+/// to a drag. Normal Windows click jitter can cross that threshold, cancel the
+/// click, and leave the drag ghost following the pointer instead of activating
+/// the control. Drag-first controls (resize handles, scrollbars, queue rows)
+/// intentionally do not use this policy.
+pub(crate) const fn click_activation_drag_enabled() -> bool {
+    !cfg!(target_os = "windows")
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 
@@ -123,6 +142,10 @@ impl gpui::Global for ReopenState {}
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
 pub fn run_app(config: UiConfig) {
+    // Retain ownership for the whole application lifetime. The bridge's
+    // default runtime has only two workers, insufficient for a desktop engine.
+    let runtime = tokio::runtime::Runtime::new().expect("desktop Tokio runtime");
+    let runtime_handle = runtime.handle().clone();
     let app = gpui_platform::application().with_assets(icons::Assets);
     let (url_tx, mut url_rx) = futures::channel::mpsc::unbounded::<String>();
     let callback_tx = url_tx.clone();
@@ -146,8 +169,7 @@ pub fn run_app(config: UiConfig) {
         }
     });
     app.run(move |cx: &mut App| {
-        // NB: pinned-rev API — `gpui_tokio::init(cx)` free function (not `Tokio::init`).
-        gpui_tokio::init(cx);
+        gpui_tokio::init_from_handle(cx, runtime_handle);
         gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();
         let ui_settings = settings::UiSettings::load(&data_dir);
@@ -158,6 +180,10 @@ pub fn run_app(config: UiConfig) {
         typography::init(
             ui_settings.ui_font_family.clone(),
             ui_settings.ui_font_size,
+            ui_settings.terminal_font_family.clone(),
+            ui_settings.terminal_font_size,
+            ui_settings.code_font_family.clone(),
+            ui_settings.code_font_size,
             font_availability,
             cx,
         );
@@ -242,6 +268,7 @@ pub fn run_app(config: UiConfig) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+
 /// A clicked banner: bring Zeron forward on that chat through the sidebar's
 /// own path (chat route + composer focus), reopening the main window first if
 /// ⌘W closed it.
@@ -268,20 +295,73 @@ fn open_notified_chat(chat_id: String, state: &gpui::Entity<state::AppState>, cx
     }
 }
 
-/// Open the 1320×880 main window (min 900×600) with [`shell::Shell`] as the
-/// root view. Called at boot and again from `on_reopen` if the dock icon is
-/// clicked after ⌘W closed the window.
+fn restored_main_window_bounds(cx: &App) -> (Bounds<gpui::Pixels>, Option<gpui::DisplayId>) {
+    let fallback = (Bounds::centered(None, size(px(1320.), px(880.)), cx), None);
+    let Some(saved) = settings::current(cx).window_geometry else {
+        return fallback;
+    };
+    let displays = cx.displays();
+    let primary = cx
+        .primary_display()
+        .and_then(|primary| {
+            displays
+                .iter()
+                .position(|display| display.id() == primary.id())
+        })
+        .unwrap_or(0);
+    let geometries: Vec<_> = displays
+        .iter()
+        .map(|display| {
+            let mut geometry = settings::WindowGeometry::from_bounds(display.visible_bounds());
+            geometry.display_uuid = display.uuid().ok();
+            geometry
+        })
+        .collect();
+    saved
+        .restore(&geometries, primary)
+        .map_or(fallback, |(index, geometry)| {
+            (geometry.bounds(), Some(displays[index].id()))
+        })
+}
+
+fn save_main_window_geometry(window: &gpui::Window, cx: &mut App) {
+    if window.is_fullscreen() {
+        return;
+    }
+    // macos infers maximization from screen-sized bounds, including ordinary
+    // windows; other desktop backends report a distinct maximized variant.
+    let WindowBounds::Windowed(bounds) = window.window_bounds() else {
+        return;
+    };
+    let mut geometry = settings::WindowGeometry::from_bounds(bounds);
+    geometry.display_uuid = window.display(cx).and_then(|display| display.uuid().ok());
+    if geometry.is_valid() {
+        settings::update(settings::SavePolicy::Debounced, cx, |settings| {
+            settings.window_geometry = Some(geometry);
+        });
+    }
+}
+
+fn observe_main_window_geometry<T: 'static>(window: &mut gpui::Window, cx: &gpui::Context<T>) {
+    cx.observe_window_bounds(window, |_, window, cx| {
+        save_main_window_geometry(window, cx);
+    })
+    .detach();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+
 fn open_main_window(
     state: gpui::Entity<state::AppState>,
     boot: EngineBootConfig,
     cx: &mut App,
 ) -> gpui::WindowHandle<shell::Shell> {
-    // zeron window geometry: 1320×880, min 900×600 (feature-inventory §1.1).
-    let bounds = Bounds::centered(None, size(px(1320.), px(880.)), cx);
+    let (bounds, display_id) = restored_main_window_bounds(cx);
     let handle = cx
         .open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                display_id,
                 window_min_size: Some(size(px(900.), px(600.))),
                 // `kind` is deliberately left at its default `WindowKind::Normal`
                 // (gpui platform.rs WindowOptions::default), which on macOS maps
@@ -293,15 +373,15 @@ fn open_main_window(
                 // the titlebar, not the menu bar.
                 // macOS: frameless-inset chrome like the original Electron app
                 // (`titleBarStyle: "hiddenInset"`, traffic lights at 14,15 —
-                // feature-inventory §1.1). No title text — the strip is
-                // custom-drawn (zed sets `title: None` the same way). On
+                // feature-inventory §1.1). The strip is custom-drawn. Windows
+                // still needs a native title for taskbar previews and Alt+Tab. On
                 // Linux/Windows `appears_transparent` hides the system titlebar
                 // for our custom-drawn chrome; harmless where unsupported.
                 titlebar: Some(TitlebarOptions {
-                    title: None,
+                    title: cfg!(target_os = "windows").then(|| "Zeron".into()),
                     appears_transparent: true,
-                    // Centered on the titlebar's content line (40px bar, content
-                    // shifted 4px down, lights ~12px tall → center 22).
+                    // Native lights are 14px tall: top 14 → center 21, matching
+                    // the 38px titlebar row with 4px top-only content padding.
                     traffic_light_position: Some(gpui::point(px(14.), px(14.))),
                 }),
                 // Our own titlebar strip drags the window (WindowControlArea::
@@ -337,12 +417,21 @@ fn open_main_window(
                 // the subscription lives as long as the window does, and the window
                 // owns nothing that would drop it early.
                 appearance::observe_window(window, cx).detach();
-                let shell = cx.new(|cx| shell::Shell::new(state, boot, cx));
+                let shell = cx.new(|cx| {
+                    observe_main_window_geometry(window, cx);
+                    shell::Shell::new(state, boot, cx)
+                });
+                save_main_window_geometry(window, cx);
                 let weak_shell = shell.downgrade();
-                window.on_window_should_close(cx, move |_, cx| {
-                    weak_shell
+                window.on_window_should_close(cx, move |window, cx| {
+                    let should_close = weak_shell
                         .update(cx, |shell, cx| shell.prepare_window_close(cx))
-                        .unwrap_or(true)
+                        .unwrap_or(true);
+                    if should_close {
+                        save_main_window_geometry(window, cx);
+                        settings::flush(cx);
+                    }
+                    should_close
                 });
                 shell
             },

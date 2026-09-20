@@ -94,6 +94,7 @@ impl Shell {
 
     /// Open a session from the sidebar: select it, the main area follows.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
         self.state
@@ -105,6 +106,7 @@ impl Shell {
     /// re-homes the canvas onto that project; under "All" the current pick
     /// (the last selected project, restored from composer defaults) stands.
     pub(super) fn open_new_session(&mut self, cx: &mut Context<Self>) {
+        self.command_palette = None;
         self.route = Route::Chat;
         self.focus_composer(cx);
         let target = {
@@ -135,7 +137,11 @@ impl Shell {
     /// `[new-session +] [harness icon + session title] … [toggle-changes]`.
     /// Replaces the tab strip; inherits its titlebar duties (drag region,
     /// animated left inset, the toggle-changes button on git projects).
-    pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_session_title_bar(
+        &mut self,
+        viewport_height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         // The canvas titles as NOTHING (user request — a "New session"
         // header over the empty canvas was noise); the bar keeps its height,
@@ -176,11 +182,7 @@ impl Shell {
         // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
         // session is selected (`render_titlebar_cluster`) — this row budgets
         // one button slot so the title never sits under it.
-        let sidebar_now = if is_mobile_width(self.viewport_width) {
-            0.0
-        } else {
-            self.eval_tween(self.sidebar_tween, self.sidebar_target())
-        };
+        let sidebar_now = self.sidebar_now();
         let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
 
         // Same glide as the old strip: content starts at the inset card's
@@ -197,7 +199,8 @@ impl Shell {
         // the pane itself would sit under the drag region and never see a
         // click. Closed, it is just the stable open/close toggle. Hidden on
         // the new-session canvas (user request) — nothing to diff yet.
-        let takeover = !on_canvas && self.right_pane_visible(cx) && self.right_pane_expanded;
+        let right_pane_open = !on_canvas && self.right_pane_open(cx);
+        let takeover = right_pane_open && self.right_pane_expanded;
         // In takeover the title hides and the strip owns the whole band, so
         // the row's left inset pulls back to the sidebar seam — the title
         // inset would push the scope dropdown off the pane's own left gutter
@@ -223,10 +226,26 @@ impl Shell {
         } else {
             content_left
         };
+        let row_gap = 8.0;
+        let right_pad = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
+        let open_trailing_width = right_pane_open.then(|| {
+            let right_now = self.eval_tween(self.right_tween, self.right_target(cx));
+            let gap_budget = if takeover { row_gap } else { row_gap * 3.0 };
+            let avail = self.viewport_width - row_left - right_pad - gap_budget;
+            let animated_width = ((right_now - right_pad).min(avail) - 28.0).max(0.0);
+            animated_width + 28.0
+        });
+        let trailing_width = if on_canvas {
+            0.0
+        } else {
+            open_trailing_width.unwrap_or(28.0)
+        };
+        let available_titlebar_width =
+            (self.viewport_width - row_left - right_pad - trailing_width - row_gap * 3.0).max(0.0);
+
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
-        } else {
-            let right_open = self.right_pane_visible(cx);
+        } else if let Some(trailing_width) = open_trailing_width {
             let mut controls = div()
                 .id("right-titlebar-controls")
                 .flex_none()
@@ -234,58 +253,37 @@ impl Shell {
                 .flex()
                 .flex_row()
                 .items_center();
-            if right_open {
-                let right_now = self.eval_tween(self.right_tween, self.right_target(cx));
-                let pr = self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET);
-                // The row's own left padding is part of its content box: a strip
-                // wider than what's left after it overflows and clips at the right
-                // edge (flex_none never shrinks) — cap to the available width. The
-                // row's 8px child gaps sit OUTSIDE the strip's width (one before
-                // the strip in takeover, two with the title row present): without
-                // budgeting them the capped strip overflows by exactly one gap and
-                // the buttons slide right on expand (user report).
-                let gap_budget = if takeover { 8.0 } else { 16.0 };
-                let avail = self.viewport_width - row_left - pr - gap_budget;
-                // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
-                // options that used to live here moved into the pane's own
-                // second row; expand stays in this band (user request).
-                let tabs = self.render_right_tab_strip(cx);
-                // The toggle is the fixed right-edge anchor, like the left
-                // sidebar control. Only the tabs + expand section reveals to
-                // its left; including the toggle in this animated width
-                // compressed both icons into the same clipped box at open.
-                let animated_width = ((right_now - pr).min(avail) - 28.0).max(0.0);
-                controls = controls.child(
-                    div()
-                        .w(px(animated_width))
-                        .h_full()
-                        .flex_none()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .overflow_hidden()
-                        // 8 + the trigger's own 8px pad = the pane's 16px
-                        // text gutter. The 4px right padding is the stable
-                        // gap before the fixed toggle.
-                        .pl(px(8.0))
-                        .pr(px(4.0))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .overflow_hidden()
-                                .child(tabs),
-                        )
-                        .child(header_icon_button(
-                            "expand-changes",
-                            right_pane_expand_icon(self.right_pane_expanded),
-                            &theme,
-                            cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
-                        )),
-                );
-            }
+            let tabs = self.render_right_tab_strip(cx);
+            controls = controls.child(
+                div()
+                    .w(px((trailing_width - 28.0).max(0.0)))
+                    .h_full()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .overflow_hidden()
+                    // 8 + the trigger's own 8px pad = the pane's 16px
+                    // text gutter. The 4px right padding is the stable
+                    // gap before the fixed toggle.
+                    .pl(px(8.0))
+                    .pr(px(4.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .overflow_hidden()
+                            .child(tabs),
+                    )
+                    .child(header_icon_button(
+                        "expand-changes",
+                        right_pane_expand_icon(self.right_pane_expanded),
+                        &theme,
+                        cx.listener(|this, _, _, cx| this.toggle_right_pane_expand(cx)),
+                    )),
+            );
             // Keep the trigger mounted at one fixed position while the pane
             // controls reveal to its left.
             Some(
@@ -298,37 +296,88 @@ impl Shell {
                     ))
                     .into_any_element(),
             )
+        } else {
+            Some(
+                div()
+                    .id("right-titlebar-controls")
+                    .flex_none()
+                    .h_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(header_icon_button(
+                        "toggle-changes",
+                        icons::SIDEBAR_MINIMALISTIC,
+                        &theme,
+                        cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
+                    ))
+                    .into_any_element(),
+            )
         };
 
+        let actions = (!takeover && !on_canvas)
+            .then(|| {
+                self.render_project_actions_control(available_titlebar_width, viewport_height, cx)
+            })
+            .flatten();
         let inner = div()
             .size_full()
             .flex()
             .items_center()
             .pt(px(Theme::TITLEBAR_TOP_PAD))
-            .gap(px(8.0))
+            .gap(px(row_gap))
             .pl(px(row_left))
-            .pr(px(self.titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)))
+            .pr(px(right_pad))
             // In panel takeover the header strip spans the whole band — the
             // title would sit UNDER it (both flex_none, the row overflows and
             // paint order stacks them), so it hides for the duration.
             .when(!takeover, |el| {
-                el.child(presentation::title_identity(
-                    &theme,
-                    title,
-                    target,
-                    harness
-                        .map(crate::pickers::harness_brand_icon)
-                        .map(|(path, tint)| {
-                            icon(path)
-                                .size(px(14.0))
-                                .flex_none()
-                                .text_color(tint.unwrap_or(theme.text_muted))
-                                .into_any_element()
+                el.child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .when_some(
+                            harness.map(crate::pickers::harness_brand_icon),
+                            |el, (path, tint)| {
+                                el.child(
+                                    icon(path)
+                                        .size(px(14.0))
+                                        .flex_none()
+                                        .text_color(tint.unwrap_or(theme.text_muted)),
+                                )
+                            },
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(if on_canvas {
+                                    theme.text_muted.opacity(0.7)
+                                } else {
+                                    theme.text.opacity(0.85)
+                                })
+                                .child(title),
+                        )
+                        .when_some(target, |el, target| {
+                            el.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(crate::typography::ui_rems(12.0))
+                                    .text_color(theme.text_muted.opacity(0.5))
+                                    .child(target),
+                            )
                         }),
-                    on_canvas,
-                ))
+                )
             })
             .child(div().flex_1())
+            .children(actions)
             .children(trailing);
 
         // The unified window titlebar: full-width on the glass shell, ABOVE

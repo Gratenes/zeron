@@ -263,6 +263,7 @@ fn run_player(path: &Path) -> Result<(), String> {
 
 #[cfg(windows)]
 fn run_player(path: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
     // SoundPlayer handles WAV natively; PlaySync keeps the process alive for
     // the chime's duration. Pass the path through the child environment rather
     // than interpolating it into PowerShell source (paths may contain quotes).
@@ -276,6 +277,7 @@ fn run_player(path: &Path) -> Result<(), String> {
             script,
         ])
         .env("ZERON_SOUND_PATH", path)
+        .creation_flags(0x08000000)
         .output()
         .map_err(|e| format!("powershell failed: {e}"))?;
     if output.status.success() {

@@ -65,6 +65,11 @@ impl EngineHandle {
         })
     }
 
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+
     pub fn client(&self) -> &RpcClient {
         self.inner.client()
     }

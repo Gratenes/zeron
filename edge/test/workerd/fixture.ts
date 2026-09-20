@@ -1,12 +1,7 @@
 import { previewRoute } from "../../src/preview-route";
+export { ChatRoom } from "../../src/chat-room";
 export { PreviewRoom } from "../../src/preview-room";
-
-export { BrowserSessionStore } from "../../src/browser-sessions";
-
-import { browserDeviceRoute, browserPreviewRoute, handleBrowserRoute } from "../../src/browser-routes";
-import type { Env } from "../../src/env";
-
-export { DeviceRoom } from "../../src/device-room";
+export { RegistryRoom } from "../../src/registry-room";
 import { DurableObject } from "cloudflare:workers";
 
 /** Bare SQLite-backed DO; tests reach its real `ctx.storage.sql` via
@@ -14,14 +9,7 @@ import { DurableObject } from "cloudflare:workers";
 export class TestLogRoom extends DurableObject {}
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    const browser = await browserDeviceRoute(request, env, new URL(request.url));
-    if (browser) return browser;
-    const preview = await browserPreviewRoute(request, env, new URL(request.url));
-    if (preview) return preview;
-
-    const browserApi = await handleBrowserRoute(request, env, new URL(request.url));
-    if (browserApi) return browserApi;
+  fetch(request: Request, env: { PREVIEW_ROOMS: DurableObjectNamespace }): Response | Promise<Response> {
     // Test credentials exercise the production routing seam without loading
     // the unrelated session-room WASM inside the Workers test runner.
     const bearer = request.headers.get("authorization");

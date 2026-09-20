@@ -25,16 +25,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gpui::{App, Context, Entity, Task};
 #[cfg(not(target_arch = "wasm32"))]
+
 use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
 use crate::comments::ReviewComment;
 use zeron_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 #[cfg(not(target_arch = "wasm32"))]
+
 use zeron_engine::{Engine, EngineConfig, EngineRuntime, InstanceLock, rpc::AuthRpc};
 use zeron_proto::{
     AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
-    EngineInfo, HarnessId, Session, Space, WorkspaceScope,
+    EngineInfo, HarnessId, Session, SidebarPreferencesState, Space, WorkspaceScope,
 };
 use zeron_rpc::{RpcClient, RpcError, methods};
 #[cfg(not(target_arch = "wasm32"))]
@@ -43,6 +45,50 @@ use zeron_rpc::{RpcReply, RpcService, connect_ws, memory_client};
 use crate::change_requests::{
     ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
 };
+
+// Recently viewed transcripts stay renderable while a fresh watch opens. Move
+// ownership on navigation; never clone whale payloads or retain live watches.
+const TRANSCRIPT_CACHE_CAP: usize = 12;
+const TRANSCRIPT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+struct CachedTranscript {
+    prepared: Option<Arc<crate::transcript::PreparedTranscript>>,
+    chat_id: String,
+    entries: Vec<SessionMessageEntry>,
+    context_usage: Option<zeron_proto::ContextUsage>,
+    bytes: usize,
+}
+
+// A cancelled GPUI watch may own a whale's mirror between updates. Its
+// destructor must not free that entire object graph on the UI thread either.
+struct WatchPreparation {
+    worker: Option<crate::transcript::TranscriptPreparation>,
+    executor: gpui::BackgroundExecutor,
+}
+impl WatchPreparation {
+    fn new(executor: gpui::BackgroundExecutor) -> Self {
+        Self {
+            worker: Some(Default::default()),
+            executor,
+        }
+    }
+    fn prepare(
+        &mut self,
+        update: &zeron_doc::TranscriptUpdate,
+    ) -> Result<Arc<crate::transcript::PreparedTranscript>, TranscriptDesync> {
+        self.worker.as_mut().unwrap().prepare(update)
+    }
+}
+impl Drop for WatchPreparation {
+    fn drop(&mut self) {
+        let worker = self.worker.take();
+        self.executor
+            .spawn(async move {
+                drop(worker);
+            })
+            .detach();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Engine handle
@@ -67,23 +113,50 @@ pub struct EngineBootConfig {
     pub default_harness: HarnessId,
 }
 
+#[cfg(target_arch = "wasm32")]
 mod connection;
-use connection::{DeferredEngineState, EngineBackend};
+#[cfg(target_arch = "wasm32")]
 pub use connection::{EngineHandle, EngineMode};
 
-/// Embedded engine: owns the [`EngineCore`] and an in-memory RPC loop.
 #[cfg(not(target_arch = "wasm32"))]
+
+/// How this UI reached its engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineMode {
+    /// Engine embedded in this process (in-memory RPC transport).
+    InProcess,
+    /// Connected to a separate daemon over localhost WebSocket.
+    Remote { url: String },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+
+/// One of the two ways to own an engine connection. Both end at an [`RpcClient`]
+/// speaking the identical protocol — the trait only differs in provenance and
+/// teardown.
+#[async_trait]
+trait EngineBackend: Send + Sync {
+    fn client(&self) -> &RpcClient;
+    fn mode(&self) -> EngineMode;
+    /// Graceful teardown (drains runs / flushes docs for the in-process engine).
+    async fn shutdown(&self);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+
+/// Embedded engine: owns the [`EngineCore`] and an in-memory RPC loop.
 struct InProcessEngine {
     runtime: Arc<tokio::sync::Mutex<Option<EngineRuntime>>>,
     boot_task: tokio::task::JoinHandle<()>,
     refresh_task: tokio::task::JoinHandle<()>,
     /// Serves this engine to other viewports over the IPC port. `None` when the
     /// port was already taken — the window still works over its own transport.
-    ipc_task: Option<tokio::task::JoinHandle<()>>,
+    ipc_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     client: RpcClient,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+
 #[async_trait]
 impl EngineBackend for InProcessEngine {
     fn client(&self) -> &RpcClient {
@@ -96,8 +169,12 @@ impl EngineBackend for InProcessEngine {
         self.boot_task.abort();
         // Stop accepting first: a viewport must not connect midway through the
         // drain and queue work against stores that are closing.
-        if let Some(ipc) = &self.ipc_task {
+        let ipc_task = self.ipc_task.lock().await.take();
+        if let Some(ipc) = ipc_task {
             ipc.abort();
+            // `abort` only requests cancellation. Observe task completion so the
+            // listener is closed before bootstrap reports an assembly failure.
+            let _ = ipc.await;
         }
         if let Some(runtime) = self.runtime.lock().await.take() {
             runtime.shutdown().await;
@@ -106,10 +183,20 @@ impl EngineBackend for InProcessEngine {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+
+#[derive(Clone)]
+enum DeferredEngineState {
+    Waiting,
+    Ready,
+    Failed(String),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+
 /// Serves engine identity and AuthRpc immediately, then holds data calls only
 /// while a captured synced profile still needs organization onboarding.
 /// Existing subscriptions attach to the assembled service without reconnecting.
-#[cfg(not(target_arch = "wasm32"))]
 struct DeferredEngineRpc {
     auth: AuthRpc,
     engine_info: EngineInfo,
@@ -118,6 +205,7 @@ struct DeferredEngineRpc {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+
 #[async_trait]
 impl RpcService for DeferredEngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
@@ -155,6 +243,8 @@ impl RpcService for DeferredEngineRpc {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+
 async fn wait_for_deferred_engine(
     state: &mut tokio::sync::watch::Receiver<DeferredEngineState>,
 ) -> Result<(), String> {
@@ -172,8 +262,9 @@ async fn wait_for_deferred_engine(
     }
 }
 
-/// External daemon over `ws://127.0.0.1:{port}`.
 #[cfg(not(target_arch = "wasm32"))]
+
+/// External daemon over `ws://127.0.0.1:{port}`.
 struct RemoteEngine {
     client: Arc<RpcClient>,
     url: String,
@@ -181,6 +272,7 @@ struct RemoteEngine {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+
 #[async_trait]
 impl EngineBackend for RemoteEngine {
     fn client(&self) -> &RpcClient {
@@ -200,7 +292,22 @@ impl EngineBackend for RemoteEngine {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+
+/// Cheaply clonable handle to whichever backend won the probe.
+#[derive(Clone)]
+pub struct EngineHandle {
+    inner: Arc<dyn EngineBackend>,
+    engine_info: EngineInfo,
+    deferred_state: Option<tokio::sync::watch::Receiver<DeferredEngineState>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+
 impl EngineHandle {
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Probe the IPC port and connect (daemon listening) or embed (nothing there).
     /// Must run on the tokio runtime (`Tokio::spawn`): both transports spawn
     /// tokio tasks.
@@ -342,7 +449,7 @@ impl EngineHandle {
                 runtime,
                 boot_task,
                 refresh_task,
-                ipc_task,
+                ipc_task: tokio::sync::Mutex::new(ipc_task),
                 client,
             }),
             engine_info,
@@ -425,6 +532,44 @@ impl EngineHandle {
             }
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_client(client: RpcClient) -> Self {
+        Self {
+            inner: Arc::new(RemoteEngine {
+                client: Arc::new(client),
+                url: "memory://test".into(),
+                lifecycle_task: tokio::sync::Mutex::new(None),
+            }),
+            engine_info: EngineInfo {
+                device_id: "local".into(),
+                workspace_scope: WorkspaceScope::Local,
+                cursor_sdk_version: None,
+                capabilities: Vec::new(),
+            },
+            deferred_state: None,
+        }
+    }
+
+    pub fn client(&self) -> &RpcClient {
+        self.inner.client()
+    }
+
+    pub fn mode(&self) -> EngineMode {
+        self.inner.mode()
+    }
+
+    pub fn engine_info(&self) -> &EngineInfo {
+        &self.engine_info
+    }
+
+    fn deferred_state(&self) -> Option<tokio::sync::watch::Receiver<DeferredEngineState>> {
+        self.deferred_state.clone()
+    }
+
+    pub async fn shutdown(&self) {
+        self.inner.shutdown().await;
+    }
 }
 
 /// Query the current protocol first, with a conservative fallback for daemons
@@ -447,6 +592,7 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
             Ok(EngineInfo {
                 device_id: legacy.device_id,
                 workspace_scope: WorkspaceScope::Synced,
+                cursor_sdk_version: None,
                 capabilities: Vec::new(),
             })
         }
@@ -566,6 +712,9 @@ pub struct AppState {
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
+    /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
+    /// this and continue reading their device-local settings entry.
+    pub sidebar_preferences: SidebarPreferencesState,
     session_presentation: Option<Vec<Session>>,
     /// The project the new-session canvas mints into. Healed by
     /// [`Self::apply_spaces`] when the row vanishes; selecting a chat implies
@@ -597,10 +746,14 @@ pub struct AppState {
     /// chat's doc holds them (every device sees the same queue).
     pub queue: Vec<zeron_doc::QueuedMessage>,
     pub context_usage: Option<zeron_proto::ContextUsage>,
-    /// The selected chat's opening `WatchDocMessages` reset has landed. An
+    /// The selected chat has a transcript from a `WatchDocMessages` reset
+    /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
     /// gap after selection, where optimistic echoes may already be visible.
     pub transcript_replayed: bool,
+    transcript_baselines: HashMap<String, Arc<zeron_doc::TranscriptBaseline>>,
+    transcript_cache: std::collections::VecDeque<CachedTranscript>,
+    pub(crate) prepared_transcripts: HashMap<String, Arc<crate::transcript::PreparedTranscript>>,
     /// Changes only when transcript/optimistic content changes. Presence,
     /// catalogs and other app-state notifications need no row derivation.
     pub(crate) transcript_revision: u64,
@@ -682,6 +835,7 @@ impl AppState {
             spaces: Vec::new(),
             chats: Vec::new(),
             sessions: Vec::new(),
+            sidebar_preferences: SidebarPreferencesState::default(),
             session_presentation: None,
             selected_space: None,
             no_project: false,
@@ -691,6 +845,9 @@ impl AppState {
             queue: Vec::new(),
             context_usage: None,
             transcript_replayed: false,
+            transcript_baselines: HashMap::new(),
+            transcript_cache: Default::default(),
+            prepared_transcripts: HashMap::new(),
             transcript_revision: 0,
             echoes: HashMap::new(),
             pending_sends: HashMap::new(),
@@ -818,14 +975,26 @@ impl AppState {
 
     // ---- reducers (pure) ----
 
+    pub(crate) fn apply_sidebar_preferences(&mut self, value: SidebarPreferencesState) -> bool {
+        if value.revision < self.sidebar_preferences.revision || value == self.sidebar_preferences {
+            return false;
+        }
+        self.sidebar_preferences = value;
+        true
+    }
+
     pub fn apply_chats(&mut self, mut chats: Vec<Chat>) {
         sort_chats(&mut chats);
         self.chats = chats;
         self.chats_synced = true;
+        self.transcript_cache
+            .retain(|cached| self.chats.iter().any(|c| c.id == cached.chat_id));
         if let Some(selected) = &self.selected_chat
             && !self.chats.iter().any(|c| &c.id == selected)
         {
             // Selected chat vanished (deleted elsewhere): drop selection + transcript.
+            self.transcript_baselines.remove(selected);
+            self.prepared_transcripts.remove(selected);
             self.selected_chat = None;
             self.transcript.clear();
             self.context_usage = None;
@@ -1065,6 +1234,9 @@ impl AppState {
     }
 
     pub fn apply_transcript(&mut self, entries: Vec<SessionMessageEntry>) {
+        if let Some(id) = &self.selected_chat {
+            self.prepared_transcripts.remove(id);
+        }
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         // Doc frames supersede optimistic echoes carrying the same id.
         if let Some(chat_id) = self.selected_chat.as_deref()
@@ -1083,6 +1255,9 @@ impl AppState {
         &mut self,
         frame: TranscriptFrame,
     ) -> Result<(), TranscriptDesync> {
+        if let Some(id) = &self.selected_chat {
+            self.prepared_transcripts.remove(id);
+        }
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         let is_reset = matches!(&frame, TranscriptFrame::Reset { .. });
         zeron_doc::apply_transcript_frame(&mut self.transcript, frame)?;
@@ -1123,6 +1298,62 @@ impl AppState {
         result
     }
 
+    pub(crate) fn transcript_baseline(
+        &self,
+        doc_id: &str,
+    ) -> Option<&Arc<zeron_doc::TranscriptBaseline>> {
+        self.transcript_baselines.get(doc_id)
+    }
+
+    pub fn receive_transcript_update(
+        &mut self,
+        update: zeron_doc::TranscriptUpdate,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TranscriptDesync> {
+        self.receive_transcript_frame(update.frame, cx)?;
+        if let (Some(doc_id), Some(baseline)) = (&self.selected_chat, update.replay_baseline) {
+            self.transcript_baselines
+                .insert(doc_id.clone(), Arc::new(baseline));
+        }
+        if self.context_usage != update.context_usage {
+            self.context_usage = update.context_usage;
+            cx.notify();
+        }
+        Ok(())
+    }
+
+    /// The opt-in opening tail is provisional. Never replace a complete view
+    /// with it, and don't treat it as a full reset for caching/scroll anchors.
+    pub(crate) fn receive_opening_transcript_update(
+        &mut self,
+        update: zeron_doc::TranscriptUpdate,
+        history_pending: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TranscriptDesync> {
+        if history_pending && self.transcript_replayed {
+            return Ok(());
+        }
+        let old_prepared = self
+            .selected_chat
+            .as_ref()
+            .and_then(|id| self.prepared_transcripts.remove(id));
+        let old_entries = if matches!(&update.frame, TranscriptFrame::Reset { .. }) {
+            std::mem::take(&mut self.transcript)
+        } else {
+            Vec::new()
+        };
+        cx.background_executor()
+            .spawn(async move {
+                drop((old_prepared, old_entries));
+            })
+            .detach();
+        self.receive_transcript_update(update, cx)?;
+        if history_pending {
+            self.transcript_replayed = false;
+        }
+        Ok(())
+    }
+
     /// A subagent doc's current transcript copy (empty until its watch's
     /// replay frame lands, or its frozen snapshot is set).
     pub fn sub_transcript(&self, doc_id: &str) -> &[SessionMessageEntry] {
@@ -1153,13 +1384,34 @@ impl AppState {
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.sub_watch_tasks.remove(doc_id);
         self.sub_transcripts.remove(doc_id);
+        self.prepared_transcripts.remove(doc_id);
+        self.transcript_baselines.remove(doc_id);
     }
 
     /// Frozen-blob path: the finished subagent's uploaded transcript, no
     /// watch needed (and any in-flight watch is superseded).
     pub fn set_subagent_snapshot(&mut self, doc_id: String, entries: Vec<SessionMessageEntry>) {
+        self.prepared_transcripts.remove(&doc_id);
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.sub_watch_tasks.remove(&doc_id);
+        self.transcript_baselines.insert(
+            doc_id.clone(),
+            Arc::new(zeron_doc::TranscriptBaseline::capture(&entries)),
+        );
+        self.sub_transcripts.insert(doc_id, entries);
+    }
+
+    pub(crate) fn set_prepared_subagent_snapshot(
+        &mut self,
+        doc_id: String,
+        entries: Vec<SessionMessageEntry>,
+        prepared: Arc<crate::transcript::PreparedTranscript>,
+    ) {
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        self.sub_watch_tasks.remove(&doc_id);
+        self.transcript_baselines
+            .insert(doc_id.clone(), prepared.navigation_baseline.clone());
+        self.prepared_transcripts.insert(doc_id.clone(), prepared);
         self.sub_transcripts.insert(doc_id, entries);
     }
 
@@ -1549,14 +1801,9 @@ impl AppState {
         self.engine.as_ref()
     }
 
-    /// Cancel every watch and clear account-scoped projections, returning the
-    /// previous transport so the caller can close only its viewport connection.
-    /// This is the browser device/account replacement seam; it never mutates the
-    /// old engine and therefore cannot replay a pending operation.
-    pub fn detach_engine(&mut self, cx: &mut Context<Self>) -> Option<EngineHandle> {
-        let engine = self.engine.clone();
-        self.prepare_runtime_replacement(cx);
-        engine
+    #[cfg(test)]
+    pub(crate) fn set_test_engine(&mut self, handle: EngineHandle) {
+        self.engine = Some(handle);
     }
 
     /// Drop every account-scoped view and subscription after its runtime has
@@ -1577,6 +1824,7 @@ impl AppState {
         self.spaces.clear();
         self.chats.clear();
         self.sessions.clear();
+        self.sidebar_preferences = SidebarPreferencesState::default();
         self.session_presentation = None;
         self.selected_space = None;
         self.no_project = false;
@@ -1586,6 +1834,9 @@ impl AppState {
         self.chats_synced = false;
         self.spaces_synced = false;
         self.transcript.clear();
+        self.transcript_baselines.clear();
+        self.transcript_cache.clear();
+        self.prepared_transcripts.clear();
         self.context_usage = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
@@ -1600,9 +1851,12 @@ impl AppState {
 
     // ---- gpui glue ----
 
+#[cfg(not(target_arch = "wasm32"))]
+
     /// Kick off (or retry) the engine bootstrap: probe → connect-or-embed on
     /// tokio, then attach subscriptions. Safe to call again after `Failed`.
-    #[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
+
     pub fn bootstrap(state: Entity<AppState>, config: EngineBootConfig, cx: &mut App) {
         let data_dir = config.data_dir.clone();
         state.update(cx, |s, cx| {
@@ -1633,23 +1887,30 @@ impl AppState {
         })
         .detach();
     }
-    #[cfg(target_arch = "wasm32")]
+
+#[cfg(target_arch = "wasm32")]
     pub fn bootstrap(state: Entity<AppState>, _config: EngineBootConfig, cx: &mut App) {
         state.update(cx, |state, cx| {
             state.connection = ConnectionStatus::Failed(
-                "Engine bootstrap is unavailable in the browser fixture. Attach a fixture endpoint instead."
-                    .to_string(),
+                "Engine bootstrap is unavailable in the browser. Attach a remote DeviceRoom instead.".into(),
             );
             cx.notify();
         });
     }
 
+
+    /// Cancel every watch and clear account-scoped projections, returning the
+    /// previous browser transport so its owner can close it.
+    pub fn detach_engine(&mut self, cx: &mut Context<Self>) -> Option<EngineHandle> {
+        let engine = self.engine.clone();
+        self.prepare_runtime_replacement(cx);
+        engine
+    }
+
+
     /// Wire the connected engine: mark Ready and start the standing watches.
     /// Methods the engine doesn't serve yet (chats/devices/auth land with the
     /// workspace doc in M4) fail their subscribe and are skipped gracefully.
-    /// Attach a pre-authenticated typed transport to this one real state tree.
-    /// Browser fixtures must use this after their endpoint has answered the
-    /// EngineInfo and EngineReady handshake; it never bootstraps a host engine.
     pub fn attach_engine(&mut self, handle: EngineHandle, cx: &mut Context<Self>) {
         // The attachment notification precedes the first connectivity frame.
         // Make that bootstrap gap explicit so the shell resets its alert
@@ -1659,7 +1920,7 @@ impl AppState {
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
         self.engine = Some(handle.clone());
-        let mut watch_tasks = Vec::with_capacity(8);
+        let mut watch_tasks = Vec::with_capacity(10);
         if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {
             watch_tasks.push(task);
         }
@@ -1671,6 +1932,12 @@ impl AppState {
                 AppState::apply_sessions,
             ),
             spawn_chats_watch(cx, handle.clone()),
+            spawn_watch(
+                cx,
+                handle.clone(),
+                methods::WATCH_SIDEBAR_PREFERENCES,
+                AppState::apply_sidebar_preferences,
+            ),
             spawn_watch(
                 cx,
                 handle.clone(),
@@ -1826,12 +2093,91 @@ impl AppState {
             }
             return;
         }
+        // Take the destination before trimming: switching to the oldest warm
+        // transcript must not evict the very entry we are about to display.
+        let cached = self
+            .transcript_cache
+            .iter()
+            .position(|cached| Some(&cached.chat_id) == chat_id.as_ref())
+            .and_then(|index| self.transcript_cache.remove(index));
+        if let Some(previous) = &self.selected_chat {
+            let old_baseline = self.transcript_baselines.remove(previous);
+            cx.background_executor()
+                .spawn(async move {
+                    drop(old_baseline);
+                })
+                .detach();
+            let prepared = self.prepared_transcripts.remove(previous);
+            if self.transcript_replayed {
+                let entries = std::mem::take(&mut self.transcript);
+                let bytes = prepared.as_ref().map_or_else(
+                    || {
+                        entries
+                            .iter()
+                            .map(|entry| {
+                                std::mem::size_of::<SessionMessageEntry>()
+                                    + entry.id.len()
+                                    + entry
+                                        .parts
+                                        .iter()
+                                        .map(|part| {
+                                            std::mem::size_of::<zeron_doc::MessagePart>()
+                                                + part.byte_len()
+                                        })
+                                        .sum::<usize>()
+                            })
+                            .sum()
+                    },
+                    |p| p.bytes,
+                );
+                self.transcript_cache.push_back(CachedTranscript {
+                    prepared,
+                    chat_id: previous.clone(),
+                    entries,
+                    context_usage: self.context_usage,
+                    bytes,
+                });
+                while self.transcript_cache.len() > TRANSCRIPT_CACHE_CAP
+                    || self
+                        .transcript_cache
+                        .iter()
+                        .map(|cached| cached.bytes)
+                        .sum::<usize>()
+                        > TRANSCRIPT_CACHE_BYTES
+                {
+                    let evicted = self.transcript_cache.pop_front();
+                    cx.background_executor()
+                        .spawn(async move {
+                            drop(evicted);
+                        })
+                        .detach();
+                }
+            }
+        }
         self.selected_chat = chat_id.clone();
         self.auto_selected = true;
         self.transcript.clear();
         self.context_usage = None;
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
         self.transcript_replayed = false;
+        if let Some(cached) = cached {
+            self.transcript_baselines.insert(
+                cached.chat_id.clone(),
+                cached
+                    .prepared
+                    .as_ref()
+                    .map(|p| p.navigation_baseline.clone())
+                    .unwrap_or_else(|| {
+                        Arc::new(zeron_doc::TranscriptBaseline::capture(&cached.entries))
+                    }),
+            );
+            if let Some(prepared) = cached.prepared {
+                self.prepared_transcripts.insert(cached.chat_id, prepared);
+            }
+            self.transcript = cached.entries;
+            self.context_usage = cached.context_usage;
+            self.transcript_replayed = true;
+        }
         self.transcript_task = None;
         self.queue.clear();
         self.queue_task = None;
@@ -1955,6 +2301,19 @@ impl AppState {
 /// result, but their individual errors are not authoritative: older engines may
 /// legitimately omit a watch method. Only the assembly result may fail the
 /// whole connection.
+
+
+#[cfg(target_arch = "wasm32")]
+fn spawn_deferred_engine_watch(
+    _cx: &mut Context<AppState>,
+    _handle: EngineHandle,
+) -> Option<Task<()>> {
+    None
+}
+
+
+#[cfg(not(target_arch = "wasm32"))]
+
 fn spawn_deferred_engine_watch(
     cx: &mut Context<AppState>,
     handle: EngineHandle,
@@ -2228,7 +2587,7 @@ fn spawn_transcript_watch(
         // deselected or deleted, so retrying can't outlive relevance.
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
         'resubscribe: loop {
-            let params = serde_json::json!({ "chatId": chat_id });
+            let params = serde_json::json!({ "chatId": chat_id, "openingTail": true });
             let mut rx = match handle
                 .client()
                 .subscribe(methods::WATCH_DOC_MESSAGES, params)
@@ -2244,8 +2603,22 @@ fn spawn_transcript_watch(
                     continue 'resubscribe;
                 }
             };
+            let mut preparation = WatchPreparation::new(cx.background_executor().clone());
             while let Some(value) = rx.recv().await {
-                let update: zeron_doc::TranscriptUpdate = match serde_json::from_value(value) {
+                let history_pending = value
+                    .get("historyPending")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let decoded = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let update: zeron_doc::TranscriptUpdate =
+                            serde_json::from_value(value).map_err(|e| e.to_string())?;
+                        let prepared = preparation.prepare(&update).map_err(|e| e.to_string())?;
+                        Ok::<_, String>((update, prepared, preparation))
+                    })
+                    .await;
+                let (update, prepared, next_preparation) = match decoded {
                     Ok(frame) => frame,
                     Err(err) => {
                         // Schema skew (a newer peer's entry shape arriving
@@ -2257,21 +2630,21 @@ fn spawn_transcript_watch(
                         continue 'resubscribe;
                     }
                 };
-                let zeron_doc::TranscriptUpdate {
-                    frame,
-                    context_usage: usage,
-                } = update;
+                preparation = next_preparation;
                 let mut desync = false;
                 let alive = this.update(cx, |state, cx| {
                     // Guard against a stale pump racing a newer selection.
                     if state.selected_chat.as_deref() == Some(chat_id.as_str()) {
-                        if state.context_usage != usage {
-                            state.context_usage = usage;
-                            cx.notify();
+                        if history_pending && state.transcript_replayed {
+                            return;
                         }
-                        if let Err(err) = state.receive_transcript_frame(frame, cx) {
+                        if let Err(err) =
+                            state.receive_opening_transcript_update(update, history_pending, cx)
+                        {
                             tracing::warn!(%chat_id, error = %err, "resubscribing transcript");
                             desync = true;
+                        } else {
+                            state.prepared_transcripts.insert(chat_id.clone(), prepared);
                         }
                     }
                 });
@@ -2380,8 +2753,18 @@ fn spawn_subagent_watch(
                     continue 'resubscribe;
                 }
             };
+            let mut preparation = WatchPreparation::new(cx.background_executor().clone());
             while let Some(value) = rx.recv().await {
-                let frame: TranscriptFrame = match serde_json::from_value(value) {
+                let decoded = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let update: zeron_doc::TranscriptUpdate =
+                            serde_json::from_value(value).map_err(|e| e.to_string())?;
+                        let prepared = preparation.prepare(&update).map_err(|e| e.to_string())?;
+                        Ok::<_, String>((update, prepared, preparation))
+                    })
+                    .await;
+                let (update, prepared, next_preparation) = match decoded {
                     Ok(frame) => frame,
                     Err(err) => {
                         tracing::warn!(error = %err, "malformed subagent frame; resubscribing");
@@ -2389,15 +2772,25 @@ fn spawn_subagent_watch(
                         continue 'resubscribe;
                     }
                 };
+                preparation = next_preparation;
                 let mut desync = false;
                 let alive = this.update(cx, |state, cx| {
                     // A stale pump racing a snapshot/unwatch finds no key.
                     if let Some(rows) = state.sub_transcripts.get_mut(&doc_id) {
+                        let frame = update.frame;
                         let text_only = is_text_append(&frame);
                         state.transcript_revision = state.transcript_revision.wrapping_add(1);
                         if let Err(err) = zeron_doc::apply_transcript_frame(rows, frame) {
                             tracing::warn!(%doc_id, error = %err, "resubscribing subagent watch");
                             desync = true;
+                        }
+                        if !desync {
+                            state.prepared_transcripts.insert(doc_id.clone(), prepared);
+                        }
+                        if !desync && let Some(baseline) = update.replay_baseline {
+                            state
+                                .transcript_baselines
+                                .insert(doc_id.clone(), Arc::new(baseline));
                         }
                         if text_only && !desync {
                             cx.emit(TranscriptTextChanged {
@@ -2628,6 +3021,7 @@ mod tests {
                 engine_info: EngineInfo {
                     device_id: "owner-device".into(),
                     workspace_scope: WorkspaceScope::Local,
+                    cursor_sdk_version: None,
                     capabilities: zeron_proto::capabilities::current(),
                 },
                 state: state_rx,
@@ -3016,6 +3410,163 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn opening_tail_is_visible_but_never_replaces_or_caches_complete_history(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            let update = |id: &str| zeron_doc::TranscriptUpdate {
+                frame: TranscriptFrame::reset(&[user_entry(id)]),
+                context_usage: None,
+                replay_baseline: None,
+            };
+            state.select_chat(Some("whale".into()), cx);
+            state
+                .receive_opening_transcript_update(update("tail"), true, cx)
+                .unwrap();
+            assert_eq!(state.transcript[0].id, "tail");
+            assert!(
+                !state.transcript_replayed,
+                "scroll-anchor fallback must await full history"
+            );
+            state.select_chat(None, cx);
+            assert!(
+                state.transcript_cache.is_empty(),
+                "a preview is not a complete cached copy"
+            );
+            state.select_chat(Some("whale".into()), cx);
+            state
+                .receive_opening_transcript_update(update("full"), false, cx)
+                .unwrap();
+            state
+                .receive_opening_transcript_update(update("tail"), true, cx)
+                .unwrap();
+            assert_eq!(
+                state.transcript[0].id, "full",
+                "reconnect must preserve the full view"
+            );
+            state.select_chat(None, cx);
+            state.select_chat(Some("whale".into()), cx);
+            state
+                .receive_opening_transcript_update(update("tail"), true, cx)
+                .unwrap();
+            assert_eq!(
+                state.transcript[0].id, "full",
+                "revisit must preserve the cache"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn whale_transcript_revisit_is_synchronous_and_fresh_reset_wins(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.select_chat(Some("whale".into()), cx);
+            let entries: Vec<_> = (0..2000)
+                .map(|i| {
+                    let mut entry = user_entry(&format!("message-{i}"));
+                    entry.parts.push(zeron_doc::MessagePart::Text {
+                        id: "text".into(),
+                        text: "x".repeat(2048),
+                    });
+                    entry
+                })
+                .collect();
+            state.apply_transcript(entries);
+            let allocation = state.transcript.as_ptr();
+            for _ in 0..10 {
+                state.select_chat(Some("other".into()), cx);
+                assert!(
+                    state.transcript.is_empty(),
+                    "never show another chat's rows"
+                );
+                state.select_chat(Some("whale".into()), cx);
+                assert_eq!(
+                    state.transcript.len(),
+                    2000,
+                    "revisit must render before any RPC frame"
+                );
+                assert_eq!(
+                    state.transcript.as_ptr(),
+                    allocation,
+                    "move whale payloads, don't copy them"
+                );
+                assert!(state.transcript_replayed);
+                assert!(
+                    state
+                        .transcript_baseline("whale")
+                        .unwrap()
+                        .covers(&state.transcript[0])
+                );
+            }
+            state
+                .apply_transcript_frame(TranscriptFrame::reset(&[user_entry(
+                    "new-authoritative-row",
+                )]))
+                .unwrap();
+            assert_eq!(state.transcript.len(), 1);
+            assert_eq!(state.transcript[0].id, "new-authoritative-row");
+            state.select_chat(None, cx);
+            state.select_chat(Some("whale".into()), cx);
+            assert_eq!(state.transcript[0].id, "new-authoritative-row");
+            // An authoritative empty reset must still be honored.
+            state
+                .apply_transcript_frame(TranscriptFrame::reset(&[]))
+                .unwrap();
+            assert!(state.transcript.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn transcript_revisit_cache_is_bounded_and_account_scoped(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            for i in 0..20 {
+                state.select_chat(Some(format!("chat-{i}")), cx);
+                state.apply_transcript(vec![user_entry("row")]);
+            }
+            state.select_chat(None, cx);
+            assert_eq!(state.transcript_cache.len(), TRANSCRIPT_CACHE_CAP);
+            state.select_chat(Some("chat-0".into()), cx);
+            assert!(state.transcript.is_empty(), "oldest entry was evicted");
+            state.apply_chats(vec![chat("chat-19", 0, None)]);
+            assert_eq!(
+                state.transcript_cache.len(),
+                1,
+                "deleted chats leave no cached rows"
+            );
+            state.prepare_runtime_replacement(cx);
+            state.select_chat(Some("chat-19".into()), cx);
+            assert!(
+                state.transcript.is_empty(),
+                "account replacement must clear cached content"
+            );
+            assert!(state.transcript_cache.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn transcript_cache_rejects_oversize_and_unloaded_entries(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.select_chat(Some("loading".into()), cx);
+            state.select_chat(Some("oversize".into()), cx);
+            assert!(state.transcript_cache.is_empty());
+            let mut entry = user_entry("large");
+            entry.parts.push(zeron_doc::MessagePart::Text {
+                id: "text".into(),
+                text: "x".repeat(TRANSCRIPT_CACHE_BYTES + 1),
+            });
+            state.apply_transcript(vec![entry]);
+            state.select_chat(None, cx);
+            assert!(
+                state.transcript_cache.is_empty(),
+                "byte budget applies even to one whale"
+            );
+        });
+    }
+
     #[test]
     fn transcript_revision_tracks_replay_echoes_and_subagent_content() {
         let mut state = AppState::new();
@@ -3071,6 +3622,7 @@ mod tests {
             last_seen_at: None,
             created_at: None,
             version: None,
+            cursor_sdk_version: None,
             capabilities: Vec::new(),
         }
     }
@@ -4017,6 +4569,7 @@ mod tests {
             last_seen_at: None,
             created_at: None,
             version: Some("0.2.12".into()),
+            cursor_sdk_version: None,
             capabilities: Vec::new(),
         }];
         assert!(s.device_version_at_least("d1", (0, 2, 12)));
@@ -4039,6 +4592,7 @@ mod tests {
                 last_seen_at: None,
                 created_at: None,
                 version: Some("0.2.31".into()),
+                cursor_sdk_version: None,
                 capabilities: vec![zeron_proto::capabilities::MESSAGE_QUEUE_V1.into()],
             },
             Device {
@@ -4048,6 +4602,7 @@ mod tests {
                 last_seen_at: None,
                 created_at: None,
                 version: Some("0.2.31".into()),
+                cursor_sdk_version: None,
                 capabilities: Vec::new(),
             },
         ];
@@ -4074,6 +4629,7 @@ mod tests {
             last_seen_at: Some(now),
             created_at: None,
             version: None,
+            cursor_sdk_version: None,
             capabilities: Vec::new(),
         }];
         s.connectivity.state = ConnectivityState::Connected;
@@ -4136,5 +4692,22 @@ impl AppState {
     /// Keep fixture documents deterministic while using the real attachment RPC.
     pub fn fixture_attachment_engine(&mut self, engine: EngineHandle) {
         self.engine = Some(engine);
+    }
+}
+
+#[cfg(feature = "project-palette-fixture")]
+impl AppState {
+    /// Seed provider metadata for the isolated native sidebar review fixture.
+    pub fn fixture_sidebar_change_request(
+        &mut self,
+        snapshot: zeron_proto::CheckoutChangeRequestStatus,
+    ) {
+        let key = crate::change_requests::ChangeRequestWatchKey {
+            device_id: snapshot.device_id.clone(),
+            cwd: snapshot.cwd.clone(),
+            branch: snapshot.branch.clone(),
+            checkout_id: Some(snapshot.checkout_id.clone()),
+        };
+        self.change_requests.store(key, snapshot);
     }
 }

@@ -268,9 +268,7 @@ struct ComposerView: View {
     }
 
     private var currentModel: ModelInfo {
-        models.first { $0.id == chat.config?.model }
-            ?? models.first
-            ?? HarnessCatalog.defaultModel(for: harness)
+        HarnessCatalog.resolve(modelId: chat.config?.model, in: models, harness: harness)
     }
 
     private var currentReasoning: String? {
@@ -421,9 +419,10 @@ struct ComposerView: View {
                 set: { writeOption(option: option, choiceId: $0) }
             ))
         }
-        .task(id: "\(chat.id)/\(harness)") {
-            guard let space = model.space(for: chat) else { return }
-            catalogs[harness] = await model.listModels(space: space, harness: harness)
+        .task(id: "\(chat.id)/\(chat.deviceId)/\(harness)") {
+            let catalog = await model.listModels(deviceId: chat.deviceId, harness: harness)
+            guard !Task.isCancelled else { return }
+            catalogs[harness] = catalog
         }
         .task(id: queueEdit?.terminal == true ? nil : queueEditLease?.leaseId) {
             guard let lease = queueEditLease, queueEdit?.terminal != true else { return }

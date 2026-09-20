@@ -1,12 +1,10 @@
-/// <reference types="@cloudflare/vitest-plugin" />
+/// <reference types="@cloudflare/vitest-pool-workers" />
 
 declare module "cloudflare:test" {
   interface ProvidedEnv {
     TEST_LOG: DurableObjectNamespace;
+    CHAT_ROOMS: DurableObjectNamespace;
     PREVIEW_ROOMS: DurableObjectNamespace;
-
-    BROWSER_SESSIONS: DurableObjectNamespace;
-
-    DEVICE_ROOMS: DurableObjectNamespace;
+    REGISTRY_ROOMS: DurableObjectNamespace;
   }
 }
