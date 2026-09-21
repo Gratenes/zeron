@@ -21,16 +21,16 @@ current `App.tsx`.
 Tailcat is the current gate: do not begin parity work until an Android device
 can start the native client and reach the paired peer.
 
-The Android route-monitor failure has a reproducible workaround:
+The Android route-monitor failure has a native workaround:
 
 - Android apps cannot open the `NETLINK_ROUTE` monitor Tailcat normally uses.
-- `connectivity/tailcat/android-netmon.patch` makes Tailscale use a static
-  monitor on Android while retaining the event bus required by `magicsock`.
-- `connectivity/tailcat/build.sh` applies that patch only for Android AAR
-  builds. It is tied to the `tailscale.com` version pinned in that script.
+- `connectivity/tailcat/netmon_android.go` registers Android-safe interface
+  discovery through `getifaddrs`, avoiding Go's denied netlink route query.
+- Android AAR builds require API 24 or later.
 
-The prior native crash was a nil event bus in the first static-monitor attempt.
-The current patch preserves the bus. It still needs an end-to-end device retry.
+The previous static-monitor attempt crashed because `magicsock` requires a live
+event bus. The current implementation avoids that workaround. It still needs
+an end-to-end device retry.
 
 ## Build and test
 
