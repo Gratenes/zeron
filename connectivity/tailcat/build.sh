@@ -98,6 +98,7 @@ build_android() {
   }
   "$GOMOBILE" bind \
     -target=android \
+    -androidapi 21 \
     -trimpath \
     -o "$OUT_DIR/KratosTailcat.aar" \
     .
