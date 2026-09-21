@@ -17,12 +17,14 @@ export default function App() {
     setBusy(true);
     setStatus('Starting Tailcat…');
     try {
+      const relay = await fetch('https://tailcat.dev/derpmap.json');
+      if (!relay.ok) throw new Error(`Tailcat relay map returned ${relay.status}.`);
       const nextUrl = await Tailcat.startProbe(invitation);
       setUrl(nextUrl);
       setStatus('Tailcat connected. The loopback proxy is live.');
     } catch (error) {
       setUrl('');
-      setStatus(error instanceof Error ? error.message : 'Tailcat could not connect.');
+      setStatus(error instanceof Error ? error.message : 'Tailcat could not connect after reaching its relay map.');
     } finally {
       setBusy(false);
     }

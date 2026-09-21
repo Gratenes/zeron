@@ -25,7 +25,8 @@ class KratosTailcatModule : Module() {
       require(address.isNotBlank()) { "Invitation has no Tailcat address" }
       val stateDirectory = requireNotNull(appContext.reactContext).filesDir.resolve("tailcat-probe")
       stateDirectory.mkdirs()
-      Tailcatnative.startClient(address, stateDirectory.absolutePath, invite.optString("derpMap")).also {
+      val start = if (BuildConfig.DEBUG) Tailcatnative::startClientDiagnostic else Tailcatnative::startClient
+      start(address, stateDirectory.absolutePath, invite.optString("derpMap")).also {
         client = it
       }.url()
     }
