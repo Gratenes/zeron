@@ -9,6 +9,7 @@ MODE=${1:-native}
 PKG=./cmd/kratos-tailcat
 PIN=fd101889796a
 MOBILE_PIN=v0.0.0-20260908204917-8b95e45f8d3e
+TAILSCALE_PIN=v1.103.0-pre.0.20260904030409-31d8badb3bfb
 
 mkdir -p "$OUT_DIR"
 cd "$ROOT"
@@ -96,6 +97,12 @@ build_android() {
     echo "gobind is required; install golang.org/x/mobile/cmd/gobind@$MOBILE_PIN" >&2
     exit 1
   }
+  "$GO" mod download tailscale.com@$TAILSCALE_PIN
+  tailscale_dir=$($GO env GOMODCACHE)/tailscale.com@$TAILSCALE_PIN
+  if ! grep -q 'return newStatic(bus, true), nil' "$tailscale_dir/net/netmon/netmon.go"; then
+    chmod u+w "$tailscale_dir/net/netmon" "$tailscale_dir/net/netmon/netmon.go"
+    git apply --unsafe-paths --directory="$tailscale_dir" "$ROOT/android-netmon.patch"
+  fi
   "$GOMOBILE" bind \
     -target=android \
     -androidapi 21 \
