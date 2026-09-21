@@ -28,7 +28,7 @@ The UI is shared TypeScript. Transport is intentionally platform-specific:
 
 | Platform | Required adapter |
 | --- | --- |
-| Android | Expo module wrapping the Tailcat Android binding, secure device identity, peer authentication, and local cache. |
+| Android | Expo module wrapping `target/tailcat/KratosTailcat.aar`, secure device identity, peer authentication, and local cache. |
 | iOS | Expo module wrapping the existing Tailcat XCFramework path, secure device identity, peer authentication, and local cache. |
 | Web | Existing browser-gateway authentication and WebSocket transport; no native Tailcat bridge. |
 

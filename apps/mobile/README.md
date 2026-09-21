@@ -18,3 +18,10 @@ npm run android
 
 Native Tailcat support will require an Expo development build; Expo Go is not
 the target runtime.
+
+Build the Android Tailcat artifact with the pinned Go 1.27.1 and `gomobile`
+toolchain:
+
+```sh
+./Native/build-aar.sh
+```
