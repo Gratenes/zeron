@@ -133,9 +133,9 @@ final class NetworkReliabilityTests: XCTestCase {
     @MainActor
     func testRestartedSessionRetainsOutboxIdsAndRetiresThem() throws {
         let id = "session-outbox-\(UUID().uuidString)"
-        let config = AppConfig(edgeURL: URL(string: "http://localhost:1")!, mode: .dev,
-                               userId: "u", orgId: "o", deviceId: "phone",
-                               deviceName: "phone", tokens: nil, devBearer: "u@o")
+        let config = AppConfig(peerURL: URL(string: "http://localhost:1")!,
+                               profileId: "o", deviceId: "phone", deviceName: "phone",
+                               bearer: "u@o")
         defer { try? FileManager.default.removeItem(at: DocDisk.chat2URL(for: id)) }
         let doc = LoroDoc()
         let outbox: [(batchId: String, bytes: Data)] = [
@@ -156,9 +156,9 @@ final class NetworkReliabilityTests: XCTestCase {
     @MainActor
     func testHeldSessionReleasesPendingOutboxToTransport() throws {
         let id = "held-outbox-\(UUID().uuidString)"
-        let config = AppConfig(edgeURL: URL(string: "http://localhost:1")!, mode: .dev,
-                               userId: "u", orgId: "o", deviceId: "phone",
-                               deviceName: "phone", tokens: nil, devBearer: "u@o")
+        let config = AppConfig(peerURL: URL(string: "http://localhost:1")!,
+                               profileId: "o", deviceId: "phone", deviceName: "phone",
+                               bearer: "u@o")
         defer { try? FileManager.default.removeItem(at: DocDisk.chat2URL(for: id)) }
         XCTAssertTrue(DocDisk.saveChat2(doc: LoroDoc(), id: id, cursor: 7, verified: true,
                                         outbox: [("stable-a", Data([1]))]))
@@ -178,9 +178,9 @@ final class NetworkReliabilityTests: XCTestCase {
     @MainActor
     func testCursorZeroFirstContactPreservesRestoredBatchesAndFlag() throws {
         let id = "first-contact-\(UUID().uuidString)"
-        let config = AppConfig(edgeURL: URL(string: "http://localhost:1")!, mode: .dev,
-                               userId: "u", orgId: "o", deviceId: "phone",
-                               deviceName: "phone", tokens: nil, devBearer: "u@o")
+        let config = AppConfig(peerURL: URL(string: "http://localhost:1")!,
+                               profileId: "o", deviceId: "phone", deviceName: "phone",
+                               bearer: "u@o")
         defer { try? FileManager.default.removeItem(at: DocDisk.chat2URL(for: id)) }
         let doc = LoroDoc()
         try doc.getMap(id: "test").insert(key: "value", v: "local")

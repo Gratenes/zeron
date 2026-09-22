@@ -5,9 +5,8 @@ import XCTest
 @MainActor
 final class SessionStoreDurabilityTests: XCTestCase {
     private func config() -> AppConfig {
-        AppConfig(edgeURL: URL(string: "http://localhost:1")!, mode: .dev,
-                  userId: "u", orgId: "o", deviceId: "phone",
-                  deviceName: "phone", tokens: nil, devBearer: "u@o")
+        AppConfig(peerURL: URL(string: "http://localhost:1")!, profileId: "o",
+                  deviceId: "phone", deviceName: "phone", bearer: "u@o")
     }
 
     private func appendEntry(_ store: SessionStore, id: String, text: String) throws {

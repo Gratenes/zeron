@@ -149,8 +149,8 @@ final class TranscriptScrollMatrixTests: XCTestCase {
 
     private func mount(_ corpus: Corpus, useEditor: Bool = false) async {
         TranscriptLayoutProbe.enabled = true
-        let config = AppConfig(edgeURL: URL(string: "http://localhost:8787")!, mode: .dev,
-                               userId: "test", orgId: "test", deviceId: "test", deviceName: "Test")
+        let config = AppConfig(peerURL: URL(string: "http://localhost:8787")!,
+                               profileId: "test", deviceId: "test", deviceName: "Test")
         let store = SessionStore(chatId: UUID().uuidString, config: config, offline: true)
         store.setEntries(BenchRunner.syntheticEntries(turns: corpus.historyTurns))
         harness = Harness(store: store)
