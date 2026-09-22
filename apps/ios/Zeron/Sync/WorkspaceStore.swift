@@ -61,8 +61,12 @@ final class WorkspaceStore {
 
     init(config: AppConfig, doc: RegistryDoc? = nil) {
         self.config = config
-        self.doc = RegistryDoc(deviceId: config.deviceId)
-        hydrateFromDisk()
+        self.doc = doc ?? RegistryDoc(deviceId: config.deviceId)
+        if doc == nil {
+            hydrateFromDisk()
+        } else {
+            project()
+        }
     }
 
     /// Disk projection is intentionally independent from transport startup so

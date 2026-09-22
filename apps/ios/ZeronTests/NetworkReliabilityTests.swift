@@ -7,6 +7,12 @@ import XCTest
 @testable import Zeron
 
 final class NetworkReliabilityTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        DocDisk.activate(profileId: "network-reliability-tests-\(UUID().uuidString)")
+    }
+
     func testChat2SnapshotRoundTripsVerifiedFlag() throws {
         let id = "verified-\(UUID().uuidString)"
         defer { try? FileManager.default.removeItem(at: DocDisk.chat2URL(for: id)) }
