@@ -236,14 +236,9 @@ final class AppModel {
         scheduledToggle("-unarchive-after", archived: false)
     }
 
-    private func restorePaired(identity: DeviceIdentity, generation: Int) async {
-        var native: (any TailcatClient)?
+    private func restorePaired(native: any TailcatClient, identity: DeviceIdentity,
+                               generation: Int) async {
         do {
-            native = try await startTailcat(profileId: identity.profileId,
-                                            address: peerAddressString,
-                                            derpMap: storedDERPMap)
-            guard let native else { return }
-
             guard authGate.accepts(generation), demo == nil else { native.close(); return }
             let session = try await sessionRenewer(native.url, identity)
             guard authGate.accepts(generation), demo == nil else { native.close(); return }
@@ -251,16 +246,28 @@ final class AppModel {
             authBusy = false
             readinessError = nil
         } catch PairingError.revoked {
-            native?.close()
+            native.close()
             guard authGate.accepts(generation) else { return }
             authBusy = false
             handleRevoked(profileId: identity.profileId, deviceId: identity.deviceId,
                           generation: generation)
         } catch {
-            native?.close()
+            native.close()
             guard authGate.accepts(generation) else { return }
             authBusy = false
             readinessError = error.localizedDescription
+        }
+    }
+
+    private func restorePairedFailed(identity: DeviceIdentity, generation: Int,
+                                     revoked: Bool, message: String? = nil) {
+        guard authGate.accepts(generation) else { return }
+        authBusy = false
+        if revoked {
+            handleRevoked(profileId: identity.profileId, deviceId: identity.deviceId,
+                          generation: generation)
+        } else {
+            readinessError = message
         }
     }
 
@@ -268,8 +275,34 @@ final class AppModel {
         guard !storedProfileId.isEmpty, !peerAddressString.isEmpty, !authBusy,
               let identity = identityLoader(storedProfileId) else { return }
         let generation = authGate.begin()
+        let address = peerAddressString
+        let derpMap = storedDERPMap.isEmpty ? nil : storedDERPMap
+        let directory = tailcatDirectory(profileId: identity.profileId)
+        let factory = nativeFactory
         authBusy = true
-        Task { await restorePaired(identity: identity, generation: generation) }
+        // Launch the blocking Go client constructor directly from this call.
+        // Routing through a MainActor Task first lets foreground network work
+        // delay startup before the detached factory is even scheduled.
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                try Task.checkCancellation()
+                let native = try factory(address, directory, derpMap)
+                if Task.isCancelled {
+                    native.close()
+                    throw CancellationError()
+                }
+                guard let self else { native.close(); return }
+                await self.restorePaired(native: native, identity: identity,
+                                         generation: generation)
+            } catch PairingError.revoked {
+                await self?.restorePairedFailed(identity: identity, generation: generation,
+                                                revoked: true)
+            } catch {
+                await self?.restorePairedFailed(identity: identity, generation: generation,
+                                                revoked: false,
+                                                message: error.localizedDescription)
+            }
+        }
     }
 
     func pair(invitationText: String) async throws {
@@ -404,11 +437,6 @@ final class AppModel {
         readinessError = "This device was revoked. Pair it again to continue."
     }
 
-    private func startTailcat(profileId: String, address: String,
-                              derpMap: String) async throws -> any TailcatClient {
-        try await makeNative(address: address, stateDirectory: tailcatDirectory(profileId: profileId),
-                             derpMap: derpMap.isEmpty ? nil : derpMap)
-    }
 
     private func makeNative(address: String, stateDirectory: URL,
                             derpMap: String?) async throws -> any TailcatClient {
@@ -801,7 +829,7 @@ final class AppModel {
     }
 
     private func probeEdgeHealth() {
-        guard let config, demo == nil else { return }
+        guard tailcat != nil, let config, demo == nil else { return }
         Task.detached {
             var request = URLRequest(url: config.peerURL.appending(path: "health"))
             request.timeoutInterval = 3
