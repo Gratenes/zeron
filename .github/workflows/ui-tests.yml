@@ -199,7 +199,7 @@ jobs:
           APP="$DERIVED_DATA/Build/Products/Debug-iphonesimulator/Zeron.app"
           SIGNED_ENTITLEMENTS="$RUNNER_TEMP/zeron-simulator-entitlements.plist"
           codesign --verify --deep --strict --verbose=2 "$APP"
-          codesign --display --entitlements - --xml "$APP" > "$SIGNED_ENTITLEMENTS"
+          codesign --display --entitlements :- "$APP" > "$SIGNED_ENTITLEMENTS"
           test "$(plutil -extract application-identifier raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_APP_ID"
           test "$(plutil -extract 'com\.apple\.developer\.team-identifier' raw "$SIGNED_ENTITLEMENTS")" = "$EXPECTED_TEAM_ID"
           test "$(plutil -extract get-task-allow raw "$SIGNED_ENTITLEMENTS")" = "true"
