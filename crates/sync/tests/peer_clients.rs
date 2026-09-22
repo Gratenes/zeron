@@ -30,6 +30,11 @@ use zeron_sync::peer::{PeerPrincipal, PeerStore, router};
 use zeron_sync::{RegistryClient, SyncError};
 
 async fn principal(mut req: Request<Body>, next: Next) -> Response {
+    // Hyper probes a freshly accepted listener at `/`; it is not a protocol
+    // request and should reach the router's ordinary 404 without test auth.
+    if req.uri().path() == "/" {
+        return next.run(req).await;
+    }
     // HTTP callers use headers.  WebSocket clients cannot add headers through
     // the public client API, so the test URL carries the same test principal
     // in query parameters.  This is only a test-local authentication adapter.

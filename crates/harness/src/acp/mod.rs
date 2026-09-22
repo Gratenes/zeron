@@ -2427,6 +2427,27 @@ impl SubagentObserver {
     }
 }
 
+impl SubagentObserver {
+    async fn settle(&mut self) {
+        if let Self::Mimir(native) = self {
+            native.settle().await;
+        }
+    }
+
+    async fn quiesce(&mut self) -> bool {
+        match self {
+            Self::Mimir(native) => native.quiesce().await,
+            _ => true,
+        }
+    }
+
+    fn resume(&mut self) {
+        if let Self::Mimir(native) = self {
+            native.resume();
+        }
+    }
+}
+
 /// The events of one notification, session-filtered. `session/update` maps
 /// per [`map_update`]; `_x.ai/session_notification` is grok's extension
 /// channel — same `{sessionId, update}` envelope, but its updates (the
@@ -2643,16 +2664,16 @@ fn handle_server_request_live(
     forms: &mut elicitation::Elicitations,
     session_id: &str,
 ) -> Vec<AgentEvent> {
+    if method == "elicitation/create" {
+        forms.handle_request(client, session_id, id, params, request_input);
+        return Vec::new();
+    }
     if params
         .get("sessionId")
         .and_then(Value::as_str)
         .is_some_and(|id| id != session_id)
     {
         client.respond(&id, json!({"outcome": {"outcome": "cancelled"}}));
-        return Vec::new();
-    }
-    if method == "elicitation/create" {
-        forms.handle_request(client, session_id, id, params, request_input);
         return Vec::new();
     }
     if method != "session/request_permission" {
@@ -3198,6 +3219,10 @@ async fn run_session(session: Session) {
             &mut session_response,
             model.as_deref(),
             &efforts,
+            matches!(
+                harness,
+                HarnessId::Antigravity | HarnessId::Devin | HarnessId::Mimir
+            ),
             &request.model_options,
         )
         .await?;
@@ -3462,7 +3487,10 @@ async fn run_session(session: Session) {
                         }
                         None
                     }
-                    Err(error) => Some(error.to_string()),
+                    Err(error) => {
+                        subagents.resume();
+                        Some(error.to_string())
+                    }
                 };
                 if !send(&event_tx, AgentEvent::ControlResolved { prompt: text, message_id, error }).await { break 'main; }
             },
@@ -3581,6 +3609,8 @@ async fn run_session(session: Session) {
                 if consumer_gone {
                     break 'main;
                 }
+                subagents.settle().await;
+
                 let (prev, _next) = rotate(&mut assistant_message_id);
                 if !send(
                     &event_tx,
@@ -4079,6 +4109,23 @@ async fn run_session(session: Session) {
                     if native_caps.goal && let Some(command) = zeron_proto::goal_control_command(&msg.prompt) {
                         if control_call.is_some() {
                             if !send(&event_tx, AgentEvent::ControlResolved { prompt: msg.prompt, message_id: msg.message_id, error: Some("A goal control is already pending; retry after its response.".into()) }).await { break 'main; }
+                        } else if !subagents.quiesce().await {
+                            subagents.resume();
+                            if !send(
+                                &event_tx,
+                                AgentEvent::ControlResolved {
+                                    prompt: msg.prompt,
+                                    message_id: msg.message_id,
+                                    error: Some(
+                                        "Timed out waiting for child transcript reads; retry the goal control."
+                                            .into(),
+                                    ),
+                                },
+                            )
+                            .await
+                            {
+                                break 'main;
+                            }
                         } else {
                             let rpc = client.clone();
                             let params = json!({"sessionId": session_id, "command": command});
@@ -4246,6 +4293,8 @@ async fn run_session(session: Session) {
             _ = event_tx.closed() => break 'main,
         }
     }
+
+    subagents.settle().await;
 
     // A vanished Devin process cannot send subagent_completed. Settle every
     // open nested transcript before the parent's terminal Done.

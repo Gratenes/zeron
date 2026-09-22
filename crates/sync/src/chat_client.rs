@@ -1166,6 +1166,7 @@ impl Actor {
             if !self.handle_frame_with_replay(frame, head_seq.is_none()) {
                 return SessionEnd::Reconnect;
             }
+            self.prune_in_flight(&mut in_flight);
         }
         let head_seq = match head_seq {
             Some(seq) => seq,
@@ -1186,6 +1187,7 @@ impl Actor {
                                 if !self.handle_frame_with_replay(frame, true) {
                                     return None;
                                 }
+                                self.prune_in_flight(&mut in_flight);
                             }
                         }
                     }
@@ -1236,6 +1238,7 @@ impl Actor {
                     if !self.handle_frame(frame) {
                         return SessionEnd::Reconnect;
                     }
+                    self.prune_in_flight(&mut in_flight);
                     if !self.maybe_repair_gap(&mut pipe, &mut gap_repairs).await {
                         return SessionEnd::Reconnect;
                     }
@@ -1545,6 +1548,11 @@ impl Actor {
             &[],
         );
         pipe.tx.send(req).await.is_ok()
+    }
+
+    fn prune_in_flight(&self, in_flight: &mut HashSet<String>) {
+        let shared = lock(&self.shared);
+        in_flight.retain(|id| shared.pending.iter().any(|pending| &pending.batch_id == id));
     }
 
     async fn push_pending(&self, pipe: &mut BinPipe, in_flight: &mut HashSet<String>) -> bool {

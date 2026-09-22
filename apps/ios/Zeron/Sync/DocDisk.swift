@@ -66,6 +66,18 @@ enum DocDisk {
     }
 
 
+    /// Retired s2 snapshots live beside chat2 snapshots inside the active
+    /// profile. They are read only to adopt this device's pending commands.
+    static func url(for id: String) -> URL {
+        let safe = id.replacingOccurrences(of: "/", with: "_")
+        return directory.appendingPathComponent("\(safe).loro")
+    }
+
+    @discardableResult
+    static func load(into doc: LoroDoc, id: String) -> Bool {
+        guard let data = try? Data(contentsOf: url(for: id)), !data.isEmpty else { return false }
+        return (try? doc.importWith(bytes: data, origin: "disk")) != nil
+    }
 
     /// The workspace registry's persisted blob ({rows, cursor, gcFloor,
     /// clock, pending} JSON; session docs use chat2 Loro snapshots.
@@ -86,6 +98,10 @@ enum DocDisk {
         return directory.appendingPathComponent("c2_\(safe).loro")
     }
 
+
+    static func legacySnapshotExists(id: String) -> Bool {
+        FileManager.default.fileExists(atPath: url(for: id).path)
+    }
 
     /// Import the chat2 snapshot; returns its cursor and whether a completed
     /// catch-up verified it, or nil when absent/unreadable.
@@ -327,6 +343,7 @@ enum DocDisk {
 
     /// Sign-out closes this profile without deleting it. A later re-pair to
     /// the same profile can reopen its cache; unrelated profiles cannot.
+    @MainActor
     static func closeProfile() {
         SnapshotLease.revokeAll()
         deactivate()

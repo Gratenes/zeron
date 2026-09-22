@@ -413,6 +413,48 @@ final class SessionStore {
         return doc.oplogVv().includesVv(other: vv)
     }
 
+    /// Mine the retired s2 snapshot for this device's unexpired pending
+    /// commands and re-queue them in the fresh chat2 lineage. Command ids are
+    /// preserved so the host's processed-command ledger prevents duplicates;
+    /// basedOn is intentionally dropped because those turn ids do not exist in
+    /// the new lineage.
+    private func adoptLegacyCommands() {
+        let legacy = LoroDoc()
+        guard DocDisk.load(into: legacy, id: chatId),
+              let root = legacy.getDeepValue().mapValue,
+              let commands = root["commands"]?.listValue, !commands.isEmpty else { return }
+        let now = nowMs()
+        var carried = 0
+        let fresh = doc.getList(id: "commands")
+        for value in commands {
+            guard let m = value.mapValue,
+                  m["status"]?.stringValue == "pending",
+                  m["issuedBy"]?.stringValue == config.deviceId,
+                  let id = m["id"]?.stringValue,
+                  let kind = m["kind"]?.stringValue,
+                  let payload = m["payload"] else { continue }
+            if let expires = m["expiresAt"]?.i64Value, expires <= now { continue }
+            do {
+                let map = try fresh.pushContainer(child: LoroMap())
+                try map.insert(key: "id", v: id)
+                try map.insert(key: "kind", v: kind)
+                try map.insert(key: "payload", v: payload)
+                try map.insert(key: "issuedBy", v: config.deviceId)
+                try map.insert(key: "issuedAt", v: m["issuedAt"]?.i64Value ?? now)
+                try map.insert(
+                    key: "expiresAt",
+                    v: m["expiresAt"]?.i64Value ?? (now + commandDefaultTtlMs)
+                )
+                try map.insert(key: "status", v: "pending")
+                carried += 1
+            } catch {}
+        }
+        guard carried > 0 else { return }
+        doc.commit()
+        roomLog.info(
+            "chat2 \(self.chatId, privacy: .public): adopt carried \(carried) pending command(s) from the s2 lineage"
+        )
+    }
 
     func attachView() {
         viewAttached = true
