@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View, type LayoutChangeEvent } from 'react-native';
+import { utf8Decode, utf8Encode } from './connection';
 import { colors, radius, spacing, typography } from './theme';
 
 type Props = {
@@ -15,10 +16,9 @@ type Phase = 'opening' | 'ready' | 'reconnecting' | 'exited' | 'closed' | 'error
 type Active = { id: string; cancelled: boolean; cancelStream?: () => void; retry?: ReturnType<typeof setTimeout> };
 
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-const encoder = new TextEncoder();
 
 function encodeBase64(text: string): string {
-  const bytes = encoder.encode(text);
+  const bytes = utf8Encode(text);
   let result = '';
   for (let i = 0; i < bytes.length; i += 3) {
     const value = (bytes[i] << 16) | ((bytes[i + 1] ?? 0) << 8) | (bytes[i + 2] ?? 0);
@@ -43,6 +43,24 @@ function decodeBase64(value: string): Uint8Array {
     if (block.length > 3 && block[3] !== '=') bytes.push(value & 255);
   }
   return new Uint8Array(bytes);
+}
+
+function decodeChunk(bytes: Uint8Array, carry: Uint8Array): { text: string; carry: Uint8Array } {
+  const joined = new Uint8Array(carry.length + bytes.length);
+  joined.set(carry);
+  joined.set(bytes, carry.length);
+  let end = joined.length;
+  let lead = end - 1;
+  while (lead >= 0 && (joined[lead] & 0xc0) === 0x80) lead--;
+  if (lead >= 0) {
+    const first = joined[lead];
+    const needed = first < 0x80 ? 1 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : 4;
+    if (end - lead < needed) end = lead;
+  }
+  let text = '';
+  try { text = utf8Decode(joined.subarray(0, end)); }
+  catch { text = Array.from(joined.subarray(0, end), byte => byte < 0x80 ? String.fromCharCode(byte) : '�').join(''); }
+  return { text, carry: joined.slice(end) };
 }
 
 // A line-oriented VT output view: handles shell prompts and line editing while
@@ -132,7 +150,7 @@ export function Terminal({ call, subscribe, chatId, targetDeviceId, cwd }: Props
   const active = useRef<Active | null>(null);
   const generation = useRef(0);
   const output = useRef(new Output());
-  const decoder = useRef(new TextDecoder());
+  const decoderCarry = useRef<Uint8Array>(new Uint8Array());
   const lastSeq = useRef(0);
   const size = useRef({ cols: 80, rows: 24 });
   const scroll = useRef<ScrollView>(null);
@@ -155,7 +173,7 @@ export function Terminal({ call, subscribe, chatId, targetDeviceId, cwd }: Props
     const current = ++generation.current;
     let disposed = false;
     setSession(null); setPhase('opening'); setDisplay(''); setDraft(''); setError(''); setSending(false);
-    output.current = new Output(); decoder.current = new TextDecoder(); lastSeq.current = 0;
+    output.current = new Output(); decoderCarry.current = new Uint8Array(); lastSeq.current = 0;
 
     const attach = async (id: string) => {
       const terminal = active.current;
@@ -167,7 +185,11 @@ export function Terminal({ call, subscribe, chatId, targetDeviceId, cwd }: Props
           if (typeof event.seq !== 'number' || event.seq <= lastSeq.current) return;
           lastSeq.current = event.seq;
           if (event.type === 'data' && typeof event.data === 'string') {
-            try { setDisplay(output.current.feed(decoder.current.decode(decodeBase64(event.data), { stream: true }))); }
+            try {
+              const chunk = decodeChunk(decodeBase64(event.data), decoderCarry.current);
+              decoderCarry.current = chunk.carry;
+              setDisplay(output.current.feed(chunk.text));
+            }
             catch (cause) { setError(message(cause)); }
           } else if (event.type === 'exit') {
             terminal.cancelled = true;
