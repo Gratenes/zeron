@@ -135,13 +135,13 @@ const MessageRow = memo(function MessageRow({ item, onOpenArtifact, onRespondInp
     const artifacts = item.parts.filter((part): part is Extract<TranscriptPart, { type: 'artifact' }> => part.type === 'artifact');
     const collapsible = text.length > 400 || text.split('\n').length > 5;
     return <View style={styles.userRow}>
-      <View style={styles.userBubble}>
+      {artifacts.map(part => <ArtifactCard key={part.id} part={part} onOpen={onOpenArtifact} attached />)}
+      {!!text && <View style={styles.userBubble}>
         <Text selectable numberOfLines={collapsible && !expanded ? 5 : undefined} style={styles.userText}>{text}</Text>
         {collapsible && <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)}>
           <Text style={styles.expand}>{expanded ? 'Show less  ⌃' : 'Show more  ⌄'}</Text>
         </Pressable>}
-        {artifacts.map(part => <ArtifactCard key={part.id} part={part} onOpen={onOpenArtifact} attached />)}
-      </View>
+      </View>}
     </View>;
   }
 
@@ -203,7 +203,7 @@ export function Transcript({ messages, isStreaming = false, onOpenArtifact, onRe
       scrollEventThrottle={32}
       keyboardShouldPersistTaps="handled"
       contentContainerStyle={styles.content}
-      ListFooterComponent={isStreaming && messages.at(-1)?.status !== 'streaming' ? <Text style={styles.streaming}>●  Working</Text> : null}
+      ListFooterComponent={isStreaming && messages.at(-1)?.status !== 'streaming' ? <View style={styles.rowWidth}><Text style={styles.streaming}>●  Working</Text></View> : null}
       ListEmptyComponent={<Text style={styles.empty}>Start a conversation</Text>}
     />
     {showEnd && <Pressable accessibilityRole="button" accessibilityLabel="Scroll to latest message" onPress={toEnd} style={styles.endButton}><Text style={styles.endText}>↓</Text></Pressable>}
@@ -212,13 +212,13 @@ export function Transcript({ messages, isStreaming = false, onOpenArtifact, onRe
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
-  content: { paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: 24, alignItems: 'center' },
-  rowWidth: { width: '100%', maxWidth: 736 },
-  userRow: { alignItems: 'flex-end', marginBottom: 24 },
-  userBubble: { maxWidth: '92%', backgroundColor: colors.surfaceRaised, borderColor: colors.border, borderWidth: 1, borderRadius: radius.bubble, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
+  content: { paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: 24 },
+  rowWidth: { width: '100%', maxWidth: 736, alignSelf: 'center' },
+  userRow: { width: '100%', alignItems: 'flex-end', marginBottom: spacing.lg, gap: spacing.sm },
+  userBubble: { maxWidth: '80%', backgroundColor: colors.surfaceRaised, borderRadius: radius.bubble, paddingHorizontal: spacing.lg, paddingVertical: 10 },
   userText: { color: colors.text, fontSize: typography.body, lineHeight: 22 },
   expand: { color: colors.textMuted, fontSize: typography.small, paddingTop: spacing.sm },
-  assistantRow: { gap: spacing.md, marginBottom: 24, paddingRight: spacing.sm },
+  assistantRow: { width: '100%', gap: spacing.md, marginBottom: spacing.lg },
   systemLabel: { color: colors.textFaint, fontSize: typography.caption, letterSpacing: 1 },
   streaming: { color: colors.textMuted, fontSize: typography.small, marginTop: spacing.sm },
   error: { color: colors.danger, fontSize: typography.small },
@@ -250,7 +250,7 @@ const styles = StyleSheet.create({
   detailText: { color: colors.textMuted, fontFamily: 'monospace', fontSize: typography.small, lineHeight: 18 },
   detailTitle: { color: colors.textFaint, fontWeight: '700' },
   artifact: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.panel, backgroundColor: colors.surfaceCard, padding: spacing.md },
-  userArtifact: { borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.control, backgroundColor: colors.surfaceCard, padding: spacing.sm, marginTop: spacing.sm },
+  userArtifact: { maxWidth: '80%', borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.control, backgroundColor: colors.surfaceCard, padding: spacing.sm },
   artifactKind: { color: colors.textFaint, fontSize: typography.caption, textTransform: 'uppercase' },
   artifactTitle: { color: colors.text, fontSize: typography.body, marginTop: spacing.xs },
   endButton: { position: 'absolute', right: spacing.lg, bottom: spacing.lg, width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surfaceRaised, borderColor: colors.borderStrong, borderWidth: 1 },
