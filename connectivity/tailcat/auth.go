@@ -24,6 +24,7 @@ const maxAuthBody = 16 * 1024
 var authHTTP = &http.Client{Timeout: 15 * time.Second}
 var base64url = base64.RawURLEncoding
 var identityMu sync.Mutex
+var errPeerForbidden = errors.New("peer pairing returned HTTP 403")
 
 type pairingInvite struct {
 	Version int    `json:"version"`
@@ -75,8 +76,9 @@ func (c *Client) Pair(invitationJSON, displayName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	var stagedKey string
 	public := key.Public().(ed25519.PublicKey)
-	deviceID := deviceID(public)
+	expectedID := deviceID(public)
 	proof := ed25519.Sign(key, framed("kratos.peer-auth.invite-redeem.v1\x00", []byte{1}, []byte(invitation.Invite.ProfileID), []byte(invitation.Invite.InviteID), secret, public))
 	redeem := map[string]any{
 		"version": 1, "profileId": invitation.Invite.ProfileID, "inviteId": invitation.Invite.InviteID,
@@ -87,11 +89,40 @@ func (c *Client) Pair(invitationJSON, displayName string) (string, error) {
 		ProfileID string `json:"profileId"`
 		DeviceID  string `json:"deviceId"`
 	}
-	if err := c.postAuth("pair/redeem", redeem, &result); err != nil {
+	if err := c.postAuth("pair/redeem", redeem, &result); errors.Is(err, errPeerForbidden) {
+		// The peer never revives a revoked key. Keep the old file until it
+		// accepts a fresh, privately staged replacement.
+		_, key, err = ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return "", err
+		}
+		stagedKey, err = c.stageIdentity(key)
+		if err != nil {
+			return "", err
+		}
+		defer os.Remove(stagedKey)
+		public = key.Public().(ed25519.PublicKey)
+		expectedID = deviceID(public)
+		redeem["publicKey"] = base64url.EncodeToString(public)
+		redeem["signature"] = base64url.EncodeToString(ed25519.Sign(key, framed("kratos.peer-auth.invite-redeem.v1\x00", []byte{1}, []byte(invitation.Invite.ProfileID), []byte(invitation.Invite.InviteID), secret, public)))
+		err = c.postAuth("pair/redeem", redeem, &result)
+		if err != nil {
+			return "", err
+		}
+	} else if err != nil {
 		return "", err
 	}
-	if result.ProfileID != invitation.Invite.ProfileID || result.DeviceID != deviceID {
+	if result.ProfileID != invitation.Invite.ProfileID || result.DeviceID != expectedID {
 		return "", errors.New("peer returned an invalid pairing identity")
+	}
+	if stagedKey != "" {
+		path, err := c.identityPath(invitation.Invite.ProfileID)
+		if err != nil {
+			return "", err
+		}
+		if err := c.installIdentity(stagedKey, path); err != nil {
+			return "", err
+		}
 	}
 	return c.Authenticate(invitation.Invite.ProfileID)
 }
@@ -188,20 +219,38 @@ func (c *Client) identity(profileID string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
+	staged, err := c.stageIdentity(key)
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(staged)
+	if err := c.installIdentity(staged, path); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
+
+func (c *Client) stageIdentity(key ed25519.PrivateKey) (string, error) {
 	if err := os.MkdirAll(c.stateDir, 0700); err != nil {
-		return nil, errors.New("could not create identity directory")
+		return "", errors.New("could not create identity directory")
 	}
 	if err := os.Chmod(c.stateDir, 0700); err != nil {
-		return nil, errors.New("could not secure identity directory")
+		return "", errors.New("could not secure identity directory")
 	}
 	file, err := os.CreateTemp(c.stateDir, ".device-key-*")
 	if err != nil {
-		return nil, errors.New("could not create device identity")
+		return "", errors.New("could not create device identity")
 	}
-	defer os.Remove(file.Name())
+	staged := file.Name()
+	valid := false
+	defer func() {
+		if !valid {
+			_ = os.Remove(staged)
+		}
+	}()
 	if err := file.Chmod(0600); err != nil {
 		_ = file.Close()
-		return nil, errors.New("could not secure device identity")
+		return "", errors.New("could not secure device identity")
 	}
 	if _, err = file.Write(key); err == nil {
 		err = file.Sync()
@@ -211,16 +260,21 @@ func (c *Client) identity(profileID string) (ed25519.PrivateKey, error) {
 		err = closeErr
 	}
 	if err != nil {
-		return nil, errors.New("could not save device identity")
+		return "", errors.New("could not save device identity")
 	}
-	if err := os.Rename(file.Name(), path); err != nil {
-		return nil, errors.New("could not install device identity")
+	valid = true
+	return staged, nil
+}
+
+func (c *Client) installIdentity(staged, path string) error {
+	if err := os.Rename(staged, path); err != nil {
+		return errors.New("could not install device identity")
 	}
 	if dir, err := os.Open(c.stateDir); err == nil {
 		_ = dir.Sync()
 		_ = dir.Close()
 	}
-	return key, nil
+	return nil
 }
 
 func (c *Client) postAuth(path string, payload, result any) error {
@@ -239,6 +293,9 @@ func (c *Client) postAuth(path string, payload, result any) error {
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if response.StatusCode == http.StatusForbidden {
+			return errPeerForbidden
+		}
 		return fmt.Errorf("peer pairing returned HTTP %d", response.StatusCode)
 	}
 	limited := io.LimitReader(response.Body, maxAuthBody+1)
