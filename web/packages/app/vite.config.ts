@@ -25,7 +25,13 @@ export default defineConfig({
      */
     hmr: { port: 24678 },
     proxy: {
-      "/pairing/redeem": { target: engine },
+      // The pre-auth sign-in routes the browser calls over plain HTTP
+      // before any credential or WebSocket exists. Explicit entries
+      // because the catch-all below serves non-WebSocket requests from
+      // Vite itself (the engine serves the app in production, but here
+      // Vite owns the HTML).
+      "/auth/config": { target: engine },
+      "/auth/exchange": { target: engine },
       "/": {
         target: engine,
         ws: true,
