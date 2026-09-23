@@ -24,6 +24,7 @@ const maxAuthBody = 16 * 1024
 var authHTTP = &http.Client{Timeout: 15 * time.Second}
 var base64url = base64.RawURLEncoding
 var identityMu sync.Mutex
+var pairMu sync.Mutex
 var errPeerForbidden = errors.New("peer pairing returned HTTP 403")
 
 type pairingInvite struct {
@@ -58,6 +59,8 @@ type authSession struct {
 // JSON. The device signing key is persisted before redemption so a crash does
 // not lose the identity tied to a consumed invitation.
 func (c *Client) Pair(invitationJSON, displayName string) (string, error) {
+	pairMu.Lock()
+	defer pairMu.Unlock()
 	if len(invitationJSON) > maxAuthBody {
 		return "", errors.New("invitation is too large")
 	}
@@ -76,63 +79,117 @@ func (c *Client) Pair(invitationJSON, displayName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var stagedKey string
-	public := key.Public().(ed25519.PublicKey)
-	expectedID := deviceID(public)
-	proof := ed25519.Sign(key, framed("kratos.peer-auth.invite-redeem.v1\x00", []byte{1}, []byte(invitation.Invite.ProfileID), []byte(invitation.Invite.InviteID), secret, public))
-	redeem := map[string]any{
-		"version": 1, "profileId": invitation.Invite.ProfileID, "inviteId": invitation.Invite.InviteID,
-		"secret": invitation.Invite.Secret, "publicKey": base64url.EncodeToString(public),
-		"signature": base64url.EncodeToString(proof), "displayName": displayName,
+	pendingKey, pendingPath, err := c.pendingIdentity(invitation.Invite.ProfileID)
+	if err != nil {
+		return "", err
 	}
+	if pendingKey != nil {
+		if session, err := c.authenticateKey(invitation.Invite.ProfileID, pendingKey); err == nil {
+			if err := c.promotePending(invitation.Invite.ProfileID, pendingPath); err != nil {
+				return "", err
+			}
+			return session, nil
+		}
+	}
+	replacingIdentity := false
 	var result struct {
 		ProfileID string `json:"profileId"`
 		DeviceID  string `json:"deviceId"`
 	}
-	if err := c.postAuth("pair/redeem", redeem, &result); errors.Is(err, errPeerForbidden) {
-		// The peer never revives a revoked key. Keep the old file until it
-		// accepts a fresh, privately staged replacement.
-		_, key, err = ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			return "", err
+	redeem := func(key ed25519.PrivateKey) error {
+		public := key.Public().(ed25519.PublicKey)
+		proof := ed25519.Sign(key, framed("kratos.peer-auth.invite-redeem.v1\x00", []byte{1}, []byte(invitation.Invite.ProfileID), []byte(invitation.Invite.InviteID), secret, public))
+		request := map[string]any{
+			"version": 1, "profileId": invitation.Invite.ProfileID, "inviteId": invitation.Invite.InviteID,
+			"secret": invitation.Invite.Secret, "publicKey": base64url.EncodeToString(public),
+			"signature": base64url.EncodeToString(proof), "displayName": displayName,
 		}
-		stagedKey, err = c.stageIdentity(key)
-		if err != nil {
-			return "", err
+		return c.postAuth("pair/redeem", request, &result)
+	}
+	if err := redeem(key); errors.Is(err, errPeerForbidden) {
+		replacingIdentity = true
+		// A pending key survives a lost reply or process restart. Reuse it
+		// until the peer definitively rejects that key too.
+		if pendingKey == nil {
+			pendingKey, pendingPath, err = c.newPendingIdentity(invitation.Invite.ProfileID)
+			if err != nil {
+				return "", err
+			}
 		}
-		defer os.Remove(stagedKey)
-		public = key.Public().(ed25519.PublicKey)
-		expectedID = deviceID(public)
-		redeem["publicKey"] = base64url.EncodeToString(public)
-		redeem["signature"] = base64url.EncodeToString(ed25519.Sign(key, framed("kratos.peer-auth.invite-redeem.v1\x00", []byte{1}, []byte(invitation.Invite.ProfileID), []byte(invitation.Invite.InviteID), secret, public)))
-		err = c.postAuth("pair/redeem", redeem, &result)
+		key = pendingKey
+		err = redeem(key)
+		if errors.Is(err, errPeerForbidden) {
+			// The pending key itself was revoked. A new invitation can still
+			// redeem a newly staged key.
+			key, pendingPath, err = c.newPendingIdentity(invitation.Invite.ProfileID)
+			if err != nil {
+				return "", err
+			}
+			err = redeem(key)
+		}
 		if err != nil {
+			if session, authErr := c.authenticatePending(invitation.Invite.ProfileID, key, pendingPath); authErr == nil {
+				return session, nil
+			}
 			return "", err
 		}
 	} else if err != nil {
 		return "", err
 	}
-	if result.ProfileID != invitation.Invite.ProfileID || result.DeviceID != expectedID {
+	if result.ProfileID != invitation.Invite.ProfileID || result.DeviceID != deviceID(key.Public().(ed25519.PublicKey)) {
+		if replacingIdentity {
+			if session, err := c.authenticatePending(invitation.Invite.ProfileID, key, pendingPath); err == nil {
+				return session, nil
+			}
+		}
 		return "", errors.New("peer returned an invalid pairing identity")
 	}
-	if stagedKey != "" {
-		path, err := c.identityPath(invitation.Invite.ProfileID)
-		if err != nil {
-			return "", err
-		}
-		if err := c.installIdentity(stagedKey, path); err != nil {
+	if replacingIdentity {
+		if err := c.promotePending(invitation.Invite.ProfileID, pendingPath); err != nil {
 			return "", err
 		}
 	}
-	return c.Authenticate(invitation.Invite.ProfileID)
+	return c.authenticateKey(invitation.Invite.ProfileID, key)
 }
 
 // Authenticate renews a short-lived bearer using the persisted device key.
 func (c *Client) Authenticate(profileID string) (string, error) {
+	pairMu.Lock()
+	defer pairMu.Unlock()
 	key, err := c.loadIdentity(profileID)
 	if err != nil {
 		return "", err
 	}
+	session, err := c.authenticateKey(profileID, key)
+	if err == nil {
+		return session, nil
+	}
+	pendingKey, pendingPath, pendingErr := c.pendingIdentity(profileID)
+	if pendingErr != nil {
+		return "", pendingErr
+	}
+	if pendingKey == nil {
+		return "", err
+	}
+	session, pendingErr = c.authenticatePending(profileID, pendingKey, pendingPath)
+	if pendingErr != nil {
+		return "", pendingErr
+	}
+	return session, nil
+}
+
+func (c *Client) authenticatePending(profileID string, key ed25519.PrivateKey, pendingPath string) (string, error) {
+	session, err := c.authenticateKey(profileID, key)
+	if err != nil {
+		return "", err
+	}
+	if err := c.promotePending(profileID, pendingPath); err != nil {
+		return "", err
+	}
+	return session, nil
+}
+
+func (c *Client) authenticateKey(profileID string, key ed25519.PrivateKey) (string, error) {
 	deviceID := deviceID(key.Public().(ed25519.PublicKey))
 	var challenge authChallenge
 	if err := c.postAuth("pair/challenge", map[string]string{"profileId": profileID, "deviceId": deviceID}, &challenge); err != nil {
@@ -189,6 +246,10 @@ func (c *Client) loadIdentity(profileID string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadIdentityFile(path)
+}
+
+func loadIdentityFile(path string) (ed25519.PrivateKey, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, errors.New("device identity is unavailable")
@@ -201,6 +262,50 @@ func (c *Client) loadIdentity(profileID string) (ed25519.PrivateKey, error) {
 		return nil, errors.New("device identity is invalid")
 	}
 	return ed25519.PrivateKey(key), nil
+}
+
+func (c *Client) pendingIdentity(profileID string) (ed25519.PrivateKey, string, error) {
+	path, err := c.identityPath(profileID)
+	if err != nil {
+		return nil, "", err
+	}
+	pending := path + ".pending"
+	if _, err := os.Lstat(pending); os.IsNotExist(err) {
+		return nil, pending, nil
+	} else if err != nil {
+		return nil, "", err
+	}
+	key, err := loadIdentityFile(pending)
+	return key, pending, err
+}
+
+func (c *Client) newPendingIdentity(profileID string) (ed25519.PrivateKey, string, error) {
+	path, err := c.identityPath(profileID)
+	if err != nil {
+		return nil, "", err
+	}
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, "", err
+	}
+	staged, err := c.stageIdentity(key)
+	if err != nil {
+		return nil, "", err
+	}
+	defer os.Remove(staged)
+	pending := path + ".pending"
+	if err := c.installIdentity(staged, pending); err != nil {
+		return nil, "", err
+	}
+	return key, pending, nil
+}
+
+func (c *Client) promotePending(profileID, pending string) error {
+	path, err := c.identityPath(profileID)
+	if err != nil {
+		return err
+	}
+	return c.installIdentity(pending, path)
 }
 
 func (c *Client) identity(profileID string) (ed25519.PrivateKey, error) {

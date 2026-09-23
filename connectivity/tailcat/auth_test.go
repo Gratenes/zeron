@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -153,13 +155,104 @@ func TestPairRevokedIdentityUsesFreshKeyOnlyAfterAcceptedRedeem(t *testing.T) {
 	}
 	oldPublic := base64url.EncodeToString(oldKey.Public().(ed25519.PublicKey))
 	newPublic := base64url.EncodeToString(newKey.Public().(ed25519.PublicKey))
-	for i, want := range []string{oldPublic, oldPublic, "", oldPublic, newPublic} {
+	for i, want := range []string{oldPublic, oldPublic, newPublic, oldPublic, newPublic} {
 		got := <-redeems
-		if (want != "" && got != want) || (want == "" && (got == oldPublic || got == newPublic)) {
+		if got != want {
 			t.Fatalf("redeem %d used the wrong identity", i+1)
 		}
 	}
 	if _, err := client.Authenticate("profile"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPairRecoversCommittedRedeemAfterLostReply(t *testing.T) {
+	for _, delayed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "immediate", true: "after restart"}[delayed], func(t *testing.T) {
+			secret := make([]byte, 32)
+			var active ed25519.PublicKey
+			var blockProof atomic.Bool
+			blockProof.Store(delayed)
+			redeems := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/pair/redeem":
+					var request struct{ PublicKey string }
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Error(err)
+						return
+					}
+					public, err := base64url.DecodeString(request.PublicKey)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					redeems++
+					if redeems == 1 {
+						active = public
+						_ = json.NewEncoder(w).Encode(map[string]string{"profileId": "profile", "deviceId": deviceID(public)})
+					} else if string(public) == string(active) {
+						w.WriteHeader(http.StatusForbidden)
+					} else {
+						active = public // The peer commits before its response is lost.
+						_, _ = w.Write([]byte("{"))
+					}
+				case "/pair/challenge":
+					var request struct{ DeviceID string }
+					_ = json.NewDecoder(r.Body).Decode(&request)
+					if request.DeviceID != deviceID(active) {
+						w.WriteHeader(http.StatusForbidden)
+					} else if blockProof.Load() && redeems > 1 {
+						w.WriteHeader(http.StatusServiceUnavailable)
+					} else {
+						_ = json.NewEncoder(w).Encode(map[string]string{"profileId": "profile", "deviceId": request.DeviceID, "challengeId": "challenge", "nonce": base64url.EncodeToString(secret)})
+					}
+				case "/pair/authenticate":
+					_ = json.NewEncoder(w).Encode(map[string]any{"token": "token", "expiresAt": time.Now().Unix() + 900, "principal": map[string]string{"profileId": "profile", "deviceId": deviceID(active)}})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			client := &Client{url: server.URL, stateDir: t.TempDir()}
+			invite := func(id string) string {
+				data, _ := json.Marshal(map[string]any{"version": 1, "invite": map[string]any{"version": 1, "profileId": "profile", "inviteId": id, "secret": base64url.EncodeToString(secret)}})
+				return string(data)
+			}
+			if _, err := client.Pair(invite("first"), "Phone"); err != nil {
+				t.Fatal(err)
+			}
+			path, _ := client.identityPath("profile")
+			oldKey, _ := os.ReadFile(path)
+			_, err := client.Pair(invite("repair"), "Phone")
+			if delayed && err == nil || !delayed && err != nil {
+				t.Fatalf("lost redeem reply: %v", err)
+			}
+			if delayed {
+				stillOld, _ := os.ReadFile(path)
+				if string(stillOld) != string(oldKey) {
+					t.Fatal("uncertain redeem replaced the old identity")
+				}
+				if _, err := os.Stat(path + ".pending"); err != nil {
+					t.Fatal("pending identity was lost:", err)
+				}
+				blockProof.Store(false)
+				client = &Client{url: server.URL, stateDir: client.stateDir}
+				if _, err := client.Authenticate("profile"); err != nil {
+					t.Fatal("restored pending identity did not authenticate:", err)
+				}
+			}
+			newKey, _ := os.ReadFile(path)
+			if string(newKey) == string(oldKey) {
+				t.Fatal("accepted replacement was not installed")
+			}
+			if _, err := os.Stat(path + ".pending"); !os.IsNotExist(err) {
+				t.Fatalf("pending identity remains after promotion: %v", err)
+			}
+			if redeems != 3 {
+				t.Fatalf("got %d redeems, want 3", redeems)
+			}
+		})
 	}
 }
