@@ -235,20 +235,13 @@ function AppContent() {
         <Text style={styles.outlineText}>Disconnect device</Text>
       </Pressable>
     </View> : section === 'chat' ? <View style={styles.chat}>
-      <View style={styles.chatHeader}>
-        <Text numberOfLines={1} style={styles.heading}>{selectedChat?.title || (selectedId ? 'Conversation' : 'New conversation')}</Text>
-        <Pressable accessibilityRole="button" onPress={() => { setError(''); setSyncEpoch(epoch => epoch + 1); }}><Text style={styles.refresh}>Refresh</Text></Pressable>
-      </View>
       <View style={styles.transcript}>
-        {selectedId ? <Transcript messages={transcript} isStreaming={running} onRespondInput={respondInput} /> : <View style={styles.empty}>
-          <Text style={styles.emptyTitle}>What are we working on?</Text>
-          <Text style={styles.muted}>Start a conversation with your connected Kratos device.</Text>
-        </View>}
+        {selectedId && <Transcript messages={transcript} isStreaming={running} onRespondInput={respondInput} />}
       </View>
       <Composer draft={draft} onChangeDraft={text => setDrafts(previous => ({ ...previous, [draftKey]: text }))}
-        onSubmit={submit} running={running} busy={busy} disabled={awaitingInput} error={error}
+        onSubmit={submit} expanded={!selectedId} running={running} busy={busy} disabled={awaitingInput} error={error}
         notice={awaitingInput ? 'Answer the agent’s question above to continue.' : undefined}
-        target={selectedChat ? undefined : spaces.find(space => space.id === selectedSpaceId)?.name || 'Your device'} project={selectedChat?.cwd ?? undefined}
+        target={selectedId ? undefined : spaces.find(space => space.id === selectedSpaceId)?.name || 'Your device'}
         model={selectedChat?.config?.model ?? selectedChat?.config?.harness ?? undefined}
         queue={queue} onInterrupt={selectedId ? () => runAction('QueueCommand', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId ?? selectedTargetDeviceId ?? connection.hostDeviceId, command: { kind: 'interrupt' } }) : undefined}
         onRemoveQueued={selectedId ? id => runAction('RemoveQueuedMessage', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId ?? selectedTargetDeviceId ?? connection.hostDeviceId, id }) : undefined}
@@ -288,16 +281,12 @@ const styles = StyleSheet.create({
   disabled: { opacity: 0.45 },
   error: { color: colors.danger, fontSize: typography.small, marginTop: spacing.md },
   chat: { backgroundColor: colors.bg, flex: 1, minHeight: 0 },
-  chatHeader: { alignItems: 'center', borderBottomColor: colors.border, borderBottomWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 54, paddingHorizontal: spacing.lg },
   heading: { color: colors.text, flexShrink: 1, fontSize: typography.title, fontWeight: '700' },
   subheading: { color: colors.text, fontSize: typography.body, fontWeight: '600', marginTop: spacing.lg },
   engineRow: { alignItems: 'center', borderBottomColor: colors.border, borderBottomWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 44 },
   engineText: { color: colors.text, flex: 1, fontSize: typography.body },
   active: { color: colors.success, fontSize: typography.small },
-  refresh: { color: colors.textMuted, fontSize: typography.small, padding: spacing.sm },
   transcript: { flex: 1, minHeight: 0 },
-  empty: { alignItems: 'center', flex: 1, justifyContent: 'center', padding: spacing.lg },
-  emptyTitle: { color: colors.text, fontSize: typography.heading, fontWeight: '600' },
   panel: { backgroundColor: colors.bg, flex: 1, padding: spacing.lg },
   outlineButton: { alignSelf: 'flex-start', borderColor: colors.borderStrong, borderRadius: radius.control, borderWidth: 1, marginTop: spacing.lg, padding: spacing.md },
   outlineText: { color: colors.text, fontSize: typography.body },

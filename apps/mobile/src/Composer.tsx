@@ -9,6 +9,7 @@ type Props = {
   draft: string;
   onChangeDraft: (text: string) => void;
   onSubmit: (text: string, queue: boolean) => Promise<void> | void;
+  expanded?: boolean;
   running?: boolean;
   busy?: boolean;
   disabled?: boolean;
@@ -27,7 +28,7 @@ type Props = {
 };
 
 export function Composer({
-  draft, onChangeDraft, onSubmit, running = false, busy = false, disabled = false,
+  draft, onChangeDraft, onSubmit, expanded = false, running = false, busy = false, disabled = false,
   onInterrupt, onAttach, onRemoveQueued, onEditQueued, queue = [], commands = [], mentions = [],
   target, project, model, notice, error,
 }: Props) {
@@ -38,6 +39,7 @@ export function Composer({
   const options = token?.[1] === '/' ? commands : token?.[1] === '@' ? mentions : [];
   const matches = token ? options.filter(option => option.label.toLowerCase().includes(token[2].toLowerCase())).slice(0, 6) : [];
   const canSend = !!draft.trim() && !disabled && !busy && !submitting;
+  const expandedMode = expanded || draft.includes('\n');
 
   const send = async () => {
     if (!canSend) return;
@@ -84,19 +86,19 @@ export function Composer({
         {!!target && <Text style={styles.targetChip}>{target}</Text>}
         {!!project && <Text style={styles.targetChip}>{project}</Text>}
       </View>}
-      <View style={styles.pill}>
+      <View style={[styles.pill, !expandedMode && styles.compactPill]}>
         <TextInput
           accessibilityLabel="Message composer"
           editable={!disabled}
           multiline
           onChangeText={onChangeDraft}
-          placeholder="Message Kratos…"
+          placeholder="Do anything…"
           placeholderTextColor={colors.textFaint}
-          style={styles.input}
-          textAlignVertical="top"
+          style={[styles.input, !expandedMode && styles.compactInput]}
+          textAlignVertical={expandedMode ? 'top' : 'center'}
           value={draft}
         />
-        <View style={styles.actions}>
+        <View style={[styles.actions, !expandedMode && styles.compactActions]}>
           <View style={styles.actionGroup}>
             {!!model && <Text numberOfLines={1} style={styles.model}>{model}</Text>}
             {!!onAttach && <Action label="Attach" onPress={onAttach} />}
@@ -110,13 +112,13 @@ export function Composer({
 }
 
 function Action({ label, onPress, disabled, prominent }: { label: string; onPress: () => void; disabled?: boolean; prominent?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} onPress={onPress} style={[styles.action, prominent && styles.prominent, disabled && styles.disabled]}>
-    <Text style={[styles.actionText, prominent && styles.prominentText]}>{label}</Text>
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} disabled={disabled} hitSlop={prominent ? 8 : undefined} onPress={onPress} style={[styles.action, prominent && styles.prominent, disabled && styles.disabled]}>
+    <Text style={[styles.actionText, prominent && styles.prominentText, label === 'Stop' && styles.stopIcon]}>{prominent ? label === 'Stop' ? '■' : '↑' : label}</Text>
   </Pressable>;
 }
 
 const styles = StyleSheet.create({
-  wrap: { width: '100%', maxWidth: 768, alignSelf: 'center', paddingHorizontal: spacing.md, paddingBottom: spacing.md },
+  wrap: { width: '100%', maxWidth: 768, alignSelf: 'center', paddingHorizontal: spacing.lg, paddingBottom: spacing.lg },
   notice: { color: colors.textMuted, fontSize: typography.caption, marginBottom: spacing.sm, marginHorizontal: spacing.sm },
   error: { color: colors.danger, fontSize: typography.small, marginBottom: spacing.sm, marginHorizontal: spacing.sm },
   queue: { backgroundColor: colors.surfaceRaised, borderColor: colors.border, borderWidth: 1, borderTopLeftRadius: radius.panel, borderTopRightRadius: radius.panel, marginHorizontal: spacing.sm, padding: spacing.sm },
@@ -130,14 +132,18 @@ const styles = StyleSheet.create({
   suggestionDetail: { color: colors.textMuted, flex: 1, fontSize: typography.caption },
   targetRow: { flexDirection: 'row', gap: spacing.xs, marginBottom: spacing.sm },
   targetChip: { borderColor: colors.border, borderRadius: radius.control, borderWidth: 1, color: colors.textMuted, fontSize: typography.small, overflow: 'hidden', paddingHorizontal: spacing.sm, paddingVertical: spacing.xs },
-  pill: { backgroundColor: colors.inputBg, borderColor: colors.border, borderRadius: 24, borderWidth: 1, minHeight: 108 },
-  input: { color: colors.text, fontSize: typography.body, lineHeight: 21, maxHeight: 180, minHeight: 58, paddingHorizontal: spacing.lg, paddingTop: spacing.md },
-  actions: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', paddingBottom: spacing.sm, paddingHorizontal: spacing.sm },
+  pill: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: colors.border, borderRadius: 26, borderWidth: 1, minHeight: 124 },
+  compactPill: { alignItems: 'center', flexDirection: 'row', minHeight: 49 },
+  input: { color: colors.text, fontSize: typography.body, lineHeight: 21, maxHeight: 260, minHeight: 76, paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: spacing.xs },
+  compactInput: { flex: 1, maxHeight: 180, minHeight: 47, paddingTop: 10, paddingBottom: 10, paddingRight: spacing.sm },
+  actions: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', minHeight: 46, paddingTop: spacing.xs, paddingBottom: 10, paddingHorizontal: spacing.md },
+  compactActions: { gap: spacing.sm, minHeight: 47, paddingTop: 0, paddingBottom: 0, paddingLeft: spacing.xs, paddingRight: spacing.sm },
   actionGroup: { alignItems: 'center', flexDirection: 'row', gap: spacing.xs },
   model: { color: colors.textMuted, fontSize: typography.small, maxWidth: 120, paddingHorizontal: spacing.sm },
   action: { alignItems: 'center', borderRadius: radius.control, justifyContent: 'center', minHeight: 34, minWidth: 52, paddingHorizontal: spacing.sm },
-  prominent: { backgroundColor: colors.accent, borderRadius: 17 },
+  prominent: { backgroundColor: colors.solid, borderRadius: 14, height: 28, minHeight: 28, minWidth: 28, width: 28, paddingHorizontal: 0 },
   disabled: { opacity: 0.4 },
   actionText: { color: colors.textMuted, fontSize: typography.small, fontWeight: '600' },
-  prominentText: { color: colors.bg },
+  prominentText: { color: colors.onSolid, fontSize: 18, lineHeight: 22 },
+  stopIcon: { fontSize: 11 },
 });

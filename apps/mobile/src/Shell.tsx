@@ -220,7 +220,7 @@ export function Shell({
           <View style={styles.toolbar}>
             {narrow && <Pressable accessibilityRole="button" accessibilityLabel="Open navigation" accessibilityState={{ expanded: drawerOpen }} onPress={() => setDrawerOpen(true)} style={styles.iconButton}><Text style={styles.icon}>☰</Text></Pressable>}
             <View style={styles.toolbarTitleWrap}>
-              <Text numberOfLines={1} style={styles.toolbarTitle}>{selectedSession?.title || 'New session'}</Text>
+              <Text numberOfLines={1} style={styles.toolbarTitle}>{selectedSession?.title || ''}</Text>
               {!!selectedSession?.spaceName && <Text numberOfLines={1} style={styles.toolbarSubtitle}>{selectedSession.spaceName}{selectedSession.deviceName ? ` @ ${selectedSession.deviceName}` : ''}</Text>}
             </View>
             <Pressable accessibilityRole="button" accessibilityLabel="New session" onPress={onNewSession} style={styles.iconButton}><Text style={styles.icon}>＋</Text></Pressable>
@@ -230,7 +230,7 @@ export function Shell({
         {narrow && drawerOpen && (
           <View style={styles.drawerLayer}>
             <Pressable accessibilityRole="button" accessibilityLabel="Close navigation" onPress={() => setDrawerOpen(false)} style={styles.scrim} />
-            <View style={[styles.drawer, { width: Math.min(width - 40, 320) }]}>{sidebar}</View>
+            <View style={[styles.drawer, { width: Math.min(width * 0.75, 280) }]}>{sidebar}</View>
           </View>
         )}
       </View>
