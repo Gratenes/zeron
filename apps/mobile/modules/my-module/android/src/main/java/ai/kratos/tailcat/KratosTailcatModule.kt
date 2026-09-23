@@ -35,7 +35,9 @@ class KratosTailcatModule : Module() {
         val saved = JSONObject().put("address", address)
           .put("derpMap", invite.optString("derpMap"))
           .put("profileId", session.getJSONObject("principal").getString("profileId"))
-        preferences().edit().putString("connection", saved.toString()).apply()
+        check(preferences().edit().putString("connection", saved.toString()).commit()) {
+          "Could not save device pairing"
+        }
         client = next
         session.put("baseUrl", next.url()).toString()
       } catch (error: Exception) {

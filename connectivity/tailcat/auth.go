@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,7 @@ const maxAuthBody = 16 * 1024
 
 var authHTTP = &http.Client{Timeout: 15 * time.Second}
 var base64url = base64.RawURLEncoding
+var identityMu sync.Mutex
 
 type pairingInvite struct {
 	Version int    `json:"version"`
@@ -171,6 +173,8 @@ func (c *Client) loadIdentity(profileID string) (ed25519.PrivateKey, error) {
 }
 
 func (c *Client) identity(profileID string) (ed25519.PrivateKey, error) {
+	identityMu.Lock()
+	defer identityMu.Unlock()
 	path, err := c.identityPath(profileID)
 	if err != nil {
 		return nil, err
@@ -190,12 +194,14 @@ func (c *Client) identity(profileID string) (ed25519.PrivateKey, error) {
 	if err := os.Chmod(c.stateDir, 0700); err != nil {
 		return nil, errors.New("could not secure identity directory")
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if os.IsExist(err) {
-		return c.loadIdentity(profileID)
-	}
+	file, err := os.CreateTemp(c.stateDir, ".device-key-*")
 	if err != nil {
 		return nil, errors.New("could not create device identity")
+	}
+	defer os.Remove(file.Name())
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		return nil, errors.New("could not secure device identity")
 	}
 	if _, err = file.Write(key); err == nil {
 		err = file.Sync()
@@ -205,8 +211,14 @@ func (c *Client) identity(profileID string) (ed25519.PrivateKey, error) {
 		err = closeErr
 	}
 	if err != nil {
-		_ = os.Remove(path)
 		return nil, errors.New("could not save device identity")
+	}
+	if err := os.Rename(file.Name(), path); err != nil {
+		return nil, errors.New("could not install device identity")
+	}
+	if dir, err := os.Open(c.stateDir); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	return key, nil
 }
