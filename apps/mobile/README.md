@@ -1,6 +1,6 @@
 # Kratos mobile
 
-Expo implementation of the full GPUI application for Android, iOS, and web.
+Expo implementation of the GPUI application, with Android as the primary target.
 
 The GPUI app remains the product reference. The current SwiftUI client is a
 transport/protocol reference only; it does not define this app's feature scope.
@@ -17,8 +17,10 @@ npm install
 npm run android
 ```
 
-Native Tailcat support will require an Expo development build; Expo Go is not
-the target runtime.
+Tailcat is the app's connection method. Pair with a `kratos-pair:` invitation
+from the Kratos desktop, or reconnect a saved pairing. The app then uses
+authenticated ControlRpc through Tailcat. Expo Go cannot load the native module;
+use a native development or release build.
 
 `ai.kratos.mobile` is the current development Android application ID. Confirm
 the release identifier before publishing a signed build.
