@@ -3,10 +3,10 @@
 export const colors = {
   bg: '#060606',
   surface: '#0d0d0d',
-  surfaceRaised: '#2e2e2e',
+  surfaceRaised: '#1e1e1e',
   surfaceCard: '#0e0e0e',
   surfaceOverlay: '#161616',
-  inputBg: '#151515',
+  inputBg: 'rgba(255,255,255,0.03)',
   selected: 'rgba(235,235,235,0.11)',
   hover: 'rgba(235,235,235,0.08)',
   border: 'rgba(255,255,255,0.08)',
