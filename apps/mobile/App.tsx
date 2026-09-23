@@ -10,6 +10,7 @@ import { Terminal } from './src/Terminal';
 import { Transcript, type UserInputAnswer } from './src/Transcript';
 import { Workspace } from './src/Workspace';
 import { connect, restore, type Connection } from './src/connection';
+import { clearDeliveredDraft, moveNewDraft } from './src/drafts';
 import { applyTranscriptUpdate, previews, renderEntries, spacePreviews, type Chat, type LiveSession, type Space, type TranscriptUpdate, type WireEntry } from './src/liveModel';
 import { colors, radius, spacing, typography } from './src/theme';
 import { watchWithRetry } from './src/watch';
@@ -117,6 +118,7 @@ export default function App() {
 
   const submit = async (text: string, sendToQueue: boolean) => {
     if (!connection) return;
+    const submittedDraft = draft;
     setBusy(true);
     setError('');
     try {
@@ -126,7 +128,7 @@ export default function App() {
       if (!chatId) {
         chatId = newId();
         await call('Mutate', { op: 'createChat', chatId, spaceId: newSpace?.id ?? null, deviceId: newSpace ? null : connection.hostDeviceId });
-        setDrafts(previous => ({ ...previous, [chatId!]: previous.__new__ ?? '' }));
+        setDrafts(previous => moveNewDraft(previous, chatId!));
         setSelectedTargetDeviceId(newSpace?.deviceId ?? connection.hostDeviceId);
         setSelectedId(chatId);
       }
@@ -138,7 +140,7 @@ export default function App() {
           cwd: chat?.cwd ?? newSpace?.path ?? '', sandbox: chat?.config?.sandbox ?? 'workspace-write', autoApprove: false,
         resume: null, attachments: [],
       } } });
-      setDrafts(previous => ({ ...previous, [draftKey]: '', [chatId!]: '' }));
+      setDrafts(previous => clearDeliveredDraft(previous, draftKey, chatId!, submittedDraft));
     } catch (e) { setError(message(e)); throw e; }
     finally { setBusy(false); }
   };
