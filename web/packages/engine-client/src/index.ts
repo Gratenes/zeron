@@ -35,11 +35,13 @@ export {
   type ServerFrame,
 } from "./codec";
 export {
-  parsePairingUrl,
-  redeemPairingCode,
-  type ParsedPairingUrl,
-  type RedeemOptions,
-} from "./pairing";
+  exchangeSignInCode,
+  fetchSignInConfig,
+  parseEngineUrl,
+  type AuthFetchOptions,
+  type SignInConfig,
+  type SignInTokens,
+} from "./auth";
 export { RpcError, wireError, type RpcErrorKind } from "./rpc-error";
 export {
   browserWebSocket,

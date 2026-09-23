@@ -9,7 +9,7 @@ import {
   type RowSet,
 } from "@zeron/engine-client";
 import type { ChatStatus, ConnectivitySlot, WatchCacheSnapshot } from "@zeron/engine-client";
-import { EngineStore, engineWsEndpoint, type FleetState, type StoredEngine } from "../lib/engine-store";
+import { EngineStore, engineWsEndpoint, type FleetState, type SignInInput, type StoredEngine } from "../lib/engine-store";
 
 /**
  * The origin-scoped engine fleet. `fleetStore` is the pairing storage
@@ -81,12 +81,13 @@ export function useFleetRegistry(): EngineRegistrySnapshot {
 }
 
 /**
- * Pair a new engine (the store's redeem, with the configuration-error
- * refusal surfaced) — the registry picks the new engine up through its
- * store subscription and starts supervising immediately.
+ * Sign in to an engine (the store's entry write, with the
+ * configuration-error refusal surfaced) — the registry picks the new
+ * engine up through its store subscription and starts supervising
+ * immediately.
  */
-export function pairEngine(pairingUrl: string, label: string): Promise<StoredEngine> {
-  return fleetStore.redeemPairingUrl(pairingUrl, label);
+export function signInEngine(input: SignInInput): Promise<StoredEngine> {
+  return fleetStore.signInEngine(input);
 }
 
 /** Forget one engine: unpersist it; the registry stops and clears its cache. */

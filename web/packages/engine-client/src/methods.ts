@@ -23,10 +23,6 @@ export const FETCH_TOOL_BLOB = "FetchToolBlob";
 export const WATCH_PREVIEWS = "WatchPreviews";
 /** The one stream that answers a `{stream: true}` readiness ack before items. */
 export const WATCH_CHECKOUT_CHANGE_REQUEST = "WatchCheckoutChangeRequest";
-export const REVOKE_PAIRING_SESSION = "RevokePairingSession";
-export const GET_REMOTE_ACCESS = "GetRemoteAccess";
-export const SET_REMOTE_ACCESS = "SetRemoteAccess";
-export const CREATE_PAIRING_LINK = "CreatePairingLink";
 /** Harness accounts (legacy wire name "Agent*", ADR 0005); every mutation replies with the fresh snapshot. */
 export const LIST_AGENT_ACCOUNTS = "ListAgentAccounts";
 export const ACTIVATE_AGENT_ACCOUNT = "ActivateAgentAccount";

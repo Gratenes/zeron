@@ -20,7 +20,6 @@ import { navEntryPath, navHistory } from "../state/nav-history";
 /** The web's `SettingsSection::ALL` minus Appshots (shell.rs:386-431). */
 const SECTIONS: readonly { to: string; label: string; icon: IconName }[] = [
   { to: "/settings/devices", label: "Devices", icon: "monitor" },
-  { to: "/settings/remote-access", label: "Remote access", icon: "keyMinimalistic" },
   { to: "/settings/harnesses", label: "Agents", icon: "widget" },
   { to: "/settings/accounts", label: "Accounts", icon: "keyMinimalistic" },
   { to: "/settings/appearance", label: "Appearance", icon: "tuning" },

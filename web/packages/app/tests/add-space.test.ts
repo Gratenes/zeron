@@ -59,7 +59,7 @@ describe("completion_prefix_lengths (pickers.rs)", () => {
   it("is case-insensitive and indexes into the name", () => {
     expect(completionPrefixLen("Documents", "doc")).toBe(3);
     expect("Documents".slice(3)).toBe("uments");
-    expect(completionPrefixLen("zeron", "zeron")).toBe(6);
+    expect(completionPrefixLen("zeron", "zeron")).toBe(5);
     expect(completionPrefixLen("zeron", "")).toBe(0);
     expect(completionPrefixLen("zeron", "dev")).toBe(null);
     // Longer than the name → not a prefix.

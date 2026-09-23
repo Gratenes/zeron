@@ -57,10 +57,8 @@ export function presenceDot(connection: EngineConnection | null, online: boolean
 }
 
 /**
- * `format_last_seen` (devices.rs:56-70), moved here from
- * `lib/remote-access.ts` so the Devices rows and the Remote-access
- * paired-session rows share one wording. `at`/`now` are epoch millis
- * (`PairedSession.lastSeen` is millis).
+ * `format_last_seen` (devices.rs:56-70) — the wording the Devices rows
+ * use for a device's last heartbeat. `at`/`now` are epoch millis.
  */
 export function formatLastSeen(at: number | null, now: number): string {
   if (at === null) {

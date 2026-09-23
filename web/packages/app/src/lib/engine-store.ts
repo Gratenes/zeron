@@ -1,11 +1,9 @@
-import { parsePairingUrl, redeemPairingCode } from "@zeron/engine-client";
-
 /**
  * The engine registry for the web client — the browser-side peer of the
  * desktop's Devices settings. Entries live in browser storage scoped to
  * the serving origin (localStorage): one entry per engine origin, the
- * redeemed Session credential plus the endpoint. Re-pairing an origin
- * replaces its credential (the revocation re-pair UX); switching the
+ * sign-in credential plus the endpoint. Signing in to an origin again
+ * replaces its credential; switching the
  * active engine rebuilds the connection. Accepted wart (spec): another
  * engine's own page starts empty — its storage has no credential.
  */
@@ -42,14 +40,20 @@ export interface StorageLike {
   removeItem(key: string): void;
 }
 
-export interface RedeemFunction {
-  (baseUrl: string, pairCode: string, label: string): Promise<{ credential: string; session: { id: string; label: string } }>;
+export interface SignInInput {
+  /** The engine origin to connect to. */
+  readonly baseUrl: string;
+  /** The session credential: a dev user id or a WorkOS access token. */
+  readonly credential: string;
+  /** The engine-side label for this browser. */
+  readonly label: string;
+  /** The signed-in identity — keys the stored entry. */
+  readonly sessionId: string;
 }
 
 export interface EngineStoreOptions {
   readonly storage?: StorageLike;
   readonly now?: () => number;
-  readonly redeem?: RedeemFunction;
 }
 
 interface PersistedState {
@@ -99,7 +103,6 @@ export function engineHost(baseUrl: string): string {
 export class EngineStore {
   readonly #storage: StorageLike;
   readonly #now: () => number;
-  readonly #redeem: RedeemFunction;
   #state: FleetState = EMPTY;
   #configurationError: string | null = null;
   readonly #listeners = new Set<() => void>();
@@ -107,7 +110,6 @@ export class EngineStore {
   constructor(options: EngineStoreOptions = {}) {
     this.#storage = options.storage ?? defaultStorage();
     this.#now = options.now ?? Date.now;
-    this.#redeem = options.redeem ?? redeemPairingCode;
     this.#load();
   }
 
@@ -125,23 +127,22 @@ export class EngineStore {
   }
 
   /**
-   * Redeem a pairing URL, store the grant, and make the engine active.
-   * Refuses while the persisted configuration is damaged — pairing stays
-   * blocked until the stored value is repaired (registry `pair()`'s
-   * `ensure!` in engine_registry.rs:478-483).
+   * Store a signed-in engine and make it active. The credential comes from
+   * the sign-in flow (a dev-mode user id, or a WorkOS access token from the
+   * engine's proxied code exchange); signing in to an origin again replaces
+   * its credential. Refuses while the persisted configuration is damaged —
+   * sign-in stays blocked until the stored value is repaired.
    */
-  async redeemPairingUrl(pairingUrl: string, label: string): Promise<StoredEngine> {
+  async signInEngine(input: SignInInput): Promise<StoredEngine> {
     if (this.#configurationError !== null) {
-      throw new Error("Saved engine configuration needs repair before pairing");
+      throw new Error("Saved engine configuration needs repair before signing in");
     }
-    const parsed = parsePairingUrl(pairingUrl);
-    const baseUrl = canonicalBaseUrl(parsed.baseUrl);
-    const grant = await this.#redeem(baseUrl, parsed.pairCode, label);
+    const baseUrl = canonicalBaseUrl(input.baseUrl);
     const engine: StoredEngine = {
       baseUrl,
-      credential: grant.credential,
-      label: grant.session.label,
-      sessionId: grant.session.id,
+      credential: input.credential,
+      label: input.label,
+      sessionId: input.sessionId,
       pairedAt: this.#now(),
       deviceId: null,
     };

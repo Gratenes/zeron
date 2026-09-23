@@ -303,8 +303,8 @@ vi.mock("../src/lib/notifications", () => ({
 
 // ── Mounted-provider harness ──────────────────────────────────────────────
 
-const ENGINE_ONE_URL = "http://engine-one.test:8080/pair#token=code-one";
-const ENGINE_TWO_URL = "http://engine-two.test:8080/pair#token=code-two";
+const ENGINE_ONE_URL = "http://engine-one.test:8080";
+const ENGINE_TWO_URL = "http://engine-two.test:8080";
 
 const HARNESS: HarnessDescriptor = {
   id: "claude-code",
@@ -341,19 +341,13 @@ afterAll(() => {
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
 });
 
+let signInSeq = 0;
+
 beforeEach(() => {
   const registry = new h.FakeRegistry();
-  let redeemSeq = 0;
   const engineStore = new EngineStore({
     storage: memoryStorage(),
     now: () => 1_000,
-    redeem: (_baseUrl, _pairCode, label) => {
-      redeemSeq += 1;
-      return Promise.resolve({
-        credential: `credential-${redeemSeq}`,
-        session: { id: `session-${redeemSeq}`, label },
-      });
-    },
   });
   // The production wiring peer: the registry follows the pairing store.
   engineStore.subscribe(() => registry.syncFrom(engineStore.getSnapshot().engines));
@@ -418,20 +412,27 @@ function mountProvider(strict = false): Mounted {
   return handle;
 }
 
-async function pair(pairingUrl: string): Promise<StoredEngine> {
+/** Sign in to an engine with a fresh credential, the way the real flow would. */
+async function pair(baseUrl: string): Promise<StoredEngine> {
   let engine!: StoredEngine;
+  signInSeq += 1;
   await act(async () => {
-    engine = await store().redeemPairingUrl(pairingUrl, "Test browser");
+    engine = await store().signInEngine({
+      baseUrl,
+      credential: `credential-${signInSeq}`,
+      label: "Test browser",
+      sessionId: `session-${signInSeq}`,
+    });
   });
   return engine;
 }
 
-async function pairWithResources(pairingUrl: string): Promise<{
+async function pairWithResources(baseUrl: string): Promise<{
   engine: StoredEngine;
   client: InstanceType<typeof h.FakeClient>;
   cache: InstanceType<typeof h.FakeCache>;
 }> {
-  const engine = await pair(pairingUrl);
+  const engine = await pair(baseUrl);
   const client = h.cells.registry.clientFor(engine.baseUrl);
   const cache = h.cells.registry.watchCacheFor(engine.baseUrl);
   if (client === null || cache === null) {
@@ -615,12 +616,9 @@ describe("EngineSessionProvider resource lifetime", () => {
     const oneDispose = vi.spyOn(firstOne.catalog, "dispose");
     const twoDispose = vi.spyOn(firstTwo.catalog, "dispose");
 
-    // Re-pair engine one: the store replaces its StoredEngine (new
+    // Re-sign-in engine one: the store replaces its StoredEngine (new
     // credential) and the registry adopts fresh resources in the same commit.
-    let repaired!: StoredEngine;
-    await act(async () => {
-      repaired = await store().redeemPairingUrl(ENGINE_ONE_URL, "Test browser");
-    });
+    const repaired = await pair(ENGINE_ONE_URL);
     expect(repaired.credential).not.toBe(one.engine.credential);
 
     const secondOne = sessionOf(handle, one.engine.baseUrl);

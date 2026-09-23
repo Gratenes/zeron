@@ -1,48 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { RpcError } from "@zeron/engine-client";
 import {
   canonicalBaseUrl,
   engineHost,
   engineWsEndpoint,
   EngineStore,
   webDeviceLabel,
+  type SignInInput,
   type StorageLike,
 } from "../src/lib/engine-store";
 
 function memoryStorage(): StorageLike & { dump(): Map<string, string> } {
   const map = new Map<string, string>();
   return {
-    getItem: (key) => (map.has(key) ? map.get(key)! : null),
+    getItem: (key) => (map.get(key) ?? null),
     setItem: (key, value) => void map.set(key, value),
     removeItem: (key) => void map.delete(key),
     dump: () => map,
   };
 }
 
-function pairUrl(host: string, code: string): string {
-  return `http://${host}/pair#token=${code}`;
-}
-
-const CODE_A = "a".repeat(43);
-const CODE_B = "b".repeat(43);
-
-function redeemWith(known: Record<string, string>) {
-  return async (_baseUrl: string, pairCode: string) => {
-    const credential = known[pairCode];
-    if (credential === undefined) {
-      throw new RpcError("failed", "refused");
-    }
-    return { credential, session: { id: `s-${credential.slice(0, 3)}`, label: "Web on Windows" } };
-  };
+function signIn(baseUrl: string, credential: string): SignInInput {
+  // The sign-in flow (dev user id or WorkOS access token) has already
+  // produced the credential by the time the store sees it.
+  return { baseUrl, credential, label: "Web on Windows", sessionId: `s-${credential.slice(0, 3)}` };
 }
 
 const HOST_A = "127.0.0.1:27699";
 const HOST_B = "192.168.1.20:27699";
 
 describe("EngineStore", () => {
-  it("redeems a pairing URL into an active engine entry", async () => {
-    const store = new EngineStore({ storage: memoryStorage(), now: () => 1000, redeem: redeemWith({ [CODE_A]: "cred-a" }) });
-    const engine = await store.redeemPairingUrl(pairUrl(HOST_A, CODE_A), "Web on Windows");
+  it("stores a signed-in engine as the active entry", async () => {
+    const store = new EngineStore({ storage: memoryStorage(), now: () => 1000 });
+    const engine = await store.signInEngine(signIn(`http://${HOST_A}`, "cred-a"));
     expect(engine.baseUrl).toBe(`http://${HOST_A}`);
     expect(engine.credential).toBe("cred-a");
     const state = store.getSnapshot();
@@ -51,29 +40,19 @@ describe("EngineStore", () => {
     expect(store.activeEngine()?.credential).toBe("cred-a");
   });
 
-  it("replaces the credential when the same origin is re-paired", async () => {
-    let round = 0;
-    const store = new EngineStore({
-      storage: memoryStorage(),
-      redeem: async () => {
-        round += 1;
-        return { credential: `cred-${round}`, session: { id: `s${round}`, label: "Web on Windows" } };
-      },
-    });
-    await store.redeemPairingUrl(pairUrl(HOST_A, CODE_A), "Web on Windows");
-    await store.redeemPairingUrl(pairUrl(HOST_A, CODE_A), "Web on Windows");
+  it("replaces the credential when the same origin is signed in to again", async () => {
+    const store = new EngineStore({ storage: memoryStorage() });
+    await store.signInEngine(signIn(`http://${HOST_A}`, "cred-1"));
+    await store.signInEngine(signIn(`http://${HOST_A}`, "cred-2"));
     const state = store.getSnapshot();
     expect(state.engines).toHaveLength(1);
     expect(state.engines[0]!.credential).toBe("cred-2");
   });
 
   it("keeps several engines and switches the active one", async () => {
-    const store = new EngineStore({
-      storage: memoryStorage(),
-      redeem: redeemWith({ [CODE_A]: "ca", [CODE_B]: "cb" }),
-    });
-    await store.redeemPairingUrl(pairUrl(HOST_A, CODE_A), "Web on Windows");
-    await store.redeemPairingUrl(pairUrl(HOST_B, CODE_B), "Web on Windows");
+    const store = new EngineStore({ storage: memoryStorage() });
+    await store.signInEngine(signIn(`http://${HOST_A}`, "ca"));
+    await store.signInEngine(signIn(`http://${HOST_B}`, "cb"));
     expect(store.getSnapshot().active).toBe(`http://${HOST_B}`);
     store.setActive(`http://${HOST_A}`);
     expect(store.activeEngine()?.credential).toBe("ca");
@@ -82,12 +61,9 @@ describe("EngineStore", () => {
   });
 
   it("falls back to the first engine when the active one is removed", async () => {
-    const store = new EngineStore({
-      storage: memoryStorage(),
-      redeem: redeemWith({ [CODE_A]: "ca", [CODE_B]: "cb" }),
-    });
-    await store.redeemPairingUrl(pairUrl(HOST_A, CODE_A), "Web on Windows");
-    await store.redeemPairingUrl(pairUrl(HOST_B, CODE_B), "Web on Windows");
+    const store = new EngineStore({ storage: memoryStorage() });
+    await store.signInEngine(signIn(`http://${HOST_A}`, "ca"));
+    await store.signInEngine(signIn(`http://${HOST_B}`, "cb"));
     store.setActive(`http://${HOST_B}`);
     store.remove(`http://${HOST_B}`);
     expect(store.getSnapshot().engines).toHaveLength(1);
@@ -100,35 +76,35 @@ describe("EngineStore", () => {
 
   it("pins the verified device identity and survives reload through storage", async () => {
     const storage = memoryStorage();
-    const first = new EngineStore({ storage, redeem: redeemWith({ [CODE_A]: "ca" }) });
-    await first.redeemPairingUrl(pairUrl(HOST_A, CODE_A), "Web on Windows");
+    const first = new EngineStore({ storage });
+    await first.signInEngine(signIn(`http://${HOST_A}`, "ca"));
     first.pinDevice(`http://${HOST_A}`, "device-xyz");
     const second = new EngineStore({ storage });
     expect(second.activeEngine()?.deviceId).toBe("device-xyz");
     expect(second.activeEngine()?.credential).toBe("ca");
   });
 
-  it("yields a clean re-pair state when site data is cleared", async () => {
+  it("yields a clean state when site data is cleared", async () => {
     const storage = memoryStorage();
-    const store = new EngineStore({ storage, redeem: redeemWith({ [CODE_A]: "ca" }) });
-    await store.redeemPairingUrl(pairUrl(HOST_A, CODE_A), "Web on Windows");
+    const store = new EngineStore({ storage });
+    await store.signInEngine(signIn(`http://${HOST_A}`, "ca"));
     storage.dump().clear();
     const fresh = new EngineStore({ storage });
     expect(fresh.getSnapshot().engines).toHaveLength(0);
     expect(fresh.getSnapshot().active).toBe(null);
   });
 
-  it("preserves damaged persisted bytes and blocks pairing until repaired", async () => {
+  it("preserves damaged persisted bytes and blocks sign-in until repaired", async () => {
     const storage = memoryStorage();
     storage.setItem("zeron.fleet.v1", "{not json");
-    const damaged = new EngineStore({ storage, redeem: redeemWith({ [CODE_A]: "ca" }) });
+    const damaged = new EngineStore({ storage });
     // Ticket 31: a damaged-but-present value is NEVER overwritten with a
     // blank one — the store reads empty, surfaces the error, and refuses
-    // pairing until the bytes are repaired.
+    // sign-in until the bytes are repaired.
     expect(damaged.getSnapshot().engines).toHaveLength(0);
     expect(damaged.getSnapshot().configurationError).not.toBe(null);
     expect(storage.getItem("zeron.fleet.v1")).toBe("{not json");
-    await expect(damaged.redeemPairingUrl(pairUrl(HOST_A, CODE_A), "Web on Windows")).rejects.toThrow();
+    await expect(damaged.signInEngine(signIn(`http://${HOST_A}`, "ca"))).rejects.toThrow();
     expect(storage.getItem("zeron.fleet.v1")).toBe("{not json");
     // A wrong-version payload is damaged the same way.
     storage.setItem("zeron.fleet.v1", JSON.stringify({ version: 99, active: null, engines: [{}] }));
@@ -152,24 +128,16 @@ describe("EngineStore", () => {
     expect(store.getSnapshot().active).toBe(`http://${HOST_A}`);
   });
 
-  it("surfaces redeem failures without storing anything", async () => {
-    const storage = memoryStorage();
-    const store = new EngineStore({ storage, redeem: redeemWith({}) });
-    await expect(store.redeemPairingUrl(pairUrl(HOST_A, CODE_A), "Web on Windows")).rejects.toThrow();
-    expect(store.getSnapshot().engines).toHaveLength(0);
-    expect(storage.getItem("zeron.fleet.v1")).toBe(null);
-  });
-
   it("notifies subscribers on actual changes only", async () => {
-    const store = new EngineStore({ storage: memoryStorage(), redeem: redeemWith({ [CODE_A]: "ca" }) });
+    const store = new EngineStore({ storage: memoryStorage() });
     let fired = 0;
     const unsubscribe = store.subscribe(() => {
       fired += 1;
     });
-    await store.redeemPairingUrl(pairUrl(HOST_A, CODE_A), "Web on Windows");
+    await store.signInEngine(signIn(`http://${HOST_A}`, "ca"));
     store.setActive("http://none.example");
     unsubscribe();
-    await store.redeemPairingUrl(pairUrl(HOST_A, CODE_A), "Web on Windows");
+    await store.signInEngine(signIn(`http://${HOST_A}`, "ca"));
     expect(fired).toBe(1);
   });
 });

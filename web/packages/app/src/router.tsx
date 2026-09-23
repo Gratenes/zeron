@@ -4,7 +4,6 @@ import { AppShell } from "./components/app-shell";
 import { ConversationPage } from "./routes/chat-page";
 import { PairPage } from "./routes/pair-page";
 import { SettingsLayout } from "./components/settings-layout";
-import { RemoteAccessSettingsPage } from "./routes/settings-remote-access";
 import { AccountsSettingsPage } from "./routes/settings-accounts";
 import { AppearanceSettingsPage } from "./routes/settings-appearance";
 import { DevicesSettingsPage } from "./routes/settings-devices";
@@ -42,11 +41,6 @@ const settingsIndexRoute = createRoute({
     throw redirect({ to: "/settings/devices" });
   },
 });
-const remoteAccessRoute = createRoute({
-  getParentRoute: () => settingsRoute,
-  path: "/remote-access",
-  component: RemoteAccessSettingsPage,
-});
 const accountsRoute = createRoute({
   getParentRoute: () => settingsRoute,
   path: "/accounts",
@@ -77,7 +71,6 @@ const routeTree = rootRoute.addChildren([
     chatRoute,
     settingsRoute.addChildren([
       settingsIndexRoute,
-      remoteAccessRoute,
       accountsRoute,
       appearanceRoute,
       devicesRoute,
@@ -101,7 +94,6 @@ export {
   indexRoute,
   notificationsRoute,
   pairRoute,
-  remoteAccessRoute,
   rootRoute,
   settingsRoute,
   shellRoute,

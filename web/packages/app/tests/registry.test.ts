@@ -333,17 +333,17 @@ function createFleet(
     }
     return server.factory()(url);
   };
-  const store = new EngineStore({
-    storage,
-    redeem: async (baseUrl) => {
-      const endpoint = engineWsEndpoint(baseUrl);
-      const server = byEndpoint.get(endpoint);
-      if (server === undefined) {
-        throw new Error(`no scripted engine for ${baseUrl}`);
-      }
-      return { credential: server.credential, session: { id: `s-${server.deviceId}`, label: "Test web" } };
-    },
-  });
+  const store = new EngineStore({ storage });
+  // Sign-in carries the credential directly (the AuthKit/dev sign-in flow
+  // ran before the store saw it); this helper wires each scripted engine's
+  // own credential to its origin, the way the real flow would.
+  const signIn = (server: ScriptedEngine) =>
+    store.signInEngine({
+      baseUrl: server.endpoint.replace(/^ws/, "http"),
+      credential: server.credential,
+      label: "Test web",
+      sessionId: `s-${server.deviceId}`,
+    });
   const registry = new EngineRegistry({ cache, webSocket: factory, backoff: FAST_BACKOFF });
   const sync = (): void => {
     const state = store.getSnapshot();
@@ -359,7 +359,7 @@ function createFleet(
   };
   store.subscribe(sync);
   sync();
-  return { store, registry, sync };
+  return { store, registry, sync, signIn };
 }
 
 const ENDPOINT_A = "ws://127.0.0.1:27699/";
@@ -385,9 +385,6 @@ function engineB(): ScriptedEngine {
   });
 }
 
-const PAIR_A = `http://127.0.0.1:27699/pair#token=${"a".repeat(43)}`;
-const PAIR_B = `http://192.168.1.20:27699/pair#token=${"b".repeat(43)}`;
-
 // ---------------------------------------------------------------------------
 // The tests
 // ---------------------------------------------------------------------------
@@ -398,11 +395,11 @@ describe("EngineRegistry (ticket 31)", () => {
     const storage = memoryStorage();
     const a = engineA();
     const b = engineB();
-    // Pair the FIRST engine while its transport is up — pairing starts
-    // supervision immediately, no switch step.
+    // Sign in to the FIRST engine while its transport is up — sign-in
+    // starts supervision immediately, no switch step.
     let fleet = createFleet(storage, cache, [a, b]);
-    await fleet.store.redeemPairingUrl(PAIR_A, "Test web");
-    await fleet.store.redeemPairingUrl(PAIR_B, "Test web");
+    await fleet.signIn(a);
+    await fleet.signIn(b);
     const registry = fleet.registry;
 
     // Rows flow from BOTH engines simultaneously, merged under scoped ids.
@@ -594,8 +591,8 @@ describe("EngineRegistry (ticket 31)", () => {
     expect(fleet.store.getSnapshot().configurationError).not.toBe(null);
     expect(fleet.store.getSnapshot().engines).toHaveLength(0);
     expect(fleet.registry.getSnapshot().configurationError).not.toBe(null);
-    // Pairing refuses while damaged.
-    await expect(fleet.store.redeemPairingUrl(PAIR_A, "Test web")).rejects.toThrow();
+    // Sign-in refuses while damaged.
+    await expect(fleet.signIn(a)).rejects.toThrow();
     // The original bytes survive every refusal untouched.
     expect(storage.raw()).toBe("damaged config");
     expect(cache.hasRows(URL_A)).toBe(false);

@@ -14,8 +14,7 @@ import {
   DialogField,
   DialogTitle,
 } from "../components/ui/Dialog";
-import { webDeviceLabel, engineHost, type StoredEngine } from "../lib/engine-store";
-import { describeRedeemError } from "../lib/pairing-errors";
+import { engineHost, type StoredEngine } from "../lib/engine-store";
 import { engineConnection } from "../lib/settings-engine";
 import {
   lastSeenOnline,
@@ -32,13 +31,13 @@ import {
  * of the connected engine — one row per device that has paired with it, with
  * the platform tile's corner presence dot, the meta line (platform · version
  * · connection · last seen · added · the click-to-copy id chip), Rename (via
- * the Mutate renameDevice op) and the pairing box that redeems a pairing URL
- * through the fleet store — the page's one paste entry (the `/pair` landing
- * is the other, for token URLs). Above the device rows sits the engines
- * card: one row per engine this browser paired, folded here from the
+ * the Mutate renameDevice op) and the connect card that opens the sign-in
+ * flow at `/pair` — the page's one entry point for adding engines. Above
+ * the device rows sits the engines
+ * card: one row per engine this browser signed in to, folded here from the
  * deleted web-only user-menu Engines drawer (ticket 45) — connection state
- * dot + label, the engine identity line, "Pair again" when the engine
- * parked (a revoked Session re-pairs through `/pair`), and Forget.
+ * dot + label, the engine identity line, "Sign in again" when the engine
+ * parked (an invalid credential re-signs-in through `/pair`), and Forget.
  *
  * Web mapping of the desktop's multi-engine registry concepts: the rows come
  * from the connected engine's WatchDevices; the "engine-backed" row is the
@@ -61,14 +60,13 @@ export function DevicesSettingsPage() {
   const registry = useFleetRegistry();
   const snapshot = useWatchSnapshot(session);
   const now = useNow(15_000);
-  const [pairingUrl, setPairingUrl] = useState("");
-  const [pairingBusy, setPairingBusy] = useState(false);
+  const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [rename, setRename] = useState<RenameDialog | null>(null);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // A new engine (a successful pair) rebuilds the session; reset the page.
+  // A new engine (a successful sign-in) rebuilds the session; reset the page.
   useEffect(() => {
     setError(null);
     setCopied(null);
@@ -120,28 +118,6 @@ export function DevicesSettingsPage() {
     return parked?.baseUrl ?? null;
   }
 
-  function pair() {
-    if (pairingBusy) {
-      return;
-    }
-    const url = pairingUrl.trim();
-    if (url.length === 0) {
-      return;
-    }
-    setPairingBusy(true);
-    setError(null);
-    void (async () => {
-      try {
-        await fleetStore.redeemPairingUrl(url, webDeviceLabel());
-        setPairingUrl("");
-      } catch (cause) {
-        setError(describeRedeemError(cause));
-      } finally {
-        setPairingBusy(false);
-      }
-    })();
-  }
-
   function forget(baseUrl: string) {
     fleetStore.remove(baseUrl);
   }
@@ -188,28 +164,13 @@ export function DevicesSettingsPage() {
       )}
 
       <section className="settings-card settings-pairing-box">
-        <form
-          className="settings-pairing-row"
-          onSubmit={(event) => {
-            event.preventDefault();
-            pair();
-          }}
-        >
-          <input
-            className="input mono"
-            type="text"
-            placeholder="Paste a pairing URL"
-            value={pairingUrl}
-            onChange={(event) => setPairingUrl(event.target.value)}
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <button type="submit" className="btn btn-solid">
-            {pairingBusy ? "Connecting…" : "Connect"}
+        <div className="settings-pairing-row">
+          <button type="button" className="btn btn-solid" onClick={() => void navigate({ to: "/pair" })}>
+            Connect an engine
           </button>
-        </form>
+        </div>
         <p className="settings-pairing-hint">
-          Create a pairing link in the engine's Remote access settings, then paste it here.
+          Enter the engine's address on the connect page and sign in — development engines take a user id; WorkOS engines go through AuthKit.
         </p>
       </section>
 
@@ -274,9 +235,9 @@ interface EngineRowProps {
  * One paired engine's row — the drawer's per-engine row folded here
  * (ticket 45), minus the urgent-chat dot (the sidebar owns urgency).
  * The meta line is the connection label · identity (`Engine {shortId}`,
- * or "Identity unverified" before the first verified connect); "Pair
- * again" appears only on a parked engine and re-enters the pairing flow
- * at `/pair`, where a fresh URL redeems into a new Session.
+ * or "Identity unverified" before the first verified connect); "Sign
+ * in again" appears only on a parked engine and re-enters the sign-in
+ * flow at `/pair`, where a fresh sign-in replaces the stale credential.
  */
 function EngineRow({ engine, entry }: EngineRowProps) {
   const navigate = useNavigate();
@@ -295,7 +256,7 @@ function EngineRow({ engine, entry }: EngineRowProps) {
       </div>
       {connection.pairable && (
         <button type="button" className="btn btn-ghost" onClick={() => void navigate({ to: "/pair" })}>
-          Pair again
+          Sign in again
         </button>
       )}
       <RemoveEngineButton engine={engine} />

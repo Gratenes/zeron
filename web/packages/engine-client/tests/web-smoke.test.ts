@@ -4,10 +4,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import type { Chat, EngineInfo, SessionGrant } from "@zeron/proto";
+import type { Chat, EngineInfo } from "@zeron/proto";
 import { EngineClient } from "../src/client";
 import { ENGINE_INFO, MUTATE, WATCH_CHATS, WATCH_SPACES } from "../src/methods";
-import { redeemPairingCode } from "../src/pairing";
+import { fetchSignInConfig } from "../src/auth";
 import { EngineWatchCache } from "../src/watch-cache";
 import { delay, statusWhen, trackedFactory, waitUntil } from "./helpers/ws";
 
@@ -17,7 +17,8 @@ import { delay, statusWhen, trackedFactory, waitUntil } from "./helpers/ws";
  * without a Playwright install. Targets the `web_smoke` example, which
  * already seeds one chat so the assertion surfaces something real.
  *
- * Covered: redeem pairing code (the `/pairing/redeem` POST a browser does),
+ * Covered: the dev sign-in config fetch (the `/auth/config` GET a browser
+ * does),
  * first-frame `Auth` over WebSocket, identity verification, the chat list
  * watch stream, and the round-trip of a `Mutate.createChat` (the "send"
  * piece). The same flow with a real chat would be `QueueCommand`; the
@@ -29,15 +30,15 @@ const FAST_BACKOFF = { initialMs: 25, jitterMs: 1, maxMs: 100 };
 interface SmokeHandle {
   child: ChildProcess;
   endpoint: string;
-  pairCode: string;
   deviceId: string;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..", "..", "..");
+// Cargo may build outside the checkout (CARGO_TARGET_DIR); resolve the
+// examples from wherever cargo actually puts them.
 const exampleBinary = join(
-  repoRoot,
-  "target",
+  process.env.CARGO_TARGET_DIR ?? join(repoRoot, "target"),
   "debug",
   "examples",
   process.platform === "win32" ? "web_smoke.exe" : "web_smoke",
@@ -82,7 +83,7 @@ function waitForLine(stream: Readable, prefix: string): Promise<string> {
 }
 
 let engine: SmokeHandle | undefined;
-let grant: SessionGrant | undefined;
+let credential: string | undefined;
 const tracked = trackedFactory();
 let client: EngineClient | undefined;
 let cache: EngineWatchCache | undefined;
@@ -91,24 +92,16 @@ beforeAll(async () => {
   await run("cargo", ["build", "-p", "zeron-engine", "--example", "web_smoke"]);
   const child = spawn(exampleBinary, { stdio: ["ignore", "pipe", "ignore"] });
   const line = await waitForLine(child.stdout!, "SMOKE READY ");
-  // The example prints one line: `SMOKE READY <pairingUrl>` — the
-  // URL itself, not JSON, so the browser flow (paste URL → parse →
-  // redeem) maps onto the same code paths the web client uses.
-  const url = line.startsWith("SMOKE READY ") ? line.slice("SMOKE READY ".length).trim() : line;
-  const parsed = new URL(url);
-  if (parsed.hash.length === 0) {
-    throw new Error(`web_smoke did not print a pairing URL fragment (got ${line})`);
-  }
-  const token = parsed.hash.startsWith("#token=") ? parsed.hash.slice("#token=".length) : "";
-  if (token.length === 0) {
-    throw new Error("web_smoke pairing URL is missing its fragment credential");
-  }
-  const baseUrl = `${parsed.protocol}//${parsed.host}`;
+  // The example prints one line: `SMOKE READY <endpoint>` — the
+  // listener's plain URL, not JSON, so the browser flow (enter address →
+  // fetch sign-in config) maps onto the same code paths the web client
+  // uses.
+  const baseUrl = line.startsWith("SMOKE READY ") ? line.slice("SMOKE READY ".length).trim() : line;
   // The example does not print its device id; we'll fetch it through the
-  // EngineInfo round-trip after pairing (the same path the browser takes:
-  // the /pair page only sees the credential, the engine identity is
+  // EngineInfo round-trip after sign-in (the same path the browser takes:
+  // the connect page only sees the credential, the engine identity is
   // verified by the first authenticated RPC).
-  engine = { child, endpoint: baseUrl, pairCode: token, deviceId: "" };
+  engine = { child, endpoint: baseUrl, deviceId: "" };
 }, 600_000);
 
 afterAll(async () => {
@@ -119,18 +112,19 @@ afterAll(async () => {
   }
 });
 
-describe("web smoke (pair, watch, send) against a seeded engine", () => {
-  test("redeems the pairing URL exactly the way the browser's /pair page does", async () => {
-    grant = await redeemPairingCode(engine!.endpoint, engine!.pairCode, "Web smoke");
-    expect(grant.credential).toHaveLength(43);
-    expect(typeof grant.session.id).toBe("string");
-    expect(grant.session.label).toBe("Web smoke");
+describe("web smoke (sign-in, watch, send) against a seeded engine", () => {
+  test("fetches the dev sign-in config exactly the way the browser's connect page does", async () => {
+    const config = await fetchSignInConfig(engine!.endpoint);
+    expect(config).toEqual({ mode: "dev", authorizeUrl: null });
+    // Dev mode: the bearer is a local user id the listener accepts
+    // without WorkOS.
+    credential = "web-smoke";
   });
 
   test("connects, verifies the engine identity, and exposes a stable cache", async () => {
     client = new EngineClient({
       endpoint: engine!.endpoint.replace("http", "ws"),
-      credential: grant!.credential,
+      credential: credential!,
       webSocket: tracked.factory,
       backoff: FAST_BACKOFF,
     });

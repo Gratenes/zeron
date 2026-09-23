@@ -4,10 +4,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import type { Chat, EngineInfo, SessionGrant } from "@zeron/proto";
+import type { Chat, EngineInfo } from "@zeron/proto";
 import { EngineClient } from "../src/client";
-import { ENGINE_INFO, MUTATE, REVOKE_PAIRING_SESSION, WATCH_CHATS } from "../src/methods";
-import { redeemPairingCode } from "../src/pairing";
+import { ENGINE_INFO, MUTATE, WATCH_CHATS } from "../src/methods";
+import { fetchSignInConfig } from "../src/auth";
 import { EngineWatchCache } from "../src/watch-cache";
 import { delay, statusWhen, trackedFactory, waitUntil } from "./helpers/ws";
 
@@ -16,15 +16,15 @@ const FAST_BACKOFF = { initialMs: 25, jitterMs: 1, maxMs: 100 };
 interface EngineHandle {
   child: ChildProcess;
   endpoint: string;
-  pairCode: string;
   deviceId: string;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..", "..", "..");
+// Cargo may build outside the checkout (CARGO_TARGET_DIR); resolve the
+// examples from wherever cargo actually puts them.
 const exampleBinary = join(
-  repoRoot,
-  "target",
+  process.env.CARGO_TARGET_DIR ?? join(repoRoot, "target"),
   "debug",
   "examples",
   process.platform === "win32" ? "web_conformance.exe" : "web_conformance",
@@ -69,7 +69,7 @@ function waitForLine(stream: Readable, prefix: string): Promise<string> {
 }
 
 let engine: EngineHandle | undefined;
-let grant: SessionGrant | undefined;
+let credential: string | undefined;
 const tracked = trackedFactory();
 let client: EngineClient | undefined;
 
@@ -77,7 +77,7 @@ beforeAll(async () => {
   await run("cargo", ["build", "-p", "zeron-engine", "--example", "web_conformance"]);
   const child = spawn(exampleBinary, { stdio: ["ignore", "pipe", "ignore"] });
   const line = await waitForLine(child.stdout!, "CONFORMANCE ");
-  const info = JSON.parse(line) as { endpoint: string; pairCode: string; deviceId: string };
+  const info = JSON.parse(line) as { endpoint: string; deviceId: string };
   engine = { child, ...info };
 }, 600_000);
 
@@ -90,17 +90,18 @@ afterAll(async () => {
 });
 
 describe("conformance against a real engine", () => {
-  test("redeems the pair code over HTTP", async () => {
-    grant = await redeemPairingCode(engine!.endpoint, engine!.pairCode, "Conformance");
-    expect(grant.credential).toHaveLength(43);
-    expect(grant.session.label).toBe("Conformance");
-    expect(typeof grant.session.id).toBe("string");
+  test("fetches the dev sign-in config over HTTP", async () => {
+    const config = await fetchSignInConfig(engine!.endpoint);
+    expect(config).toEqual({ mode: "dev", authorizeUrl: null });
+    // Dev mode: the bearer is a local user id the listener accepts
+    // without WorkOS.
+    credential = "conformance";
   });
 
   test("connects with first-frame auth, verifies identity, and makes typed calls", async () => {
     client = new EngineClient({
       endpoint: engine!.endpoint.replace("http", "ws"),
-      credential: grant!.credential,
+      credential: credential!,
       expectedDeviceId: engine!.deviceId,
       webSocket: tracked.factory,
       backoff: FAST_BACKOFF,
@@ -153,7 +154,7 @@ describe("conformance against a real engine: the watch cache", () => {
     const own = trackedFactory();
     const cacheClient = new EngineClient({
       endpoint: engine!.endpoint.replace("http", "ws"),
-      credential: grant!.credential,
+      credential: credential!,
       expectedDeviceId: engine!.deviceId,
       webSocket: own.factory,
       backoff: FAST_BACKOFF,
@@ -209,7 +210,7 @@ describe("conformance against a real engine: the watch cache", () => {
       const other = trackedFactory();
       const second = new EngineClient({
         endpoint: engine!.endpoint.replace("http", "ws"),
-        credential: grant!.credential,
+        credential: credential!,
         expectedDeviceId: engine!.deviceId,
         webSocket: other.factory,
         backoff: FAST_BACKOFF,
@@ -247,32 +248,4 @@ describe("conformance against a real engine: the watch cache", () => {
       cacheClient.close();
     }
   }, 60_000);
-});
-
-describe("conformance against a real engine: revoked sessions", () => {
-  test("a revoked session parks on the next handshake and never re-dials", async () => {
-    const parked = trackedFactory();
-    const second = new EngineClient({
-      endpoint: engine!.endpoint.replace("http", "ws"),
-      credential: grant!.credential,
-      expectedDeviceId: engine!.deviceId,
-      webSocket: parked.factory,
-      backoff: FAST_BACKOFF,
-    });
-    second.connect();
-    await statusWhen(second, (value) => value.state === "connected");
-
-    await second.call(REVOKE_PAIRING_SESSION, { sessionId: grant!.session.id });
-
-    parked.sockets[0]!.terminate();
-    const status = await statusWhen(second, (value) => value.state === "parked");
-    expect(status).toMatchObject({ state: "parked", reason: "invalid-credential" });
-    await expect(second.call(ENGINE_INFO, {})).rejects.toMatchObject({ kind: "parked" });
-    // A transient refusal before the terminal 4401 may cost one extra dial;
-    // what must hold is that parking stops the dialing for good.
-    const dialedAtPark = parked.sockets.length;
-    await delay(250);
-    expect(parked.sockets).toHaveLength(dialedAtPark);
-    second.close();
-  });
 });
