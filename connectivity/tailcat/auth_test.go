@@ -256,3 +256,104 @@ func TestPairRecoversCommittedRedeemAfterLostReply(t *testing.T) {
 		})
 	}
 }
+
+func TestFirstPairRecoversLostRedeemReplyOnRetry(t *testing.T) {
+	for _, delayed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "immediate proof", true: "retry after restart"}[delayed], func(t *testing.T) {
+			testFirstPairLostReply(t, delayed)
+		})
+	}
+}
+
+func testFirstPairLostReply(t *testing.T, delayed bool) {
+	secret := make([]byte, 32)
+	var blockProof atomic.Bool
+	blockProof.Store(delayed)
+	var redeems atomic.Int32
+	var accepted atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/pair/redeem":
+			var request struct{ InviteID, PublicKey, Signature string }
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Error(err)
+				return
+			}
+			public, publicErr := base64url.DecodeString(request.PublicKey)
+			signature, signatureErr := base64url.DecodeString(request.Signature)
+			if publicErr != nil || signatureErr != nil || !ed25519.Verify(public, framed("kratos.peer-auth.invite-redeem.v1\x00", []byte{1}, []byte("profile"), []byte(request.InviteID), secret, public), signature) {
+				t.Error("invalid redeem proof")
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if redeems.Add(1) != 1 {
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			accepted.Store(request.PublicKey) // Peer commits, but the response is lost.
+			_, _ = w.Write([]byte("{"))
+		case "/pair/challenge":
+			if blockProof.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			public, _ := base64url.DecodeString(accepted.Load().(string))
+			var request struct{ DeviceID string }
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			if request.DeviceID != deviceID(public) {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"profileId": "profile", "deviceId": request.DeviceID, "challengeId": "challenge", "nonce": base64url.EncodeToString(secret)})
+		case "/pair/authenticate":
+			public, _ := base64url.DecodeString(accepted.Load().(string))
+			var request struct{ Signature string }
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			signature, _ := base64url.DecodeString(request.Signature)
+			if !ed25519.Verify(public, framed("kratos.peer-auth.challenge.v1\x00", []byte("profile"), []byte(deviceID(public)), []byte("challenge"), secret), signature) {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "token", "expiresAt": time.Now().Unix() + 900, "principal": map[string]string{"profileId": "profile", "deviceId": deviceID(public)}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client := &Client{url: server.URL, stateDir: t.TempDir()}
+	invitation, _ := json.Marshal(map[string]any{"version": 1, "invite": map[string]any{"version": 1, "profileId": "profile", "inviteId": "first", "secret": base64url.EncodeToString(secret)}})
+	_, pairErr := client.Pair(string(invitation), "Phone")
+	if delayed && pairErr == nil || !delayed && pairErr != nil {
+		t.Fatalf("unexpected first pair result: %v", pairErr)
+	}
+	path, _ := client.identityPath("profile")
+	primary, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !delayed {
+		if _, err := os.Stat(path + ".pending"); !os.IsNotExist(err) {
+			t.Fatalf("pending key remains after immediate proof: %v", err)
+		}
+		if redeems.Load() != 1 {
+			t.Fatalf("consumed invitation was redeemed %d times", redeems.Load())
+		}
+		return
+	}
+	pending, err := os.ReadFile(path + ".pending")
+	if err != nil || string(primary) != string(pending) {
+		t.Fatal("uncertain first pairing did not retain its key")
+	}
+	blockProof.Store(false)
+	client = &Client{url: server.URL, stateDir: client.stateDir}
+	if _, err := client.Pair(string(invitation), "Phone"); err != nil {
+		t.Fatal("same invitation could not restore pairing:", err)
+	}
+	if redeems.Load() != 1 {
+		t.Fatalf("consumed invitation was redeemed %d times", redeems.Load())
+	}
+	if _, err := os.Stat(path + ".pending"); !os.IsNotExist(err) {
+		t.Fatalf("pending key remains after proof: %v", err)
+	}
+}

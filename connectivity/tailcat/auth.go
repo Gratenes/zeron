@@ -75,7 +75,7 @@ func (c *Client) Pair(invitationJSON, displayName string) (string, error) {
 	if len(displayName) > 128 {
 		return "", errors.New("device name is too long")
 	}
-	key, err := c.identity(invitation.Invite.ProfileID)
+	key, created, err := c.identity(invitation.Invite.ProfileID)
 	if err != nil {
 		return "", err
 	}
@@ -91,6 +91,14 @@ func (c *Client) Pair(invitationJSON, displayName string) (string, error) {
 			return session, nil
 		}
 	}
+	if created && pendingKey == nil {
+		pendingPath, err = c.stagePendingIdentity(invitation.Invite.ProfileID, key)
+		if err != nil {
+			return "", err
+		}
+		pendingKey = key
+	}
+	pendingIsPrimary := pendingKey != nil && bytes.Equal(pendingKey, key)
 	replacingIdentity := false
 	var result struct {
 		ProfileID string `json:"profileId"`
@@ -110,7 +118,7 @@ func (c *Client) Pair(invitationJSON, displayName string) (string, error) {
 		replacingIdentity = true
 		// A pending key survives a lost reply or process restart. Reuse it
 		// until the peer definitively rejects that key too.
-		if pendingKey == nil {
+		if pendingKey == nil || pendingIsPrimary {
 			pendingKey, pendingPath, err = c.newPendingIdentity(invitation.Invite.ProfileID)
 			if err != nil {
 				return "", err
@@ -134,10 +142,15 @@ func (c *Client) Pair(invitationJSON, displayName string) (string, error) {
 			return "", err
 		}
 	} else if err != nil {
+		if pendingIsPrimary {
+			if session, authErr := c.authenticatePending(invitation.Invite.ProfileID, key, pendingPath); authErr == nil {
+				return session, nil
+			}
+		}
 		return "", err
 	}
 	if result.ProfileID != invitation.Invite.ProfileID || result.DeviceID != deviceID(key.Public().(ed25519.PublicKey)) {
-		if replacingIdentity {
+		if replacingIdentity || pendingIsPrimary {
 			if session, err := c.authenticatePending(invitation.Invite.ProfileID, key, pendingPath); err == nil {
 				return session, nil
 			}
@@ -149,7 +162,16 @@ func (c *Client) Pair(invitationJSON, displayName string) (string, error) {
 			return "", err
 		}
 	}
-	return c.authenticateKey(invitation.Invite.ProfileID, key)
+	session, err := c.authenticateKey(invitation.Invite.ProfileID, key)
+	if err != nil {
+		return "", err
+	}
+	if pendingIsPrimary && !replacingIdentity {
+		if err := c.promotePending(invitation.Invite.ProfileID, pendingPath); err != nil {
+			return "", err
+		}
+	}
+	return session, nil
 }
 
 // Authenticate renews a short-lived bearer using the persisted device key.
@@ -280,24 +302,29 @@ func (c *Client) pendingIdentity(profileID string) (ed25519.PrivateKey, string, 
 }
 
 func (c *Client) newPendingIdentity(profileID string) (ed25519.PrivateKey, string, error) {
-	path, err := c.identityPath(profileID)
-	if err != nil {
-		return nil, "", err
-	}
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, "", err
 	}
+	pending, err := c.stagePendingIdentity(profileID, key)
+	return key, pending, err
+}
+
+func (c *Client) stagePendingIdentity(profileID string, key ed25519.PrivateKey) (string, error) {
+	path, err := c.identityPath(profileID)
+	if err != nil {
+		return "", err
+	}
 	staged, err := c.stageIdentity(key)
 	if err != nil {
-		return nil, "", err
+		return "", err
 	}
 	defer os.Remove(staged)
 	pending := path + ".pending"
 	if err := c.installIdentity(staged, pending); err != nil {
-		return nil, "", err
+		return "", err
 	}
-	return key, pending, nil
+	return pending, nil
 }
 
 func (c *Client) promotePending(profileID, pending string) error {
@@ -308,31 +335,32 @@ func (c *Client) promotePending(profileID, pending string) error {
 	return c.installIdentity(pending, path)
 }
 
-func (c *Client) identity(profileID string) (ed25519.PrivateKey, error) {
+func (c *Client) identity(profileID string) (ed25519.PrivateKey, bool, error) {
 	identityMu.Lock()
 	defer identityMu.Unlock()
 	path, err := c.identityPath(profileID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if _, err := os.Lstat(path); err == nil {
-		return c.loadIdentity(profileID)
+		key, err := c.loadIdentity(profileID)
+		return key, false, err
 	} else if !os.IsNotExist(err) {
-		return nil, err
+		return nil, false, err
 	}
 	_, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	staged, err := c.stageIdentity(key)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer os.Remove(staged)
 	if err := c.installIdentity(staged, path); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return key, nil
+	return key, true, nil
 }
 
 func (c *Client) stageIdentity(key ed25519.PrivateKey) (string, error) {
