@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, View } from 'react-native';
+import { Text } from './AppText';
 import { colors, radius, spacing, typography } from './theme';
 
 type DiffFile = { path: string; oldPath?: string; status: string; additions: number; deletions: number; binary: boolean };
@@ -236,11 +237,11 @@ const styles = StyleSheet.create({
   path: { color: colors.textFaint, fontSize: typography.small, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm },
   summary: { color: colors.textMuted, fontSize: typography.small, paddingHorizontal: spacing.lg, paddingBottom: spacing.md },
   fileRow: { minHeight: 52, flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.lg, gap: spacing.md, borderBottomColor: colors.border, borderBottomWidth: 1 },
-  status: { color: colors.textMuted, fontFamily: 'monospace', fontSize: typography.small, width: 24 },
+  status: { color: colors.textMuted, fontFamily: typography.mono, fontSize: typography.small, width: 24 },
   fileInfo: { flex: 1 },
   fileName: { color: colors.text, fontSize: typography.body },
   oldPath: { color: colors.textFaint, fontSize: typography.small, marginTop: 2 },
-  counts: { fontFamily: 'monospace', fontSize: typography.small },
+  counts: { fontFamily: typography.mono, fontSize: typography.small },
   addedText: { color: colors.success },
   removedText: { color: colors.danger },
   tabs: { flexDirection: 'row', borderBottomColor: colors.border, borderBottomWidth: 1 },
@@ -250,8 +251,8 @@ const styles = StyleSheet.create({
   activeTabText: { color: colors.text },
   diffContent: { paddingBottom: 24 },
   line: { flexDirection: 'row', paddingHorizontal: spacing.sm, minHeight: 20 },
-  lineNumber: { color: colors.textFaint, fontFamily: 'monospace', fontSize: typography.small, width: 32, textAlign: 'right', marginRight: spacing.md },
-  lineText: { color: colors.textMuted, fontFamily: 'monospace', fontSize: typography.small, lineHeight: 20, flex: 1 },
+  lineNumber: { color: colors.textFaint, fontFamily: typography.mono, fontSize: typography.small, width: 32, textAlign: 'right', marginRight: spacing.md },
+  lineText: { color: colors.textMuted, fontFamily: typography.mono, fontSize: typography.small, lineHeight: 20, flex: 1 },
   addedLine: { backgroundColor: 'rgba(52,211,153,0.08)' },
   removedLine: { backgroundColor: 'rgba(251,113,133,0.08)' },
   hunkLine: { backgroundColor: colors.surfaceRaised },

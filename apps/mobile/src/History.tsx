@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Text } from './AppText';
 import { colors, radius, spacing, typography } from './theme';
 
 type Commit = {
@@ -195,7 +196,7 @@ const styles = StyleSheet.create({
   commitBody: { flex: 1, borderBottomWidth: 1, borderBottomColor: colors.border, paddingVertical: spacing.md, paddingLeft: spacing.sm, gap: spacing.xs },
   subject: { color: colors.text, fontSize: typography.body, lineHeight: 20 },
   metadata: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-  sha: { color: colors.accent, fontFamily: 'monospace', fontSize: typography.small },
+  sha: { color: colors.accent, fontFamily: typography.mono, fontSize: typography.small },
   author: { color: colors.textMuted, fontSize: typography.small, flex: 1 },
   date: { color: colors.textFaint, fontSize: typography.small },
   refs: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs },

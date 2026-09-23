@@ -3,11 +3,11 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  Text,
   TextInput,
   View,
   useWindowDimensions,
 } from 'react-native';
+import { Text } from './AppText';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, radius, spacing, typography } from './theme';
 
@@ -260,7 +260,7 @@ const styles = StyleSheet.create({
   spaceOption: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: spacing.xs, paddingHorizontal: spacing.md },
   spaceOptionText: { flex: 1, color: colors.text, fontSize: typography.body },
   spaceDevice: { color: colors.textFaint, fontSize: typography.caption },
-  search: { height: 36, marginHorizontal: spacing.sm, marginTop: spacing.md, paddingHorizontal: spacing.sm, borderWidth: 1, borderColor: colors.border, borderRadius: radius.control, color: colors.text, fontSize: typography.body },
+  search: { height: 36, marginHorizontal: spacing.sm, marginTop: spacing.md, paddingHorizontal: spacing.sm, borderWidth: 1, borderColor: colors.border, fontFamily: typography.family, borderRadius: radius.control, color: colors.text, fontSize: typography.body },
   sectionHeading: { height: 36, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.lg },
   sectionLabel: { color: colors.textFaint, fontSize: typography.small, fontWeight: '600' },
   sectionLine: { flex: 1, height: 1, backgroundColor: colors.border },

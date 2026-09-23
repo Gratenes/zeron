@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Text } from './AppText';
 import { colors, radius, spacing, typography } from './theme';
 
 export type QueuedMessage = { id: string; text: string };
@@ -125,7 +126,7 @@ const styles = StyleSheet.create({
   queueTitle: { color: colors.textMuted, fontSize: typography.caption, fontWeight: '700', marginBottom: spacing.xs },
   queueRow: { alignItems: 'center', flexDirection: 'row', gap: spacing.xs, paddingVertical: spacing.xs },
   queueText: { color: colors.text, flex: 1, fontSize: typography.small },
-  queueInput: { borderColor: colors.border, borderWidth: 1, color: colors.text, flex: 1, fontSize: typography.small, minHeight: 36, padding: spacing.xs },
+  queueInput: { borderColor: colors.border, borderWidth: 1, color: colors.text, flex: 1, fontFamily: typography.family, fontSize: typography.small, minHeight: 36, padding: spacing.xs },
   suggestions: { backgroundColor: colors.surfaceRaised, borderColor: colors.border, borderRadius: radius.panel, borderWidth: 1, marginBottom: spacing.sm, overflow: 'hidden' },
   suggestion: { alignItems: 'center', flexDirection: 'row', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
   suggestionLabel: { color: colors.text, fontSize: typography.small },
@@ -134,7 +135,7 @@ const styles = StyleSheet.create({
   targetChip: { borderColor: colors.border, borderRadius: radius.control, borderWidth: 1, color: colors.textMuted, fontSize: typography.small, overflow: 'hidden', paddingHorizontal: spacing.sm, paddingVertical: spacing.xs },
   pill: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: colors.border, borderRadius: 26, borderWidth: 1, minHeight: 124 },
   compactPill: { alignItems: 'center', flexDirection: 'row', minHeight: 49 },
-  input: { color: colors.text, fontSize: typography.body, lineHeight: 21, maxHeight: 260, minHeight: 76, paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: spacing.xs },
+  input: { color: colors.text, fontFamily: typography.family, fontSize: typography.body, lineHeight: 21, maxHeight: 260, minHeight: 76, paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: spacing.xs },
   compactInput: { flex: 1, maxHeight: 180, minHeight: 47, paddingTop: 10, paddingBottom: 10, paddingRight: spacing.sm },
   actions: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', minHeight: 46, paddingTop: spacing.xs, paddingBottom: 10, paddingHorizontal: spacing.md },
   compactActions: { gap: spacing.sm, minHeight: 47, paddingTop: 0, paddingBottom: 0, paddingLeft: spacing.xs, paddingRight: spacing.sm },

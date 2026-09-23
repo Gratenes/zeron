@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Text } from './AppText';
 import { colors, radius, spacing, typography } from './theme';
 
 type Entry = { path: string; name: string; kind: 'file' | 'directory' | 'symlink'; size?: number; ignored: boolean; readOnly: boolean };
@@ -302,7 +303,7 @@ const styles = StyleSheet.create({
   more: { alignItems: 'center', padding: spacing.lg },
   busy: { marginTop: 32 },
   empty: { color: colors.textFaint, fontSize: typography.body, textAlign: 'center', marginTop: 48 },
-  editor: { flex: 1, color: colors.text, backgroundColor: colors.surfaceCard, fontFamily: 'monospace', fontSize: typography.small, lineHeight: 19, padding: spacing.lg },
+  editor: { flex: 1, color: colors.text, backgroundColor: colors.surfaceCard, fontFamily: typography.mono, fontSize: typography.small, lineHeight: 19, padding: spacing.lg },
   notice: { color: colors.textMuted, fontSize: typography.small, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm },
   discard: { alignSelf: 'flex-start', paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
   muted: { color: colors.textMuted, fontSize: typography.small },

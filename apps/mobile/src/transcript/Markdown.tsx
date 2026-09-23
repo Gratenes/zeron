@@ -1,5 +1,6 @@
 import { Fragment } from 'react';
-import { Linking, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Linking, ScrollView, StyleSheet, View } from 'react-native';
+import { Text } from '../AppText';
 import { colors, radius, spacing, typography } from '../theme';
 
 type Block = { type: 'text' | 'heading' | 'list' | 'quote' | 'code' | 'rule'; text: string; level?: number; language?: string };
@@ -94,8 +95,8 @@ const styles = StyleSheet.create({
   codeFrame: { borderColor: colors.border, borderWidth: 1, borderRadius: radius.panel, backgroundColor: colors.inputBg, overflow: 'hidden' },
   codeLanguage: { color: colors.textMuted, fontSize: typography.small, borderBottomColor: colors.border, borderBottomWidth: 1, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
   codeScroll: { padding: spacing.md },
-  codeText: { color: colors.codeText, fontFamily: 'monospace', fontSize: typography.small, lineHeight: 19 },
-  inlineCode: { color: colors.codeText, backgroundColor: colors.inputBg, fontFamily: 'monospace' },
+  codeText: { color: colors.codeText, fontFamily: typography.mono, fontSize: typography.small, lineHeight: 19 },
+  inlineCode: { color: colors.codeText, backgroundColor: colors.inputBg, fontFamily: typography.mono },
   bold: { fontWeight: '700' },
   italic: { fontStyle: 'italic' },
   link: { color: colors.accent, textDecorationLine: 'underline' },

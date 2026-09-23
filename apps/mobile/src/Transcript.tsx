@@ -1,5 +1,6 @@
 import { memo, useCallback, useRef, useState } from 'react';
-import { FlatList, Linking, Pressable, StyleSheet, Text, TextInput, View, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
+import { FlatList, Linking, Pressable, StyleSheet, TextInput, View, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
+import { Text } from './AppText';
 import { colors, radius, spacing, typography } from './theme';
 import { Markdown } from './transcript/Markdown';
 
@@ -247,7 +248,7 @@ const styles = StyleSheet.create({
   detailGroup: { borderLeftWidth: 1, borderLeftColor: colors.border, paddingLeft: spacing.md },
   detailHeader: { flexDirection: 'row', alignItems: 'center', minHeight: 30, gap: spacing.sm },
   detailLabel: { color: colors.textMuted, fontSize: typography.small },
-  detailText: { color: colors.textMuted, fontFamily: 'monospace', fontSize: typography.small, lineHeight: 18 },
+  detailText: { color: colors.textMuted, fontFamily: typography.mono, fontSize: typography.small, lineHeight: 18 },
   detailTitle: { color: colors.textFaint, fontWeight: '700' },
   artifact: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.panel, backgroundColor: colors.surfaceCard, padding: spacing.md },
   userArtifact: { maxWidth: '80%', borderWidth: 1, borderColor: colors.borderStrong, borderRadius: radius.control, backgroundColor: colors.surfaceCard, padding: spacing.sm },
