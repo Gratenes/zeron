@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { Text } from './AppText';
 import { colors, radius, spacing, typography } from './theme';
@@ -36,11 +36,14 @@ export function Composer({
   const [editing, setEditing] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [wrappedDraft, setWrappedDraft] = useState<string | null>(null);
+  const latestDraft = useRef(draft);
+  latestDraft.current = draft;
   const token = draft.match(/(?:^|\s)([\/@])([^\s]*)$/);
   const options = token?.[1] === '/' ? commands : token?.[1] === '@' ? mentions : [];
   const matches = token ? options.filter(option => option.label.toLowerCase().includes(token[2].toLowerCase())).slice(0, 6) : [];
   const canSend = !!draft.trim() && !disabled && !busy && !submitting;
-  const expandedMode = expanded || draft.includes('\n');
+  const expandedMode = expanded || draft.includes('\n') || (!!wrappedDraft && draft.startsWith(wrappedDraft));
 
   const send = async () => {
     if (!canSend) return;
@@ -92,7 +95,10 @@ export function Composer({
           accessibilityLabel="Message composer"
           editable={!disabled}
           multiline
-          onChangeText={onChangeDraft}
+          onChangeText={text => { latestDraft.current = text; onChangeDraft(text); }}
+          onContentSizeChange={event => {
+            if (!expandedMode && latestDraft.current && event.nativeEvent.contentSize.height > 48) setWrappedDraft(latestDraft.current);
+          }}
           placeholder="Do anything…"
           placeholderTextColor={colors.textFaint}
           style={[styles.input, !expandedMode && styles.compactInput]}
@@ -133,7 +139,7 @@ const styles = StyleSheet.create({
   suggestionDetail: { color: colors.textMuted, flex: 1, fontSize: typography.caption },
   targetRow: { flexDirection: 'row', gap: spacing.xs, marginBottom: spacing.sm },
   targetChip: { borderColor: colors.border, borderRadius: radius.control, borderWidth: 1, color: colors.textMuted, fontSize: typography.small, overflow: 'hidden', paddingHorizontal: spacing.sm, paddingVertical: spacing.xs },
-  pill: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: colors.border, borderRadius: 26, borderWidth: 1, minHeight: 124 },
+  pill: { backgroundColor: colors.inputBg, borderColor: colors.border, borderRadius: 26, borderWidth: 1, minHeight: 124 },
   compactPill: { alignItems: 'center', flexDirection: 'row', minHeight: 49 },
   input: { color: colors.text, fontFamily: typography.family, fontSize: typography.body, lineHeight: 21, maxHeight: 260, minHeight: 76, paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: spacing.xs },
   compactInput: { flex: 1, maxHeight: 180, minHeight: 47, paddingTop: 10, paddingBottom: 10, paddingRight: spacing.sm },
