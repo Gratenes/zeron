@@ -4,9 +4,9 @@
 
 use std::path::Path;
 
-use serde_json::{Value, json};
 use kratos_engine::{Engine, EngineConfig, InstanceLock};
 use kratos_rpc::{RpcService, methods};
+use serde_json::{Value, json};
 
 /// Dispatch through the running engine, or take its exclusive lock for a
 /// standalone operation. Both paths use the exact same IPC authorization API.
@@ -25,9 +25,39 @@ async fn call(config: &EngineConfig, method: &str, params: Value) -> anyhow::Res
             let client = kratos_rpc::connect_ws(&format!("ws://127.0.0.1:{}", config.ipc_port))
                 .await
                 .map_err(|error| anyhow::anyhow!("{lock_error}; local IPC unavailable: {error}"))?;
+            let status = client.call(methods::PEER_STATUS, json!({})).await?;
+            verify_ipc_peer(&config.data_dir, config.ipc_port, &status)?;
             Ok(client.call(method, params).await?)
         }
     }
+}
+
+/// The lock only says *some* process owns this data directory. A default IPC
+/// port can belong to another installation, so verify the saved peer identity
+/// before sending commands that could issue invitations or change trust.
+fn verify_ipc_peer(data_dir: &Path, ipc_port: u16, status: &Value) -> anyhow::Result<()> {
+    let path = data_dir.join("peer-session.json");
+    let saved: Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::ensure!(
+                status.get("signedIn").and_then(Value::as_bool) == Some(false),
+                "IPC port {ipc_port} has a signed-in peer but this installation has no peer session; set KRATOS_IPC_PORT to this Kratos daemon's port"
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let identity_matches = ["profileId", "deviceId"].into_iter().all(|key| {
+        saved.get(key).and_then(Value::as_str).is_some_and(|value| {
+            !value.is_empty() && status.get(key).and_then(Value::as_str) == Some(value)
+        })
+    });
+    anyhow::ensure!(
+        identity_matches,
+        "IPC port {ipc_port} belongs to a different peer; set KRATOS_IPC_PORT to this Kratos daemon's port"
+    );
+    Ok(())
 }
 
 pub async fn initialize(
@@ -175,6 +205,29 @@ mod tests {
         assert!(read_invitation(Some(&file)).is_err());
         std::fs::write(&file, vec![b'x'; 64 * 1024 + 1]).unwrap();
         assert!(read_invitation(Some(&file)).is_err());
+    }
+
+    #[test]
+    fn rejects_ipc_for_a_different_saved_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("peer-session.json"),
+            r#"{"profileId":"kratos-profile","deviceId":"kratos-device"}"#,
+        )
+        .unwrap();
+        let error = verify_ipc_peer(
+            dir.path(),
+            27655,
+            &json!({"profileId":"zeron-profile","deviceId":"zeron-device"}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("KRATOS_IPC_PORT"));
+        verify_ipc_peer(
+            dir.path(),
+            27656,
+            &json!({"profileId":"kratos-profile","deviceId":"kratos-device"}),
+        )
+        .unwrap();
     }
 
     #[cfg(unix)]
