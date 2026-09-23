@@ -165,7 +165,7 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
   const dirty = !!file && file.text !== draft;
   const writable = !!file && fileContext === context && !selected?.readOnly && !file.readOnlyReason && !file.truncated &&
     !!file.contentHash && !!file.checkoutId && (file.encoding === 'utf8' || file.encoding === 'utf8Bom') &&
-    (file.lineEnding === 'lf' || file.lineEnding === 'crlf');
+    (file.lineEnding === 'lf' || file.lineEnding === 'crlf' || file.lineEnding === 'none');
   const closeFile = () => {
     if (dirty || saving) { setFileError('Save or discard your changes before leaving this file.'); return; }
     readGeneration.current++; setSelected(null); setFile(null); setFileError('');
@@ -190,7 +190,7 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
     setSaving(true); setFileError(''); setSaved(false);
     const pending = Promise.resolve().then(() => callRef.current('WriteWorkspaceFile', {
         ...target(), expectedCheckoutId: file.checkoutId, path: file.path, text: draft,
-        expectedContentHash: file.contentHash, encoding: file.encoding, lineEnding: file.lineEnding,
+        expectedContentHash: file.contentHash, encoding: file.encoding, lineEnding: file.lineEnding === 'none' ? 'lf' : file.lineEnding,
       })).then(value => {
       const result = record(value);
       if (result.status === 'conflict') return { status: 'conflict' } as SaveOutcome;

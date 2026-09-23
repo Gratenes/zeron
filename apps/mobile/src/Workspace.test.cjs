@@ -51,7 +51,7 @@ test('file drafts survive section and session navigation and keep their original
   const call = async (method, params) => {
     calls.push({ method, params });
     if (method === 'ListWorkspaceDirectory') return { directory: params.directory, entries: [entry] };
-    if (method === 'ReadWorkspaceFile') return { checkoutId: `checkout-${params.chatId}`, path: entry.path, text: 'original', contentHash: `hash-${params.chatId}`, encoding: 'utf8', lineEnding: 'lf', readOnlyReason: null, truncated: false };
+    if (method === 'ReadWorkspaceFile') return { checkoutId: `checkout-${params.chatId}`, path: entry.path, text: 'original', contentHash: `hash-${params.chatId}`, encoding: 'utf8', lineEnding: params.chatId === 'race' ? 'none' : 'lf', readOnlyReason: null, truncated: false };
     if (method === 'WriteWorkspaceFile' && params.chatId === 'race') {
       return ++raceWrites === 1
         ? new Promise(resolve => { completeRaceWrite = resolve; })
@@ -210,5 +210,6 @@ test('file drafts survive section and session navigation and keep their original
   find(reentered.tree, node => node.type === 'Pressable' && node.props.children?.props?.children === 'Save').props.onPress();
   await reentered.settle();
   assert.equal(calls.findLast(item => item.method === 'WriteWorkspaceFile').params.expectedContentHash, 'hash-after-A');
+  assert.equal(calls.findLast(item => item.method === 'WriteWorkspaceFile').params.lineEnding, 'lf');
   reentered.unmount();
 });
