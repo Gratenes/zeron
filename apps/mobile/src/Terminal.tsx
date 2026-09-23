@@ -65,6 +65,18 @@ function decodeChunk(bytes: Uint8Array, carry: Uint8Array): { text: string; carr
 
 // A line-oriented VT output view: handles shell prompts and line editing while
 // ignoring color and title sequences. Full-screen TUIs need a cell-grid renderer.
+function nextCharacter(text: string, index: number, end = text.length): number {
+  if (index >= end) return end;
+  return Math.min(end, index + ((text.codePointAt(index) ?? 0) > 0xffff ? 2 : 1));
+}
+
+function previousCharacter(text: string, index: number, start = 0): number {
+  if (index <= start) return start;
+  const last = text.charCodeAt(index - 1);
+  const before = text.charCodeAt(index - 2);
+  return last >= 0xdc00 && last <= 0xdfff && before >= 0xd800 && before <= 0xdbff && index - 2 >= start ? index - 2 : index - 1;
+}
+
 class Output {
   text = '';
   cursor = 0;
@@ -94,7 +106,7 @@ class Output {
       }
       if (char === '\x1b') { this.mode = 'escape'; continue; }
       if (char === '\r') { this.cursor = this.text.lastIndexOf('\n', this.cursor - 1) + 1; continue; }
-      if (char === '\b') { this.cursor = Math.max(this.text.lastIndexOf('\n', this.cursor - 1) + 1, this.cursor - 1); continue; }
+      if (char === '\b') { this.cursor = previousCharacter(this.text, this.cursor, this.text.lastIndexOf('\n', this.cursor - 1) + 1); continue; }
       if (char === '\n') {
         const end = this.text.indexOf('\n', this.cursor);
         this.cursor = end < 0 ? this.text.length : end;
@@ -104,11 +116,11 @@ class Output {
       }
       if (char < ' ') continue;
       const atEnd = this.cursor >= this.text.length || this.text[this.cursor] === '\n';
-      this.text = this.text.slice(0, this.cursor) + char + this.text.slice(this.cursor + (atEnd ? 0 : 1));
-      this.cursor++;
+      this.text = this.text.slice(0, this.cursor) + char + this.text.slice(atEnd ? this.cursor : nextCharacter(this.text, this.cursor));
+      this.cursor += char.length;
     }
     if (this.text.length > 80_000) {
-      const cut = this.text.length - 80_000;
+      const cut = nextCharacter(this.text, this.text.length - 80_001);
       this.text = this.text.slice(cut);
       this.cursor = Math.max(0, this.cursor - cut);
     }
@@ -125,9 +137,14 @@ class Output {
         this.text = this.text.slice(0, lineStart) + this.text.slice(end);
         this.cursor = lineStart;
       } else this.text = this.text.slice(0, this.cursor) + this.text.slice(end);
-    } else if (code === 'D') this.cursor = Math.max(lineStart, this.cursor - amount);
-    else if (code === 'C') this.cursor = Math.min(end, this.cursor + amount);
-    else if (code === 'G') this.cursor = Math.min(end, lineStart + amount - 1);
+    } else if (code === 'D') {
+      for (let i = 0; i < amount; i++) this.cursor = previousCharacter(this.text, this.cursor, lineStart);
+    } else if (code === 'C') {
+      for (let i = 0; i < amount; i++) this.cursor = nextCharacter(this.text, this.cursor, end);
+    } else if (code === 'G') {
+      this.cursor = lineStart;
+      for (let i = 1; i < amount; i++) this.cursor = nextCharacter(this.text, this.cursor, end);
+    }
   }
 }
 
