@@ -1,5 +1,5 @@
 import { memo, useCallback, useRef, useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
+import { FlatList, Linking, Pressable, StyleSheet, Text, View, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { colors, radius, spacing, typography } from './theme';
 import { Markdown } from './transcript/Markdown';
 
@@ -16,10 +16,22 @@ export type TranscriptItem = {
   status?: 'streaming' | 'complete' | 'error';
 };
 
-function Collapsible({ label, text, initiallyOpen = false }: { label: string; text: string; initiallyOpen?: boolean }) {
-  const [open, setOpen] = useState(initiallyOpen);
+type ArtifactPart = Extract<TranscriptPart, { type: 'artifact' }>;
+
+function ArtifactCard({ part, onOpen, attached = false }: { part: ArtifactPart; onOpen?: (artifact: ArtifactPart) => void; attached?: boolean }) {
+  const target = part.uri;
+  const press = onOpen ? () => onOpen(part) : target && /^https?:\/\//.test(target) ? () => void Linking.openURL(target) : undefined;
+  return <Pressable accessibilityRole={press ? 'link' : undefined} disabled={!press} onPress={press} style={attached ? styles.userArtifact : styles.artifact}>
+    <Text style={styles.artifactKind}>{part.kind ?? (attached ? 'Attachment' : 'Artifact')}</Text>
+    <Text style={styles.artifactTitle}>{part.title}</Text>
+  </Pressable>;
+}
+
+function Collapsible({ label, text, streaming = false }: { label: string; text: string; streaming?: boolean }) {
+  const [openOverride, setOpenOverride] = useState<boolean | null>(null);
+  const open = openOverride ?? streaming;
   return <View style={styles.detailGroup}>
-    <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={() => setOpen(!open)} style={styles.detailHeader}>
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={() => setOpenOverride(!open)} style={styles.detailHeader}>
       <Text style={styles.chevron}>{open ? '⌄' : '›'}</Text><Text style={styles.detailLabel}>{label}</Text>
     </Pressable>
     {open && <Text selectable style={styles.detailText}>{text}</Text>}
@@ -55,7 +67,7 @@ function ToolGroup({ parts, streaming }: { parts: Extract<TranscriptPart, { type
   </View>;
 }
 
-const MessageRow = memo(function MessageRow({ item }: { item: TranscriptItem }) {
+const MessageRow = memo(function MessageRow({ item, onOpenArtifact }: { item: TranscriptItem; onOpenArtifact?: (artifact: ArtifactPart) => void }) {
   const [expanded, setExpanded] = useState(false);
   if (item.role === 'user') {
     const text = item.parts.filter((part): part is Extract<TranscriptPart, { type: 'text' }> => part.type === 'text').map(part => part.text).join('\n');
@@ -67,7 +79,7 @@ const MessageRow = memo(function MessageRow({ item }: { item: TranscriptItem }) 
         {collapsible && <Pressable accessibilityRole="button" accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)}>
           <Text style={styles.expand}>{expanded ? 'Show less  ⌃' : 'Show more  ⌄'}</Text>
         </Pressable>}
-        {artifacts.map(part => <View key={part.id} style={styles.userArtifact}><Text style={styles.artifactKind}>{part.kind ?? 'Attachment'}</Text><Text style={styles.artifactTitle}>{part.title}</Text></View>)}
+        {artifacts.map(part => <ArtifactCard key={part.id} part={part} onOpen={onOpenArtifact} attached />)}
       </View>
     </View>;
   }
@@ -83,9 +95,9 @@ const MessageRow = memo(function MessageRow({ item }: { item: TranscriptItem }) 
     } else if (part.type === 'text') {
       elements.push(<Markdown key={i} source={part.text} />);
     } else if (part.type === 'reasoning') {
-      elements.push(<Collapsible key={i} label="Thinking" text={part.text} initiallyOpen={item.status === 'streaming'} />);
+      elements.push(<Collapsible key={i} label="Thinking" text={part.text} streaming={item.status === 'streaming'} />);
     } else {
-      elements.push(<View key={part.id} style={styles.artifact}><Text style={styles.artifactKind}>{part.kind ?? 'Artifact'}</Text><Text style={styles.artifactTitle}>{part.title}</Text></View>);
+      elements.push(<ArtifactCard key={part.id} part={part} onOpen={onOpenArtifact} />);
     }
   }
   return <View style={styles.assistantRow}>
@@ -96,7 +108,7 @@ const MessageRow = memo(function MessageRow({ item }: { item: TranscriptItem }) 
   </View>;
 });
 
-export function Transcript({ messages, isStreaming = false }: { messages: TranscriptItem[]; isStreaming?: boolean }) {
+export function Transcript({ messages, isStreaming = false, onOpenArtifact }: { messages: TranscriptItem[]; isStreaming?: boolean; onOpenArtifact?: (artifact: ArtifactPart) => void }) {
   const list = useRef<FlatList<TranscriptItem>>(null);
   const pinned = useRef(true);
   const [showEnd, setShowEnd] = useState(false);
@@ -119,7 +131,7 @@ export function Transcript({ messages, isStreaming = false }: { messages: Transc
       ref={list}
       data={messages}
       keyExtractor={item => item.id}
-      renderItem={({ item }) => <View style={styles.rowWidth}><MessageRow item={item} /></View>}
+      renderItem={({ item }) => <View style={styles.rowWidth}><MessageRow item={item} onOpenArtifact={onOpenArtifact} /></View>}
       onScroll={onScroll}
       onContentSizeChange={follow}
       scrollEventThrottle={32}
