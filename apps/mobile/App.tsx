@@ -7,7 +7,7 @@ import { Changes } from './src/Changes';
 import Shell, { type ShellSection } from './src/Shell';
 import { Spaces } from './src/Spaces';
 import { Terminal } from './src/Terminal';
-import { Transcript } from './src/Transcript';
+import { Transcript, type UserInputAnswer } from './src/Transcript';
 import { Workspace } from './src/Workspace';
 import { connect, restore, type Connection } from './src/connection';
 import { applyTranscriptUpdate, previews, renderEntries, spacePreviews, type Chat, type LiveSession, type Space, type TranscriptUpdate, type WireEntry } from './src/liveModel';
@@ -85,6 +85,7 @@ export default function App() {
   }, [connection, selectedId, selectedChat?.deviceId, selectedTargetDeviceId, syncEpoch]);
 
   const running = sessions.some(session => session.chatId === selectedId && session.status === 'working');
+  const awaitingInput = sessions.some(session => session.chatId === selectedId && session.status === 'awaitingInput');
   const sessionPreviews = useMemo(() => previews(chats, spaces, sessions), [chats, spaces, sessions]);
   const transcript = useMemo(() => renderEntries(entries), [entries]);
   const draftKey = selectedId ?? '__new__';
@@ -144,6 +145,18 @@ export default function App() {
 
   const runAction = (method: string, params: Record<string, unknown>) => {
     call(method, params).catch(e => setError(message(e)));
+  };
+
+  const respondInput = async (requestId: string, answers: UserInputAnswer[]) => {
+    if (!selectedId) throw new Error('No conversation is selected');
+    try {
+      await call('QueueCommand', {
+        chatId: selectedId,
+        targetDeviceId: selectedChat?.deviceId ?? selectedTargetDeviceId ?? connection?.hostDeviceId,
+        command: { kind: 'respondInput', requestId, answers },
+      });
+      setError('');
+    } catch (e) { setError(message(e)); throw e; }
   };
 
   const switchHost = async (deviceId: string) => {
@@ -216,13 +229,14 @@ export default function App() {
         <Pressable accessibilityRole="button" onPress={() => { setError(''); setSyncEpoch(epoch => epoch + 1); }}><Text style={styles.refresh}>Refresh</Text></Pressable>
       </View>
       <View style={styles.transcript}>
-        {selectedId ? <Transcript messages={transcript} isStreaming={running} /> : <View style={styles.empty}>
+        {selectedId ? <Transcript messages={transcript} isStreaming={running} onRespondInput={respondInput} /> : <View style={styles.empty}>
           <Text style={styles.emptyTitle}>What are we working on?</Text>
           <Text style={styles.muted}>Start a conversation with your connected Kratos device.</Text>
         </View>}
       </View>
       <Composer draft={draft} onChangeDraft={text => setDrafts(previous => ({ ...previous, [draftKey]: text }))}
-        onSubmit={submit} running={running} busy={busy} error={error}
+        onSubmit={submit} running={running} busy={busy} disabled={awaitingInput} error={error}
+        notice={awaitingInput ? 'Answer the agent’s question above to continue.' : undefined}
         target={selectedChat ? undefined : spaces.find(space => space.id === selectedSpaceId)?.name || 'Your device'} project={selectedChat?.cwd ?? undefined}
         model={selectedChat?.config?.model ?? selectedChat?.config?.harness ?? undefined}
         queue={queue} onInterrupt={selectedId ? () => runAction('QueueCommand', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId ?? selectedTargetDeviceId ?? connection.hostDeviceId, command: { kind: 'interrupt' } }) : undefined}
