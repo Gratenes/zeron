@@ -215,7 +215,7 @@ const styles = StyleSheet.create({
   content: { paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: 24 },
   rowWidth: { width: '100%', maxWidth: 736, alignSelf: 'center' },
   userRow: { width: '100%', alignItems: 'flex-end', marginBottom: spacing.lg, gap: spacing.sm },
-  userBubble: { maxWidth: '80%', backgroundColor: colors.surfaceRaised, borderRadius: radius.bubble, paddingHorizontal: spacing.lg, paddingVertical: 10 },
+  userBubble: { maxWidth: '80%', backgroundColor: 'rgba(235,235,235,0.08)', borderRadius: radius.bubble, paddingHorizontal: spacing.lg, paddingVertical: 10 },
   userText: { color: colors.text, fontSize: typography.body, lineHeight: 22 },
   expand: { color: colors.textMuted, fontSize: typography.small, paddingTop: spacing.sm },
   assistantRow: { width: '100%', gap: spacing.md, marginBottom: spacing.lg },
