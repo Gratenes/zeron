@@ -217,7 +217,8 @@ export class Connection {
           pending.onItem?.(reply.item);
         } else if (reply.done) {
           this.finish(reply.id);
-          if (!pending.onItem) pending.reject?.(new Error('Peer ended a unary call without a result'));
+          if (pending.onItem) pending.onError?.(new Error('Device stream ended'));
+          else pending.reject?.(new Error('Peer ended a unary call without a result'));
         } else if (Object.prototype.hasOwnProperty.call(reply, 'ok') && !pending.onItem) {
           this.finish(reply.id);
           pending.resolve?.(reply.ok);

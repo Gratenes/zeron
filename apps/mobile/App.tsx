@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, AppState, Pressable, SafeAreaView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Composer, type QueuedMessage } from './src/Composer';
 import { History } from './src/History';
@@ -12,6 +12,7 @@ import { Workspace } from './src/Workspace';
 import { connect, restore, type Connection } from './src/connection';
 import { applyTranscriptUpdate, previews, renderEntries, spacePreviews, type Chat, type LiveSession, type Space, type TranscriptUpdate, type WireEntry } from './src/liveModel';
 import { colors, radius, spacing, typography } from './src/theme';
+import { watchWithRetry } from './src/watch';
 
 export default function App() {
   const [connection, setConnection] = useState<Connection | null>(null);
@@ -26,6 +27,7 @@ export default function App() {
   const [selectedTargetDeviceId, setSelectedTargetDeviceId] = useState<string | null>(null);
   const [selectedSpaceId, setSelectedSpaceId] = useState<string | null>(null);
   const [entries, setEntries] = useState<WireEntry[]>([]);
+  const entriesRef = useRef<WireEntry[]>([]);
   const [queue, setQueue] = useState<QueuedMessage[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -51,37 +53,35 @@ export default function App() {
 
   useEffect(() => {
     if (!connection) return;
-    let cancelled = false;
-    const stops: (() => void)[] = [];
-    const watch = async (method: string, onItem: (item: unknown) => void) => {
-      try {
-        const stop = await connection.subscribe(method, {}, item => { if (!cancelled) onItem(item); }, e => { if (!cancelled) setError(message(e)); });
-        if (cancelled) stop(); else stops.push(stop);
-      } catch (e) { if (!cancelled) setError(message(e)); }
-    };
-    void watch('WatchChats', item => setChats(asArray<Chat>(item)));
-    void watch('WatchSpaces', item => setSpaces(asArray<Space>(item)));
-    void watch('WatchSessions', item => setSessions(asArray<LiveSession>(item)));
-    return () => { cancelled = true; stops.forEach(stop => stop()); };
+    const subscribe = connection.subscribe.bind(connection);
+    const fail = (e: Error) => setError(message(e));
+    const stops = [
+      watchWithRetry(subscribe, 'WatchChats', {}, item => setChats(asArray<Chat>(item)), fail),
+      watchWithRetry(subscribe, 'WatchSpaces', {}, item => setSpaces(asArray<Space>(item)), fail),
+      watchWithRetry(subscribe, 'WatchSessions', {}, item => setSessions(asArray<LiveSession>(item)), fail),
+    ];
+    return () => stops.forEach(stop => stop());
   }, [connection, syncEpoch]);
 
   useEffect(() => {
+    entriesRef.current = [];
     setEntries([]);
     setQueue([]);
     if (!connection || !selectedId) return;
-    let cancelled = false;
-    const stops: (() => void)[] = [];
-    const fail = (e: Error) => { if (!cancelled) setError(message(e)); };
+    const subscribe = connection.subscribe.bind(connection);
+    const fail = (e: Error) => setError(message(e));
     const targetDeviceId = selectedChat?.deviceId ?? selectedTargetDeviceId ?? connection.hostDeviceId;
-    connection.subscribe('WatchDocMessages', { chatId: selectedId, targetDeviceId }, item => {
-      if (cancelled) return;
-      try { setEntries(previous => applyTranscriptUpdate(previous, item as TranscriptUpdate)); }
-      catch (e) { fail(e as Error); }
-    }, fail).then(stop => { if (cancelled) stop(); else stops.push(stop); }).catch(fail);
-    connection.subscribe('WatchQueue', { chatId: selectedId, targetDeviceId }, item => {
-      if (!cancelled) setQueue(asArray<QueuedMessage>((item as { items?: unknown })?.items));
-    }, fail).then(stop => { if (cancelled) stop(); else stops.push(stop); }).catch(fail);
-    return () => { cancelled = true; stops.forEach(stop => stop()); };
+    const stops = [
+      watchWithRetry(subscribe, 'WatchDocMessages', { chatId: selectedId, targetDeviceId }, item => {
+        const next = applyTranscriptUpdate(entriesRef.current, item as TranscriptUpdate);
+        entriesRef.current = next;
+        setEntries(next);
+      }, fail),
+      watchWithRetry(subscribe, 'WatchQueue', { chatId: selectedId, targetDeviceId }, item => {
+        setQueue(asArray<QueuedMessage>((item as { items?: unknown })?.items));
+      }, fail),
+    ];
+    return () => stops.forEach(stop => stop());
   }, [connection, selectedId, selectedChat?.deviceId, selectedTargetDeviceId, syncEpoch]);
 
   const running = sessions.some(session => session.chatId === selectedId && session.status === 'working');
