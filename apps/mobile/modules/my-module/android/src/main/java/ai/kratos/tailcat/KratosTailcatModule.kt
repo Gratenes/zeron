@@ -30,7 +30,8 @@ class KratosTailcatModule : Module() {
       client = null
       val next = start(address, stateDirectory.absolutePath, invite.optString("derpMap"))
       try {
-        val session = JSONObject(next.pair(json, Build.MODEL.take(128)))
+        val deviceName = Build.MODEL.trim().filterNot { Character.isISOControl(it) }.take(32).ifEmpty { "Android" }
+        val session = JSONObject(next.pair(json, deviceName))
         val saved = JSONObject().put("address", address)
           .put("derpMap", invite.optString("derpMap"))
           .put("profileId", session.getJSONObject("principal").getString("profileId"))
