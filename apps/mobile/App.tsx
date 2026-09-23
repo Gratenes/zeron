@@ -1,6 +1,8 @@
 import { StatusBar } from 'expo-status-bar';
+import { useFonts } from 'expo-font';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Text } from './src/AppText';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { Composer, type QueuedMessage } from './src/Composer';
 import { History } from './src/History';
@@ -17,6 +19,11 @@ import { colors, radius, spacing, typography } from './src/theme';
 import { watchWithRetry } from './src/watch';
 
 export default function App() {
+  const [fontsLoaded, fontError] = useFonts({
+    Geist: require('./assets/fonts/Geist.ttf'),
+    GeistMono: require('./assets/fonts/GeistMono.ttf'),
+  });
+  if (!fontsLoaded && !fontError) return <View style={styles.app} />;
   return <SafeAreaProvider>
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={styles.app}>
       <AppContent />
@@ -275,7 +282,7 @@ const styles = StyleSheet.create({
   eyebrow: { color: colors.accent, fontSize: typography.caption, fontWeight: '700', letterSpacing: 2 },
   pairTitle: { color: colors.text, fontSize: typography.heading, fontWeight: '700', marginBottom: spacing.sm, marginTop: spacing.sm },
   muted: { color: colors.textMuted, fontSize: typography.body, lineHeight: 21, marginTop: spacing.sm },
-  pairInput: { borderColor: colors.borderStrong, borderRadius: radius.control, borderWidth: 1, color: colors.text, fontSize: typography.body, marginTop: spacing.lg, minHeight: 88, padding: spacing.md, textAlignVertical: 'top' },
+  pairInput: { borderColor: colors.borderStrong, borderRadius: radius.control, borderWidth: 1, color: colors.text, fontFamily: typography.family, fontSize: typography.body, marginTop: spacing.lg, minHeight: 88, padding: spacing.md, textAlignVertical: 'top' },
   primaryButton: { alignItems: 'center', backgroundColor: colors.solid, borderRadius: radius.control, marginTop: spacing.md, padding: spacing.md },
   primaryText: { color: colors.onSolid, fontSize: typography.body, fontWeight: '700' },
   disabled: { opacity: 0.45 },

@@ -29,10 +29,11 @@ export const colors = {
 export const spacing = { xs: 4, sm: 8, md: 12, lg: 16 } as const;
 export const radius = { control: 6, panel: 10, bubble: 16 } as const;
 export const typography = {
+  family: 'Geist',
   caption: 11,
   small: 12,
   body: 14,
   title: 18,
   heading: 24,
-  mono: 'monospace',
+  mono: 'GeistMono',
 } as const;
