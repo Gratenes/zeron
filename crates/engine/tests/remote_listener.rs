@@ -211,3 +211,28 @@ fn remote_access_resolve_reports_sources_and_conflicts() {
     assert!(status.error.is_some());
     let _ = stored;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_shell_loads_before_authentication_and_data_stays_gated() {
+    let mut listener = start().await;
+    let http = reqwest::Client::new();
+    let base = format!("http://{}", listener.address);
+
+    // The shell loads before authentication so a browser can boot the app;
+    // origin-carrying (browser) requests are expected on this bind.
+    let shell = http
+        .get(&base)
+        .header("origin", "http://127.0.0.1:5173")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(shell.status(), reqwest::StatusCode::OK);
+    assert_eq!(shell.headers()["content-type"], "text/html; charset=utf-8");
+    let body = shell.text().await.unwrap();
+    assert!(body.contains("Zeron"));
+
+    // The data plane stays credential-gated behind the shell routes.
+    let health = http.get(format!("{base}/health")).send().await.unwrap();
+    assert_eq!(health.status(), reqwest::StatusCode::UNAUTHORIZED);
+    listener.stop().await;
+}

@@ -11837,6 +11837,7 @@ dependencies = [
  "portable-pty",
  "reqwest",
  "rusqlite",
+ "rust-embed",
  "serde",
  "serde_json",
  "sha2",

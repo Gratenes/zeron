@@ -41,6 +41,7 @@ http-body-util.workspace = true
 bytes.workspace = true
 jsonwebtoken.workspace = true
 tokio-tungstenite.workspace = true
+rust-embed = "=8.7.2"
 
 tempfile.workspace = true
 
