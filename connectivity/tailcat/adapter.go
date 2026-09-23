@@ -42,9 +42,10 @@ type stateFile struct {
 // Client exposes a loopback HTTP-compatible endpoint connected to a Tailcat
 // server's fixed application port.
 type Client struct {
-	proxy *proxy
-	url   string
-	once  sync.Once
+	proxy    *proxy
+	url      string
+	stateDir string
+	once     sync.Once
 
 	mu        sync.Mutex
 	tc        *tailcat.Client
@@ -153,7 +154,7 @@ func startClient(address, listenAddress, statePath, derpMap string, redact bool)
 		_ = cl.Close()
 		return nil, errors.New("could not open loopback listener")
 	}
-	c := &Client{tc: cl, newTC: newTC, url: "http://" + ln.Addr().String()}
+	c := &Client{tc: cl, newTC: newTC, url: "http://" + ln.Addr().String(), stateDir: filepath.Dir(statePath)}
 	c.proxy = newProxy(ln, c.dial)
 	c.proxy.start()
 	return c, nil
