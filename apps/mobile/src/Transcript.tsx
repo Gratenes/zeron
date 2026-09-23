@@ -1,5 +1,5 @@
 import { memo, useCallback, useRef, useState } from 'react';
-import { FlatList, Linking, Pressable, StyleSheet, Text, View, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
+import { FlatList, Linking, Pressable, StyleSheet, Text, TextInput, View, type NativeScrollEvent, type NativeSyntheticEvent } from 'react-native';
 import { colors, radius, spacing, typography } from './theme';
 import { Markdown } from './transcript/Markdown';
 
@@ -7,7 +7,13 @@ export type TranscriptPart =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'tool'; id: string; name: string; input?: string; output?: string; status?: 'running' | 'complete' | 'error' }
+  | { type: 'input'; id: string; requestId: string; questions: UserInputQuestion[]; resolved: boolean }
+  | { type: 'error'; id: string; message: string }
   | { type: 'artifact'; id: string; title: string; kind?: string; uri?: string };
+
+export type UserInputQuestion = { id: string; header: string; question: string; options: string[]; multiSelect?: boolean };
+export type UserInputAnswer = { questionId: string; labels: string[] };
+export type RespondInput = (requestId: string, answers: UserInputAnswer[]) => void | Promise<void>;
 
 export type TranscriptItem = {
   id: string;
@@ -17,6 +23,7 @@ export type TranscriptItem = {
 };
 
 type ArtifactPart = Extract<TranscriptPart, { type: 'artifact' }>;
+type InputPart = Extract<TranscriptPart, { type: 'input' }>;
 
 function ArtifactCard({ part, onOpen, attached = false }: { part: ArtifactPart; onOpen?: (artifact: ArtifactPart) => void; attached?: boolean }) {
   const target = part.uri;
@@ -67,7 +74,61 @@ function ToolGroup({ parts, streaming }: { parts: Extract<TranscriptPart, { type
   </View>;
 }
 
-const MessageRow = memo(function MessageRow({ item, onOpenArtifact }: { item: TranscriptItem; onOpenArtifact?: (artifact: ArtifactPart) => void }) {
+function QuestionPart({ part, onRespondInput }: { part: InputPart; onRespondInput?: RespondInput }) {
+  const [picked, setPicked] = useState<Record<string, string[]>>({});
+  const [typed, setTyped] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const answers = part.questions.map(question => ({
+    questionId: question.id,
+    labels: typed[question.id]?.trim() ? [typed[question.id].trim()] : picked[question.id] ?? [],
+  }));
+  const canSubmit = !!onRespondInput && !part.resolved && !submitting && answers.length > 0 && answers.every(answer => answer.labels.length > 0);
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      await onRespondInput(part.requestId, answers);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not submit answer');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return <View style={styles.questionCard}>
+    {part.questions.length === 0 && <Text style={styles.questionStatus}>Question details unavailable</Text>}
+    {part.questions.map(question => <View key={question.id} style={styles.questionGroup}>
+      <Text style={styles.questionHeader}>{question.header}</Text>
+      <Text style={styles.questionText}>{question.question}</Text>
+      {question.options.map(option => {
+        const selected = !typed[question.id]?.trim() && picked[question.id]?.includes(option);
+        return <Pressable key={option} accessibilityRole={question.multiSelect ? 'checkbox' : 'radio'} accessibilityState={{ checked: !!selected, disabled: part.resolved || !onRespondInput }}
+          disabled={part.resolved || !onRespondInput} onPress={() => {
+            setTyped(current => ({ ...current, [question.id]: '' }));
+            setPicked(current => ({ ...current, [question.id]: question.multiSelect
+              ? current[question.id]?.includes(option) ? current[question.id].filter(label => label !== option) : [...(current[question.id] ?? []), option]
+              : [option] }));
+          }} style={[styles.questionOption, selected && styles.questionOptionSelected]}>
+          <Text style={styles.questionOptionText}>{selected ? '●  ' : '○  '}{option}</Text>
+        </Pressable>;
+      })}
+      {!part.resolved && !!onRespondInput && <TextInput accessibilityLabel={`Other answer for ${question.header || question.question}`}
+        placeholder="Or type your answer" placeholderTextColor={colors.textFaint} value={typed[question.id] ?? ''}
+        onChangeText={value => setTyped(current => ({ ...current, [question.id]: value }))} style={styles.questionInput} />}
+    </View>)}
+    {part.resolved ? <Text style={styles.questionStatus}>Answered</Text> : onRespondInput ? <>
+      {!!error && <Text accessibilityRole="alert" style={styles.error}>{error}</Text>}
+      <Pressable accessibilityRole="button" accessibilityState={{ disabled: !canSubmit }} disabled={!canSubmit} onPress={submit} style={[styles.questionSubmit, !canSubmit && styles.questionSubmitDisabled]}>
+        <Text style={styles.questionSubmitText}>{submitting ? 'Submitting…' : 'Submit answer'}</Text>
+      </Pressable>
+    </> : <Text style={styles.questionStatus}>Waiting for current question</Text>}
+  </View>;
+}
+
+const MessageRow = memo(function MessageRow({ item, onOpenArtifact, onRespondInput, activeRequestId }: { item: TranscriptItem; onOpenArtifact?: (artifact: ArtifactPart) => void; onRespondInput?: RespondInput; activeRequestId?: string }) {
   const [expanded, setExpanded] = useState(false);
   if (item.role === 'user') {
     const text = item.parts.filter((part): part is Extract<TranscriptPart, { type: 'text' }> => part.type === 'text').map(part => part.text).join('\n');
@@ -96,6 +157,10 @@ const MessageRow = memo(function MessageRow({ item, onOpenArtifact }: { item: Tr
       elements.push(<Markdown key={i} source={part.text} />);
     } else if (part.type === 'reasoning') {
       elements.push(<Collapsible key={i} label="Thinking" text={part.text} streaming={item.status === 'streaming'} />);
+    } else if (part.type === 'input') {
+      elements.push(<QuestionPart key={part.id} part={part} onRespondInput={part.requestId === activeRequestId ? onRespondInput : undefined} />);
+    } else if (part.type === 'error') {
+      elements.push(<Text key={part.id} selectable style={styles.error}>{part.message}</Text>);
     } else {
       elements.push(<ArtifactCard key={part.id} part={part} onOpen={onOpenArtifact} />);
     }
@@ -103,15 +168,16 @@ const MessageRow = memo(function MessageRow({ item, onOpenArtifact }: { item: Tr
   return <View style={styles.assistantRow}>
     {item.role === 'system' && <Text style={styles.systemLabel}>SYSTEM</Text>}
     {elements}
-    {item.status === 'error' && <Text style={styles.error}>Response failed</Text>}
+    {item.status === 'error' && !item.parts.some(part => part.type === 'error') && <Text style={styles.error}>Response failed</Text>}
     {item.status === 'streaming' && <Text accessibilityLiveRegion="polite" style={styles.streaming}>●  Working</Text>}
   </View>;
 });
 
-export function Transcript({ messages, isStreaming = false, onOpenArtifact }: { messages: TranscriptItem[]; isStreaming?: boolean; onOpenArtifact?: (artifact: ArtifactPart) => void }) {
+export function Transcript({ messages, isStreaming = false, onOpenArtifact, onRespondInput }: { messages: TranscriptItem[]; isStreaming?: boolean; onOpenArtifact?: (artifact: ArtifactPart) => void; onRespondInput?: RespondInput }) {
   const list = useRef<FlatList<TranscriptItem>>(null);
   const pinned = useRef(true);
   const [showEnd, setShowEnd] = useState(false);
+  const activeRequestId = messages.flatMap(message => message.parts).filter((part): part is InputPart => part.type === 'input' && !part.resolved && part.questions.length > 0).at(-1)?.requestId;
   const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const distance = contentSize.height - layoutMeasurement.height - contentOffset.y;
@@ -131,7 +197,7 @@ export function Transcript({ messages, isStreaming = false, onOpenArtifact }: { 
       ref={list}
       data={messages}
       keyExtractor={item => item.id}
-      renderItem={({ item }) => <View style={styles.rowWidth}><MessageRow item={item} onOpenArtifact={onOpenArtifact} /></View>}
+      renderItem={({ item }) => <View style={styles.rowWidth}><MessageRow item={item} onOpenArtifact={onOpenArtifact} onRespondInput={onRespondInput} activeRequestId={activeRequestId} /></View>}
       onScroll={onScroll}
       onContentSizeChange={follow}
       scrollEventThrottle={32}
@@ -156,6 +222,18 @@ const styles = StyleSheet.create({
   systemLabel: { color: colors.textFaint, fontSize: typography.caption, letterSpacing: 1 },
   streaming: { color: colors.textMuted, fontSize: typography.small, marginTop: spacing.sm },
   error: { color: colors.danger, fontSize: typography.small },
+  questionCard: { backgroundColor: colors.surfaceCard, borderWidth: 1, borderColor: colors.border, borderRadius: radius.panel, padding: spacing.lg, gap: spacing.md },
+  questionGroup: { gap: spacing.sm },
+  questionHeader: { color: colors.textFaint, fontSize: typography.caption, textTransform: 'uppercase' },
+  questionText: { color: colors.text, fontSize: typography.body },
+  questionOption: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.control, padding: spacing.md },
+  questionOptionSelected: { backgroundColor: colors.selected, borderColor: colors.borderStrong },
+  questionOptionText: { color: colors.text, fontSize: typography.body },
+  questionInput: { color: colors.text, backgroundColor: colors.inputBg, borderWidth: 1, borderColor: colors.border, borderRadius: radius.control, padding: spacing.md, fontSize: typography.body },
+  questionSubmit: { alignSelf: 'flex-start', backgroundColor: colors.solid, borderRadius: radius.control, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm },
+  questionSubmitDisabled: { opacity: 0.4 },
+  questionSubmitText: { color: colors.onSolid, fontSize: typography.body },
+  questionStatus: { color: colors.textMuted, fontSize: typography.small },
   activity: { gap: 1 },
   activityHeader: { flexDirection: 'row', alignItems: 'center', minHeight: 28, gap: spacing.sm },
   activitySummary: { color: colors.textMuted, fontSize: typography.small },

@@ -1,5 +1,5 @@
 import type { SessionPreview, SpacePreview } from './Shell';
-import type { TranscriptItem, TranscriptPart } from './Transcript';
+import type { TranscriptItem, TranscriptPart, UserInputQuestion } from './Transcript';
 
 export type Chat = {
   id: string;
@@ -27,6 +27,9 @@ type WirePart = {
   output?: string;
   isError?: boolean;
   resolved?: boolean;
+  requestId?: string;
+  questions?: UserInputQuestion[];
+  message?: string;
   uri?: string;
   title?: string;
 };
@@ -82,7 +85,9 @@ export function renderEntries(entries: WireEntry[]): TranscriptItem[] {
           input: typeof call.command === 'string' ? call.command : typeof call.path === 'string' ? call.path : undefined,
           output: part.output, status: part.isError ? 'error' : part.resolved ? 'complete' : 'running' }];
       }
-      if (part.kind === 'error') return [{ type: 'text', text: part.text ?? '' }];
+      if (part.kind === 'input') return [{ type: 'input', id: part.id, requestId: part.requestId ?? part.id,
+        questions: part.questions ?? [], resolved: part.resolved ?? false }];
+      if (part.kind === 'error') return [{ type: 'error', id: part.id, message: part.message ?? '' }];
       if (part.kind === 'artifact') return [{ type: 'artifact', id: part.id, title: part.title ?? 'Artifact', uri: part.uri }];
       return [];
     }),
