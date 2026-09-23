@@ -45,11 +45,18 @@ test('file drafts survive section and session navigation and keep their original
   });
 
   const calls = [];
+  let completeRaceWrite;
+  let raceWrites = 0;
   const entry = { path: 'note.txt', name: 'note.txt', kind: 'file', ignored: false, readOnly: false };
   const call = async (method, params) => {
     calls.push({ method, params });
     if (method === 'ListWorkspaceDirectory') return { directory: params.directory, entries: [entry] };
     if (method === 'ReadWorkspaceFile') return { checkoutId: `checkout-${params.chatId}`, path: entry.path, text: 'original', contentHash: `hash-${params.chatId}`, encoding: 'utf8', lineEnding: 'lf', readOnlyReason: null, truncated: false };
+    if (method === 'WriteWorkspaceFile' && params.chatId === 'race') {
+      return ++raceWrites === 1
+        ? new Promise(resolve => { completeRaceWrite = resolve; })
+        : { status: 'written', file: { contentHash: 'hash-after-B' } };
+    }
     if (method === 'WriteWorkspaceFile') return { status: 'conflict' };
     throw new Error(method);
   };
@@ -180,5 +187,28 @@ test('file drafts survive section and session navigation and keep their original
   live.switchChat('fresh');
   await live.settle();
   assert.equal(editor(live).props.value, 'fresh draft');
+  find(live.tree, node => node.type === 'Pressable' && node.props.children?.props?.children === 'Discard changes').props.onPress();
   live.unmount();
+
+  const saving = mount('race');
+  await open(saving);
+  editor(saving).props.onChangeText('A');
+  find(saving.tree, node => node.type === 'Pressable' && node.props.children?.props?.children === 'Save').props.onPress();
+  await saving.settle();
+  saving.unmount();
+
+  const reentered = mount('race');
+  await reentered.settle();
+  assert.equal(editor(reentered).props.value, 'A');
+  assert.equal(editor(reentered).props.editable, false);
+  editor(reentered).props.onChangeText('B before response');
+  assert.equal(editor(reentered).props.value, 'A');
+  completeRaceWrite({ status: 'written', file: { contentHash: 'hash-after-A' } });
+  await reentered.settle();
+  assert.equal(editor(reentered).props.editable, true);
+  editor(reentered).props.onChangeText('B');
+  find(reentered.tree, node => node.type === 'Pressable' && node.props.children?.props?.children === 'Save').props.onPress();
+  await reentered.settle();
+  assert.equal(calls.findLast(item => item.method === 'WriteWorkspaceFile').params.expectedContentHash, 'hash-after-A');
+  reentered.unmount();
 });

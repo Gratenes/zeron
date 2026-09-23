@@ -59,7 +59,9 @@ function parentOf(path: string): string { return path.includes('/') ? path.slice
 function fileSize(bytes?: number): string { return bytes == null ? '' : bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`; }
 
 type UnsavedDraft = { selected: Entry; file: FileText; text: string };
+type SaveOutcome = { status: 'written'; file: FileText } | { status: 'conflict' } | { status: 'error'; message: string };
 const unsavedDrafts = new Map<string, UnsavedDraft>();
+const pendingSaves = new Map<string, Promise<SaveOutcome>>();
 const MAX_UNSAVED_DRAFTS = 12;
 const MAX_UNSAVED_DRAFT_BYTES = 48 * 1024 * 1024;
 
@@ -77,8 +79,11 @@ function retainDraft(context: string, value: UnsavedDraft): boolean {
 export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps) {
   const context = `${chatId}\0${targetDeviceId ?? ''}\0${cwd ?? ''}`;
   const restored = unsavedDrafts.get(context);
+  const pendingSave = pendingSaves.get(context);
   const callRef = useRef(call);
   callRef.current = call;
+  const currentContext = useRef(context);
+  currentContext.current = context;
   const generation = useRef(0);
   const readGeneration = useRef(0);
   const saveGeneration = useRef(0);
@@ -95,7 +100,7 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
   const [draft, setDraft] = useState(restored?.text ?? '');
   const [fileError, setFileError] = useState(restored ? 'Unsaved draft restored. Saving will check whether the file changed.' : '');
   const [reading, setReading] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving] = useState(!!pendingSave);
   const [saved, setSaved] = useState(false);
 
   const target = useCallback(() => ({ chatId, ...(targetDeviceId ? { targetDeviceId } : {}) }), [chatId, targetDeviceId]);
@@ -123,7 +128,7 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
     saveGeneration.current++;
     const cached = unsavedDrafts.get(context);
     setReading(false);
-    setSaving(false);
+    setSaving(!!pendingSave);
     setSaved(false);
     setDirectory('');
     setSelected(cached?.selected ?? null);
@@ -165,37 +170,55 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
     if (dirty || saving) { setFileError('Save or discard your changes before leaving this file.'); return; }
     readGeneration.current++; setSelected(null); setFile(null); setFileError('');
   };
+  const finishSave = (outcome: SaveOutcome) => {
+    if (currentContext.current !== context) return;
+    if (outcome.status === 'written') {
+      const cached = unsavedDrafts.get(context);
+      setFile(cached?.file ?? outcome.file);
+      setDraft(cached?.text ?? outcome.file.text ?? '');
+      setSaved(!cached);
+    } else {
+      setFileError(outcome.status === 'conflict'
+        ? 'This file changed on the device. Your draft is preserved. Discard and reopen to see the latest version.'
+        : outcome.message);
+    }
+    setSaving(false);
+  };
   const save = async () => {
-    if (!file || !selected || !writable || !dirty || saving) return;
+    if (!file || !selected || !writable || !dirty || saving || pendingSaves.has(context)) return;
     const current = ++saveGeneration.current;
     setSaving(true); setFileError(''); setSaved(false);
-    try {
-      const result = record(await callRef.current('WriteWorkspaceFile', {
+    const pending = Promise.resolve().then(() => callRef.current('WriteWorkspaceFile', {
         ...target(), expectedCheckoutId: file.checkoutId, path: file.path, text: draft,
         expectedContentHash: file.contentHash, encoding: file.encoding, lineEnding: file.lineEnding,
-      }));
-      if (result.status === 'conflict') {
-        if (current === saveGeneration.current) setFileError('This file changed on the device. Your draft is preserved. Discard and reopen to see the latest version.');
-      } else if (result.status === 'written') {
+      })).then(value => {
+      const result = record(value);
+      if (result.status === 'conflict') return { status: 'conflict' } as SaveOutcome;
+      if (result.status === 'written') {
         const written = record(result.file);
         if (typeof written.contentHash !== 'string') throw new Error('Invalid save response');
-        const cached = unsavedDrafts.get(fileContext ?? context);
+        const savedFile = { ...file, text: draft, contentHash: written.contentHash };
+        const cached = unsavedDrafts.get(context);
         if (cached?.file.path === file.path && cached.file.contentHash === file.contentHash && cached.text === draft) {
-          unsavedDrafts.delete(fileContext ?? context);
+          unsavedDrafts.delete(context);
+        } else if (cached?.file.path === file.path && cached.file.contentHash === file.contentHash) {
+          unsavedDrafts.set(context, { ...cached, file: savedFile });
         }
-        if (current === saveGeneration.current) {
-          setFile({ ...file, text: draft, contentHash: written.contentHash });
-          setSaved(true);
-        }
-      } else {
-        throw new Error('Invalid save response');
+        return { status: 'written', file: savedFile } as SaveOutcome;
       }
-    } catch (cause) {
-      if (current === saveGeneration.current) setFileError(errorText(cause));
-    } finally {
-      if (current === saveGeneration.current) setSaving(false);
-    }
+      throw new Error('Invalid save response');
+    }).catch(cause => ({ status: 'error', message: errorText(cause) } as SaveOutcome));
+    pendingSaves.set(context, pending);
+    const outcome = await pending;
+    if (pendingSaves.get(context) === pending) pendingSaves.delete(context);
+    if (current === saveGeneration.current) finishSave(outcome);
   };
+  useEffect(() => {
+    if (!pendingSave) return;
+    let active = true;
+    void pendingSave.then(outcome => { if (active) finishSave(outcome); });
+    return () => { active = false; };
+  }, [context, pendingSave]);
 
   if (!chatId || !cwd) return <View style={styles.center}><Text style={styles.muted}>No workspace is available for this chat.</Text></View>;
 
@@ -215,6 +238,7 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
           multiline
           editable={writable && !saving}
           onChangeText={text => {
+            if (saving || pendingSaves.has(context)) return;
             if (text === file.text) unsavedDrafts.delete(context);
             else if (!retainDraft(context, { selected, file, text })) {
               setFileError('Unsaved draft memory is full. Save or discard another draft before editing.');
