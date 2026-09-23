@@ -11,7 +11,7 @@ type FileText = {
   readOnlyReason: string | null; truncated: boolean;
 };
 type WorkspaceProps = {
-  call: (method: string, params: object) => Promise<unknown>;
+  call: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   chatId: string;
   targetDeviceId?: string | null;
   cwd?: string | null;
