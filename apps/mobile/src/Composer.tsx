@@ -86,10 +86,6 @@ export function Composer({
           {!!item.detail && <Text numberOfLines={1} style={styles.suggestionDetail}>{item.detail}</Text>}
         </Pressable>)}
       </View>}
-      {!!(target || project) && <View style={styles.targetRow}>
-        {!!target && <Text style={styles.targetChip}>{target}</Text>}
-        {!!project && <Text style={styles.targetChip}>{project}</Text>}
-      </View>}
       <View style={[styles.pill, !expandedMode && styles.compactPill]}>
         <TextInput
           accessibilityLabel="Message composer"
@@ -107,6 +103,8 @@ export function Composer({
         />
         <View style={[styles.actions, !expandedMode && styles.compactActions]}>
           <View style={styles.actionGroup}>
+            {!!target && <Text numberOfLines={1} style={styles.targetChip}>{target}</Text>}
+            {!!project && <Text numberOfLines={1} style={styles.targetChip}>{project}</Text>}
             {!!model && <Text numberOfLines={1} style={styles.model}>{model}</Text>}
             {!!onAttach && <Action label="Attach" onPress={onAttach} />}
           </View>
@@ -137,15 +135,14 @@ const styles = StyleSheet.create({
   suggestion: { alignItems: 'center', flexDirection: 'row', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
   suggestionLabel: { color: colors.text, fontSize: typography.small },
   suggestionDetail: { color: colors.textMuted, flex: 1, fontSize: typography.caption },
-  targetRow: { flexDirection: 'row', gap: spacing.xs, marginBottom: spacing.sm },
-  targetChip: { borderColor: colors.border, borderRadius: radius.control, borderWidth: 1, color: colors.textMuted, fontSize: typography.small, overflow: 'hidden', paddingHorizontal: spacing.sm, paddingVertical: spacing.xs },
+  targetChip: { borderColor: colors.border, borderRadius: radius.control, borderWidth: 1, color: colors.textMuted, fontSize: typography.small, maxWidth: 140, overflow: 'hidden', paddingHorizontal: spacing.sm, paddingVertical: spacing.xs },
   pill: { backgroundColor: colors.inputBg, borderColor: colors.border, borderRadius: 26, borderWidth: 1, minHeight: 124 },
   compactPill: { alignItems: 'center', flexDirection: 'row', minHeight: 49 },
   input: { color: colors.text, fontFamily: typography.family, fontSize: typography.body, lineHeight: 21, maxHeight: 260, minHeight: 76, paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: spacing.xs },
   compactInput: { flex: 1, maxHeight: 180, minHeight: 47, paddingTop: 10, paddingBottom: 10, paddingRight: spacing.sm },
   actions: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', minHeight: 46, paddingTop: spacing.xs, paddingBottom: 10, paddingHorizontal: spacing.md },
   compactActions: { gap: spacing.sm, minHeight: 47, paddingTop: 0, paddingBottom: 0, paddingLeft: spacing.xs, paddingRight: spacing.sm },
-  actionGroup: { alignItems: 'center', flexDirection: 'row', gap: spacing.xs },
+  actionGroup: { alignItems: 'center', flex: 1, flexDirection: 'row', gap: spacing.xs, justifyContent: 'flex-end', minWidth: 0 },
   model: { color: colors.textMuted, fontSize: typography.small, maxWidth: 120, paddingHorizontal: spacing.sm },
   action: { alignItems: 'center', borderRadius: radius.control, justifyContent: 'center', minHeight: 34, minWidth: 52, paddingHorizontal: spacing.sm },
   prominent: { backgroundColor: colors.solid, borderRadius: 14, height: 28, minHeight: 28, minWidth: 28, width: 28, paddingHorizontal: 0 },
