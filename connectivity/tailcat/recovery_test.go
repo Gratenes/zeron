@@ -23,6 +23,10 @@ func TestLiveClientRecoversAfterServerRestart(t *testing.T) {
 	var mu sync.Mutex
 	received := make(map[string]int)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Local HEAD / health probes are not part of the test's POST traffic.
+		if r.Method == http.MethodHead && r.URL.Path == "/" {
+			return
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "body", 400)
