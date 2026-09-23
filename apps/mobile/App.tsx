@@ -137,7 +137,7 @@ export default function App() {
       else await call('QueueCommand', { chatId, targetDeviceId, command: { kind: 'run', messageId: newId(), request: {
         prompt: text, harness: chat?.config?.harness ?? null, model: chat?.config?.model ?? null,
         reasoning: chat?.config?.reasoning ?? null, modelOptions: chat?.config?.modelOptions ?? {},
-          cwd: chat?.cwd ?? newSpace?.path ?? '', sandbox: chat?.config?.sandbox ?? 'workspace-write', autoApprove: false,
+          cwd: chat?.cwd ?? newSpace?.path ?? '~', sandbox: chat?.config?.sandbox ?? 'workspace-write', autoApprove: false,
         resume: null, attachments: [],
       } } });
       setDrafts(previous => clearDeliveredDraft(previous, draftKey, chatId!, submittedDraft));
