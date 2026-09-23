@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   Pressable,
   SafeAreaView,
@@ -37,8 +37,10 @@ type Props = {
   onOpenSettings: () => void;
   children: ReactNode;
   spaces?: SpacePreview[];
+  selectedSpaceId?: string | null;
   onOpenSection?: (section: ShellSection) => void;
   onSelectSpace?: (spaceId: string | null) => void;
+  onAddSpace?: () => void;
   availableSections?: ShellSection[];
 };
 
@@ -74,8 +76,10 @@ export function Shell({
   onOpenSettings,
   children,
   spaces,
+  selectedSpaceId,
   onOpenSection,
   onSelectSpace,
+  onAddSpace,
   availableSections = ['history', 'files', 'terminal', 'changes', 'browser'],
 }: Props) {
   const { width } = useWindowDimensions();
@@ -84,6 +88,7 @@ export function Shell({
   const [spacesOpen, setSpacesOpen] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [spaceId, setSpaceId] = useState<string | null>(null);
+  useEffect(() => { if (selectedSpaceId !== undefined) setSpaceId(selectedSpaceId); }, [selectedSpaceId]);
   const [query, setQuery] = useState('');
   const availableSpaces = spaces ?? Array.from(
     new Map(sessions.filter(session => session.spaceId).map(session => [
@@ -170,6 +175,9 @@ export function Shell({
                 {!!space.deviceName && <Text numberOfLines={1} style={styles.spaceDevice}>@ {space.deviceName}</Text>}
               </Pressable>
             ))}
+            {!!onAddSpace && <Pressable accessibilityRole="button" onPress={() => { onAddSpace(); setSpacesOpen(false); setDrawerOpen(false); }} style={styles.spaceOption}>
+              <Text style={styles.spaceOptionText}>＋ Add project</Text>
+            </Pressable>}
           </View>
         )}
 

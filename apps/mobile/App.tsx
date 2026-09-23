@@ -1,8 +1,11 @@
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, AppState, Pressable, SafeAreaView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Composer, type QueuedMessage } from './src/Composer';
+import { History } from './src/History';
+import { Changes } from './src/Changes';
 import Shell, { type ShellSection } from './src/Shell';
+import { Spaces } from './src/Spaces';
 import { Terminal } from './src/Terminal';
 import { Transcript } from './src/Transcript';
 import { Workspace } from './src/Workspace';
@@ -26,7 +29,7 @@ export default function App() {
   const [queue, setQueue] = useState<QueuedMessage[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
-  const [section, setSection] = useState<ShellSection | 'chat' | 'settings'>('chat');
+  const [section, setSection] = useState<ShellSection | 'chat' | 'settings' | 'spaces'>('chat');
   const [syncEpoch, setSyncEpoch] = useState(0);
   const selectedChat = chats.find(chat => chat.id === selectedId);
 
@@ -37,6 +40,14 @@ export default function App() {
       .finally(() => { if (alive) setStarting(false); });
     return () => { alive = false; };
   }, []);
+
+  useEffect(() => {
+    if (!connection) return;
+    const listener = AppState.addEventListener('change', state => {
+      if (state === 'active') setSyncEpoch(epoch => epoch + 1);
+    });
+    return () => listener.remove();
+  }, [connection]);
 
   useEffect(() => {
     if (!connection) return;
@@ -135,6 +146,28 @@ export default function App() {
     call(method, params).catch(e => setError(message(e)));
   };
 
+  const switchHost = async (deviceId: string) => {
+    if (!connection || connection.hostDeviceId === deviceId) return;
+    const previous = connection.hostDeviceId;
+    try {
+      connection.selectHostDevice(deviceId);
+      await connection.call('EngineInfo', {});
+      setSelectedId(undefined);
+      setSelectedTargetDeviceId(null);
+      setSelectedSpaceId(null);
+      setChats([]);
+      setSpaces([]);
+      setSessions([]);
+      setSection('chat');
+      setError('');
+      setSyncEpoch(epoch => epoch + 1);
+    } catch (e) {
+      if (previous) connection.selectHostDevice(previous);
+      setError(message(e));
+      setSyncEpoch(epoch => epoch + 1);
+    }
+  };
+
   if (starting) return <SafeAreaView style={styles.center}><StatusBar style="light" /><ActivityIndicator color={colors.accent} /><Text style={styles.muted}>Connecting to Kratos…</Text></SafeAreaView>;
   if (!connection) return <SafeAreaView style={styles.pairScreen}>
     <StatusBar style="light" />
@@ -154,16 +187,26 @@ export default function App() {
     </View>
   </SafeAreaView>;
 
-  return <Shell sessions={sessionPreviews} spaces={spacePreviews(spaces)} selectedId={selectedId}
-    onSelectSpace={setSelectedSpaceId} availableSections={['files', 'terminal']}
+  return <Shell sessions={sessionPreviews} spaces={spacePreviews(spaces)} selectedId={selectedId} selectedSpaceId={selectedSpaceId}
+    onSelectSpace={setSelectedSpaceId} onAddSpace={() => setSection('spaces')} availableSections={['history', 'files', 'terminal', 'changes']}
     onSelectSession={id => { setSelectedTargetDeviceId(chats.find(chat => chat.id === id)?.deviceId ?? null); setSelectedId(id); setSection('chat'); setError(''); }}
     onNewSession={() => { setSelectedTargetDeviceId(null); setSelectedId(undefined); setSection('chat'); setError(''); }}
     onOpenSettings={() => setSection('settings')} onOpenSection={setSection}>
     <StatusBar style="light" />
-    {section === 'settings' ? <View style={styles.panel}>
+    {section === 'spaces' && connection.hostDeviceId ? <Spaces call={(method, params) => connection.call(method, params)}
+      hostDeviceId={connection.hostDeviceId} existingSpaces={spaces}
+      onCreated={spaceId => { setSelectedSpaceId(spaceId); setSelectedId(undefined); setSection('chat'); }}
+      onClose={() => setSection('chat')} /> : section === 'settings' ? <View style={styles.panel}>
       <Text style={styles.heading}>Settings</Text>
       <Text style={styles.muted}>Connected device · {connection.hostDeviceId}</Text>
       <Text style={styles.muted}>Profile · {connection.profileId}</Text>
+      <Text style={styles.subheading}>Host engines</Text>
+      {connection.engines.map(engine => <Pressable key={engine.deviceId} accessibilityRole="button"
+        accessibilityState={{ selected: connection.hostDeviceId === engine.deviceId }} onPress={() => void switchHost(engine.deviceId)} style={styles.engineRow}>
+        <Text style={styles.engineText}>{engine.displayName || engine.deviceId}</Text>
+        {connection.hostDeviceId === engine.deviceId && <Text style={styles.active}>Connected</Text>}
+      </Pressable>)}
+      {!!error && <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text>}
       <Pressable accessibilityRole="button" onPress={() => { connection.disconnect(); setConnection(null); setChats([]); setSpaces([]); setSessions([]); setSelectedId(undefined); }} style={styles.outlineButton}>
         <Text style={styles.outlineText}>Disconnect device</Text>
       </Pressable>
@@ -182,10 +225,15 @@ export default function App() {
         onSubmit={submit} running={running} busy={busy} error={error}
         target={selectedChat ? undefined : spaces.find(space => space.id === selectedSpaceId)?.name || 'Your device'} project={selectedChat?.cwd ?? undefined}
         model={selectedChat?.config?.model ?? selectedChat?.config?.harness ?? undefined}
-        queue={queue} onInterrupt={selectedId ? () => runAction('QueueCommand', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId, command: { kind: 'interrupt' } }) : undefined}
-        onRemoveQueued={selectedId ? id => runAction('RemoveQueuedMessage', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId, id }) : undefined}
-        onEditQueued={selectedId ? (id, text) => runAction('UpdateQueuedMessage', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId, id, text }) : undefined} />
-    </View> : section === 'terminal' && selectedChat ? <Terminal call={(method, params) => connection.call(method, params)}
+        queue={queue} onInterrupt={selectedId ? () => runAction('QueueCommand', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId ?? selectedTargetDeviceId ?? connection.hostDeviceId, command: { kind: 'interrupt' } }) : undefined}
+        onRemoveQueued={selectedId ? id => runAction('RemoveQueuedMessage', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId ?? selectedTargetDeviceId ?? connection.hostDeviceId, id }) : undefined}
+        onEditQueued={selectedId ? (id, text) => runAction('UpdateQueuedMessage', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId ?? selectedTargetDeviceId ?? connection.hostDeviceId, id, text }) : undefined} />
+    </View> : section === 'history' && selectedChat ? <History call={(method, params) => connection.call(method, params)}
+      chatId={selectedChat.id} targetDeviceId={selectedChat.deviceId} cwd={selectedChat.cwd} />
+      : section === 'changes' && selectedChat ? <Changes call={(method, params) => connection.call(method, params)}
+      subscribe={(method, params, onItem, onError) => connection.subscribe(method, params, onItem, onError)}
+      chatId={selectedChat.id} targetDeviceId={selectedChat.deviceId} cwd={selectedChat.cwd} />
+      : section === 'terminal' && selectedChat ? <Terminal call={(method, params) => connection.call(method, params)}
       subscribe={(method, params, onItem, onError) => connection.subscribe(method, params, onItem, onError)}
       chatId={selectedChat.id} targetDeviceId={selectedChat.deviceId} cwd={selectedChat.cwd} />
       : section === 'files' && selectedChat ? <Workspace call={(method, params) => connection.call(method, params)}
@@ -215,6 +263,10 @@ const styles = StyleSheet.create({
   chat: { backgroundColor: colors.bg, flex: 1 },
   chatHeader: { alignItems: 'center', borderBottomColor: colors.border, borderBottomWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 54, paddingHorizontal: spacing.lg },
   heading: { color: colors.text, flexShrink: 1, fontSize: typography.title, fontWeight: '700' },
+  subheading: { color: colors.text, fontSize: typography.body, fontWeight: '600', marginTop: spacing.lg },
+  engineRow: { alignItems: 'center', borderBottomColor: colors.border, borderBottomWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 44 },
+  engineText: { color: colors.text, flex: 1, fontSize: typography.body },
+  active: { color: colors.success, fontSize: typography.small },
   refresh: { color: colors.textMuted, fontSize: typography.small, padding: spacing.sm },
   transcript: { flex: 1 },
   empty: { alignItems: 'center', flex: 1, justifyContent: 'center', padding: spacing.lg },
