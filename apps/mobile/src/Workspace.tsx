@@ -58,23 +58,42 @@ function errorText(error: unknown): string { return error instanceof Error ? err
 function parentOf(path: string): string { return path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : ''; }
 function fileSize(bytes?: number): string { return bytes == null ? '' : bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`; }
 
+type UnsavedDraft = { selected: Entry; file: FileText; text: string };
+const unsavedDrafts = new Map<string, UnsavedDraft>();
+const MAX_UNSAVED_DRAFTS = 12;
+const MAX_UNSAVED_DRAFT_BYTES = 48 * 1024 * 1024;
+
+function retainDraft(context: string, value: UnsavedDraft): boolean {
+  if (!unsavedDrafts.has(context) && unsavedDrafts.size >= MAX_UNSAVED_DRAFTS) return false;
+  let characters = (value.file.text?.length ?? 0) + value.text.length;
+  for (const [key, draft] of unsavedDrafts) {
+    if (key !== context) characters += (draft.file.text?.length ?? 0) + draft.text.length;
+  }
+  if (characters * 2 > MAX_UNSAVED_DRAFT_BYTES) return false;
+  unsavedDrafts.set(context, value);
+  return true;
+}
+
 export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps) {
   const context = `${chatId}\0${targetDeviceId ?? ''}\0${cwd ?? ''}`;
+  const restored = unsavedDrafts.get(context);
   const callRef = useRef(call);
   callRef.current = call;
   const generation = useRef(0);
   const readGeneration = useRef(0);
+  const saveGeneration = useRef(0);
+  const previousContext = useRef(context);
   const [directory, setDirectory] = useState('');
   const [entries, setEntries] = useState<Entry[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
-  const [selected, setSelected] = useState<Entry | null>(null);
-  const [file, setFile] = useState<FileText | null>(null);
-  const [fileContext, setFileContext] = useState<string | null>(null);
-  const [draft, setDraft] = useState('');
-  const [fileError, setFileError] = useState('');
+  const [selected, setSelected] = useState<Entry | null>(restored?.selected ?? null);
+  const [file, setFile] = useState<FileText | null>(restored?.file ?? null);
+  const [fileContext, setFileContext] = useState<string | null>(restored ? context : null);
+  const [draft, setDraft] = useState(restored?.text ?? '');
+  const [fileError, setFileError] = useState(restored ? 'Unsaved draft restored. Saving will check whether the file changed.' : '');
   const [reading, setReading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -98,10 +117,20 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
   }, [target]);
 
   useEffect(() => {
+    if (previousContext.current === context) return;
+    previousContext.current = context;
     readGeneration.current++;
+    saveGeneration.current++;
+    const cached = unsavedDrafts.get(context);
     setReading(false);
+    setSaving(false);
+    setSaved(false);
     setDirectory('');
-    if (selected) setFileError('Workspace changed. Your draft is preserved; return to files to open the new workspace.');
+    setSelected(cached?.selected ?? null);
+    setFile(cached?.file ?? null);
+    setFileContext(cached ? context : null);
+    setDraft(cached?.text ?? '');
+    setFileError(cached ? 'Unsaved draft restored. Saving will check whether the file changed.' : '');
   }, [context]);
   useEffect(() => {
     if (chatId && cwd) void load(directory);
@@ -109,6 +138,12 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
   }, [chatId, cwd, directory, load]);
 
   const openFile = useCallback(async (entry: Entry) => {
+    const cached = unsavedDrafts.get(context);
+    if (cached) {
+      setSelected(cached.selected); setFile(cached.file); setFileContext(context); setDraft(cached.text);
+      setFileError('Save or discard your changes before opening another file.');
+      return;
+    }
     const current = ++readGeneration.current;
     setSelected(entry); setFile(null); setFileContext(context); setDraft(''); setFileError(''); setReading(true); setSaved(false);
     try {
@@ -132,6 +167,7 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
   };
   const save = async () => {
     if (!file || !selected || !writable || !dirty || saving) return;
+    const current = ++saveGeneration.current;
     setSaving(true); setFileError(''); setSaved(false);
     try {
       const result = record(await callRef.current('WriteWorkspaceFile', {
@@ -139,19 +175,25 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
         expectedContentHash: file.contentHash, encoding: file.encoding, lineEnding: file.lineEnding,
       }));
       if (result.status === 'conflict') {
-        setFileError('This file changed on the device. Your draft is preserved. Discard and reopen to see the latest version.');
+        if (current === saveGeneration.current) setFileError('This file changed on the device. Your draft is preserved. Discard and reopen to see the latest version.');
       } else if (result.status === 'written') {
         const written = record(result.file);
         if (typeof written.contentHash !== 'string') throw new Error('Invalid save response');
-        setFile({ ...file, text: draft, contentHash: written.contentHash });
-        setSaved(true);
+        const cached = unsavedDrafts.get(fileContext ?? context);
+        if (cached?.file.path === file.path && cached.file.contentHash === file.contentHash && cached.text === draft) {
+          unsavedDrafts.delete(fileContext ?? context);
+        }
+        if (current === saveGeneration.current) {
+          setFile({ ...file, text: draft, contentHash: written.contentHash });
+          setSaved(true);
+        }
       } else {
         throw new Error('Invalid save response');
       }
     } catch (cause) {
-      setFileError(errorText(cause));
+      if (current === saveGeneration.current) setFileError(errorText(cause));
     } finally {
-      setSaving(false);
+      if (current === saveGeneration.current) setSaving(false);
     }
   };
 
@@ -172,7 +214,14 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
           accessibilityLabel={`Contents of ${selected.name}`}
           multiline
           editable={writable && !saving}
-          onChangeText={text => { setDraft(text); setSaved(false); }}
+          onChangeText={text => {
+            if (text === file.text) unsavedDrafts.delete(context);
+            else if (!retainDraft(context, { selected, file, text })) {
+              setFileError('Unsaved draft memory is full. Save or discard another draft before editing.');
+              return;
+            }
+            setDraft(text); setSaved(false);
+          }}
           value={draft}
           autoCapitalize="none"
           autoCorrect={false}
@@ -181,7 +230,7 @@ export function Workspace({ call, chatId, targetDeviceId, cwd }: WorkspaceProps)
           style={styles.editor}
         />}
       {!writable && <Text style={styles.notice}>Read only{fileContext !== context ? ' · workspace changed' : file.readOnlyReason ? ` · ${file.readOnlyReason}` : file.truncated ? ' · file too large' : ''}</Text>}
-      {dirty && <Pressable accessibilityRole="button" disabled={saving} onPress={() => { setDraft(file.text ?? ''); setFileError(''); }} style={styles.discard}><Text style={styles.muted}>Discard changes</Text></Pressable>}
+      {dirty && <Pressable accessibilityRole="button" disabled={saving} onPress={() => { unsavedDrafts.delete(fileContext ?? context); setDraft(file.text ?? ''); setFileError(''); }} style={styles.discard}><Text style={styles.muted}>Discard changes</Text></Pressable>}
       {saved && <Text style={styles.success}>Saved</Text>}
     </> : null}
     {!!fileError && <Text accessibilityLiveRegion="polite" style={styles.error}>{fileError}</Text>}
