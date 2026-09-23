@@ -1,6 +1,7 @@
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, AppState, Pressable, SafeAreaView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { Composer, type QueuedMessage } from './src/Composer';
 import { History } from './src/History';
 import { Changes } from './src/Changes';
@@ -16,6 +17,14 @@ import { colors, radius, spacing, typography } from './src/theme';
 import { watchWithRetry } from './src/watch';
 
 export default function App() {
+  return <SafeAreaProvider>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : Platform.OS === 'android' ? 'height' : undefined} style={styles.app}>
+      <AppContent />
+    </KeyboardAvoidingView>
+  </SafeAreaProvider>;
+}
+
+function AppContent() {
   const [connection, setConnection] = useState<Connection | null>(null);
   const [starting, setStarting] = useState(true);
   const [connecting, setConnecting] = useState(false);
@@ -266,6 +275,7 @@ function message(error: unknown): string { return error instanceof Error ? error
 function newId(): string { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`; }
 
 const styles = StyleSheet.create({
+  app: { backgroundColor: colors.bg, flex: 1 },
   center: { alignItems: 'center', backgroundColor: colors.bg, flex: 1, gap: spacing.md, justifyContent: 'center' },
   pairScreen: { alignItems: 'center', backgroundColor: colors.bg, flex: 1, justifyContent: 'center', padding: spacing.lg },
   pairCard: { backgroundColor: colors.surfaceCard, borderColor: colors.border, borderRadius: radius.panel, borderWidth: 1, maxWidth: 440, padding: spacing.lg, width: '100%' },
@@ -277,7 +287,7 @@ const styles = StyleSheet.create({
   primaryText: { color: colors.onSolid, fontSize: typography.body, fontWeight: '700' },
   disabled: { opacity: 0.45 },
   error: { color: colors.danger, fontSize: typography.small, marginTop: spacing.md },
-  chat: { backgroundColor: colors.bg, flex: 1 },
+  chat: { backgroundColor: colors.bg, flex: 1, minHeight: 0 },
   chatHeader: { alignItems: 'center', borderBottomColor: colors.border, borderBottomWidth: 1, flexDirection: 'row', justifyContent: 'space-between', minHeight: 54, paddingHorizontal: spacing.lg },
   heading: { color: colors.text, flexShrink: 1, fontSize: typography.title, fontWeight: '700' },
   subheading: { color: colors.text, fontSize: typography.body, fontWeight: '600', marginTop: spacing.lg },
@@ -285,7 +295,7 @@ const styles = StyleSheet.create({
   engineText: { color: colors.text, flex: 1, fontSize: typography.body },
   active: { color: colors.success, fontSize: typography.small },
   refresh: { color: colors.textMuted, fontSize: typography.small, padding: spacing.sm },
-  transcript: { flex: 1 },
+  transcript: { flex: 1, minHeight: 0 },
   empty: { alignItems: 'center', flex: 1, justifyContent: 'center', padding: spacing.lg },
   emptyTitle: { color: colors.text, fontSize: typography.heading, fontWeight: '600' },
   panel: { backgroundColor: colors.bg, flex: 1, padding: spacing.lg },
