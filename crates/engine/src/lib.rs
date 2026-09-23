@@ -919,6 +919,7 @@ impl Engine {
                 remote_access::NetworkOptions::from_environment(None, None),
                 Arc::new(remote_auth::RemoteAuthorizer::new(
                     config.workos_client_id.as_deref(),
+                    Some(config.edge_url.as_str()),
                 )),
             )
             .await;

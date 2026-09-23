@@ -33,7 +33,7 @@ async fn start() -> zeron_engine::EngineListener {
     serve_engine_remote(
         "127.0.0.1:0".parse().unwrap(),
         Arc::new(Echo) as Arc<dyn RpcService>,
-        Arc::new(RemoteAuthorizer::new(None)),
+        Arc::new(RemoteAuthorizer::new(None, None)),
     )
     .await
     .unwrap()
@@ -234,5 +234,93 @@ async fn web_shell_loads_before_authentication_and_data_stays_gated() {
     // The data plane stays credential-gated behind the shell routes.
     let health = http.get(format!("{base}/health")).send().await.unwrap();
     assert_eq!(health.status(), reqwest::StatusCode::UNAUTHORIZED);
+    listener.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_in_config_reports_dev_mode() {
+    let mut listener = start().await;
+    let http = reqwest::Client::new();
+    let config: Value = http
+        .get(format!("http://{}/auth/config", listener.address))
+        .header("origin", "http://127.0.0.1:5173")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(config["mode"], "dev");
+    assert!(config["authorizeUrl"].is_null());
+    listener.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_exchange_is_unavailable_in_dev_mode() {
+    let mut listener = start().await;
+    let http = reqwest::Client::new();
+    let response = http
+        .post(format!("http://{}/auth/exchange", listener.address))
+        .json(&json!({"code": "state.code"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+    listener.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_exchange_proxies_the_edge_and_reports_the_authorize_url() {
+    // A one-shot fake edge answering POST /auth/exchange with tokens.
+    let edge = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let edge_url = format!("http://{}", edge.local_addr().unwrap());
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (mut stream, _) = edge.accept().await.unwrap();
+        let mut buffer = [0u8; 4096];
+        let _ = stream.read(&mut buffer).await.unwrap();
+        let body = r#"{"user":{"id":"user_1","email":"dev@zeron.sh"},"accessToken":"access","refreshToken":"refresh"}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let mut listener = serve_engine_remote(
+        "127.0.0.1:0".parse().unwrap(),
+        Arc::new(Echo) as Arc<dyn RpcService>,
+        Arc::new(RemoteAuthorizer::new(Some("client_test"), Some(&edge_url))),
+    )
+    .await
+    .unwrap();
+    let http = reqwest::Client::new();
+
+    let config: Value = http
+        .get(format!("http://{}/auth/config", listener.address))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(config["mode"], "workos");
+    let authorize_url = config["authorizeUrl"].as_str().unwrap();
+    assert!(authorize_url.contains("/user_management/authorize?"));
+    assert!(authorize_url.contains("client_id=client_test"));
+    assert!(authorize_url.contains("provider=authkit"));
+
+    let tokens: Value = http
+        .post(format!("http://{}/auth/exchange", listener.address))
+        .json(&json!({"code": "state.code"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(tokens["accessToken"], "access");
+    assert_eq!(tokens["refreshToken"], "refresh");
+    assert_eq!(tokens["user"]["id"], "user_1");
     listener.stop().await;
 }

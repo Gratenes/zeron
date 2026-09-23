@@ -7,11 +7,11 @@
 //! first-frame `Auth` envelope carrying the same credential. Local IPC keeps
 //! its native-only boundary in `serve_ipc` and is untouched by this module.
 
-use crate::remote_auth::RemoteAuthorizer;
+use crate::remote_auth::{CodeExchange, RemoteAuthorizer};
 use base64::Engine as _;
 use bytes::Bytes;
 use futures::{SinkExt as _, StreamExt as _};
-use http_body_util::Full;
+use http_body_util::{BodyExt as _, Full, Limited};
 use hyper::{Request, Response, StatusCode, body::Incoming, service::service_fn};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use std::{convert::Infallible, sync::Arc, time::Duration};
@@ -124,6 +124,19 @@ async fn handle(
         if !RESERVED_API_PATHS.contains(&path) && !path.contains('.') {
             return Ok(web_page("index.html"));
         }
+    }
+
+    // Pre-auth sign-in routes: a browser must discover the sign-in mode
+    // (and exchange its authorization code) before it holds a credential.
+    // GET /auth/config reports the mode plus the AuthKit authorize URL;
+    // POST /auth/exchange proxies the secret-bearing code exchange to the
+    // edge — the WorkOS API key lives only there, and staying same-origin
+    // means the browser never needs CORS on the edge.
+    if path == "/auth/config" && request.method() == hyper::Method::GET {
+        return Ok(json(StatusCode::OK, &authorizer.sign_in_config()));
+    }
+    if path == "/auth/exchange" && request.method() == hyper::Method::POST {
+        return Ok(handle_code_exchange(request, authorizer.clone()).await);
     }
 
     // Every remote request requires a valid credential, including health and
@@ -339,7 +352,50 @@ fn static_asset_cache_control(name: &str) -> &'static str {
     }
 }
 
-/// Paths that must NOT fall through to the SPA shell. They are real
-/// credential-gated engine routes, and returning the app shell for them
-/// would mask a 401 / 404.
-const RESERVED_API_PATHS: &[&str] = &["/health"];
+/// Paths that must NOT fall through to the SPA shell. They are real engine
+/// routes — credential-gated API or the pre-auth sign-in surface — and
+/// returning the app shell for them would mask their status codes.
+const RESERVED_API_PATHS: &[&str] = &["/health", "/auth/config", "/auth/exchange"];
+
+/// `POST /auth/exchange`: the browser asks the engine to exchange its
+/// WorkOS authorization code for tokens. The engine is a public client —
+/// the secret-bearing exchange happens at the edge, which holds the
+/// WorkOS API key — so this proxies `{edge}/auth/exchange` and passes the
+/// edge's token payload through unchanged.
+async fn handle_code_exchange(
+    request: Request<Incoming>,
+    authorizer: Arc<RemoteAuthorizer>,
+) -> Reply {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Input {
+        code: String,
+    }
+    let body = match tokio::time::timeout(
+        Duration::from_secs(5),
+        Limited::new(request.into_body(), 4096).collect(),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body.to_bytes(),
+        _ => return reply(StatusCode::BAD_REQUEST, "invalid request body"),
+    };
+    let Ok(input) = serde_json::from_slice::<Input>(&body) else {
+        return reply(StatusCode::BAD_REQUEST, "expected a sign-in code");
+    };
+    match authorizer.exchange_code(&input.code).await {
+        CodeExchange::Tokens(tokens) => json(StatusCode::OK, &tokens),
+        CodeExchange::NotConfigured => json(
+            StatusCode::NOT_IMPLEMENTED,
+            &serde_json::json!({"error": "workos not configured"}),
+        ),
+        CodeExchange::Rejected => json(
+            StatusCode::UNAUTHORIZED,
+            &serde_json::json!({"error": "sign-in code was refused or expired"}),
+        ),
+        CodeExchange::Unreachable => json(
+            StatusCode::BAD_GATEWAY,
+            &serde_json::json!({"error": "could not reach the sign-in service"}),
+        ),
+    }
+}
