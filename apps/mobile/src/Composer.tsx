@@ -102,7 +102,7 @@ export function Composer({
           value={draft}
         />
         <View style={[styles.actions, !expandedMode && styles.compactActions]}>
-          <View style={styles.actionGroup}>
+          <View style={[styles.actionGroup, expandedMode && styles.expandedActionGroup]}>
             {!!target && <Text numberOfLines={1} style={styles.targetChip}>{target}</Text>}
             {!!project && <Text numberOfLines={1} style={styles.targetChip}>{project}</Text>}
             {!!model && <Text numberOfLines={1} style={styles.model}>{model}</Text>}
@@ -142,7 +142,8 @@ const styles = StyleSheet.create({
   compactInput: { flex: 1, maxHeight: 180, minHeight: 47, paddingTop: 10, paddingBottom: 10, paddingRight: spacing.sm },
   actions: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', minHeight: 46, paddingTop: spacing.xs, paddingBottom: 10, paddingHorizontal: spacing.md },
   compactActions: { gap: spacing.sm, minHeight: 47, paddingTop: 0, paddingBottom: 0, paddingLeft: spacing.xs, paddingRight: spacing.sm },
-  actionGroup: { alignItems: 'center', flex: 1, flexDirection: 'row', gap: spacing.xs, justifyContent: 'flex-end', minWidth: 0 },
+  actionGroup: { alignItems: 'center', flexDirection: 'row', gap: spacing.xs, minWidth: 0 },
+  expandedActionGroup: { flex: 1, justifyContent: 'flex-end' },
   model: { color: colors.textMuted, fontSize: typography.small, maxWidth: 120, paddingHorizontal: spacing.sm },
   action: { alignItems: 'center', borderRadius: radius.control, justifyContent: 'center', minHeight: 34, minWidth: 52, paddingHorizontal: spacing.sm },
   prominent: { backgroundColor: colors.solid, borderRadius: 14, height: 28, minHeight: 28, minWidth: 28, width: 28, paddingHorizontal: 0 },
