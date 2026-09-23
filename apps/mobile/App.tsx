@@ -21,7 +21,21 @@ import { watchWithRetry } from './src/watch';
 export default function App() {
   const [fontsLoaded, fontError] = useFonts({
     Geist: require('./assets/fonts/Geist.ttf'),
+    GeistMedium: require('./assets/fonts/Geist-Medium.ttf'),
+    GeistSemiBold: require('./assets/fonts/Geist-SemiBold.ttf'),
+    GeistBold: require('./assets/fonts/Geist-Bold.ttf'),
+    GeistItalic: require('./assets/fonts/Geist-Italic.ttf'),
+    GeistMediumItalic: require('./assets/fonts/Geist-MediumItalic.ttf'),
+    GeistSemiBoldItalic: require('./assets/fonts/Geist-SemiBoldItalic.ttf'),
+    GeistBoldItalic: require('./assets/fonts/Geist-BoldItalic.ttf'),
     GeistMono: require('./assets/fonts/GeistMono.ttf'),
+    GeistMonoMedium: require('./assets/fonts/GeistMono-Medium.ttf'),
+    GeistMonoSemiBold: require('./assets/fonts/GeistMono-SemiBold.ttf'),
+    GeistMonoBold: require('./assets/fonts/GeistMono-Bold.ttf'),
+    GeistMonoItalic: require('./assets/fonts/GeistMono-Italic.ttf'),
+    GeistMonoMediumItalic: require('./assets/fonts/GeistMono-MediumItalic.ttf'),
+    GeistMonoSemiBoldItalic: require('./assets/fonts/GeistMono-SemiBoldItalic.ttf'),
+    GeistMonoBoldItalic: require('./assets/fonts/GeistMono-BoldItalic.ttf'),
   });
   if (!fontsLoaded && !fontError) return <View style={styles.app} />;
   return <SafeAreaProvider>
