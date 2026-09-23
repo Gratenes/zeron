@@ -38,6 +38,8 @@ type Props = {
   children: ReactNode;
   spaces?: SpacePreview[];
   onOpenSection?: (section: ShellSection) => void;
+  onSelectSpace?: (spaceId: string | null) => void;
+  availableSections?: ShellSection[];
 };
 
 const sectionItems: { id: ShellSection; title: string; icon: string }[] = [
@@ -73,6 +75,8 @@ export function Shell({
   children,
   spaces,
   onOpenSection,
+  onSelectSpace,
+  availableSections = ['history', 'files', 'terminal', 'changes', 'browser'],
 }: Props) {
   const { width } = useWindowDimensions();
   const narrow = width < 720;
@@ -159,9 +163,9 @@ export function Shell({
         </Pressable>
         {spacesOpen && (
           <View style={styles.spaceMenu}>
-            <Pressable accessibilityRole="button" accessibilityState={{ selected: !spaceId }} onPress={() => { setSpaceId(null); setSpacesOpen(false); }} style={styles.spaceOption}><Text style={styles.spaceOptionText}>All projects</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityState={{ selected: !spaceId }} onPress={() => { setSpaceId(null); onSelectSpace?.(null); setSpacesOpen(false); }} style={styles.spaceOption}><Text style={styles.spaceOptionText}>All projects</Text></Pressable>
             {availableSpaces.map(space => (
-              <Pressable key={space.id} accessibilityRole="button" accessibilityState={{ selected: spaceId === space.id }} onPress={() => { setSpaceId(space.id); setSpacesOpen(false); }} style={styles.spaceOption}>
+              <Pressable key={space.id} accessibilityRole="button" accessibilityState={{ selected: spaceId === space.id }} onPress={() => { setSpaceId(space.id); onSelectSpace?.(space.id); setSpacesOpen(false); }} style={styles.spaceOption}>
                 <Text numberOfLines={1} style={styles.spaceOptionText}>{space.name}</Text>
                 {!!space.deviceName && <Text numberOfLines={1} style={styles.spaceDevice}>@ {space.deviceName}</Text>}
               </Pressable>
@@ -185,7 +189,7 @@ export function Shell({
 
         {!!onOpenSection && (
           <View style={styles.sectionLinks}>
-            {sectionItems.map(item => (
+            {sectionItems.filter(item => availableSections.includes(item.id)).map(item => (
               <Pressable key={item.id} accessibilityRole="button" accessibilityLabel={`Open ${item.title}`} onPress={() => { onOpenSection(item.id); setDrawerOpen(false); }} style={styles.navRow}>
                 <Text style={styles.navIcon}>{item.icon}</Text><Text style={styles.navText}>{item.title}</Text>
               </Pressable>

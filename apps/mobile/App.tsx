@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Composer, type QueuedMessage } from './src/Composer';
 import Shell, { type ShellSection } from './src/Shell';
+import { Terminal } from './src/Terminal';
 import { Transcript } from './src/Transcript';
 import { Workspace } from './src/Workspace';
 import { connect, restore, type Connection } from './src/connection';
@@ -19,12 +20,15 @@ export default function App() {
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [sessions, setSessions] = useState<LiveSession[]>([]);
   const [selectedId, setSelectedId] = useState<string | undefined>();
+  const [selectedTargetDeviceId, setSelectedTargetDeviceId] = useState<string | null>(null);
+  const [selectedSpaceId, setSelectedSpaceId] = useState<string | null>(null);
   const [entries, setEntries] = useState<WireEntry[]>([]);
   const [queue, setQueue] = useState<QueuedMessage[]>([]);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [section, setSection] = useState<ShellSection | 'chat' | 'settings'>('chat');
   const [syncEpoch, setSyncEpoch] = useState(0);
+  const selectedChat = chats.find(chat => chat.id === selectedId);
 
   useEffect(() => {
     let alive = true;
@@ -57,18 +61,18 @@ export default function App() {
     let cancelled = false;
     const stops: (() => void)[] = [];
     const fail = (e: Error) => { if (!cancelled) setError(message(e)); };
-    connection.subscribe('WatchDocMessages', { chatId: selectedId }, item => {
+    const targetDeviceId = selectedChat?.deviceId ?? selectedTargetDeviceId ?? connection.hostDeviceId;
+    connection.subscribe('WatchDocMessages', { chatId: selectedId, targetDeviceId }, item => {
       if (cancelled) return;
       try { setEntries(previous => applyTranscriptUpdate(previous, item as TranscriptUpdate)); }
       catch (e) { fail(e as Error); }
     }, fail).then(stop => { if (cancelled) stop(); else stops.push(stop); }).catch(fail);
-    connection.subscribe('WatchQueue', { chatId: selectedId }, item => {
+    connection.subscribe('WatchQueue', { chatId: selectedId, targetDeviceId }, item => {
       if (!cancelled) setQueue(asArray<QueuedMessage>((item as { items?: unknown })?.items));
     }, fail).then(stop => { if (cancelled) stop(); else stops.push(stop); }).catch(fail);
     return () => { cancelled = true; stops.forEach(stop => stop()); };
-  }, [connection, selectedId, syncEpoch]);
+  }, [connection, selectedId, selectedChat?.deviceId, selectedTargetDeviceId, syncEpoch]);
 
-  const selectedChat = chats.find(chat => chat.id === selectedId);
   const running = sessions.some(session => session.chatId === selectedId && session.status === 'working');
   const sessionPreviews = useMemo(() => previews(chats, spaces, sessions), [chats, spaces, sessions]);
   const transcript = useMemo(() => renderEntries(entries), [entries]);
@@ -106,18 +110,20 @@ export default function App() {
     try {
       let chatId = selectedId;
       const chat = selectedChat;
+      const newSpace = selectedId ? undefined : spaces.find(space => space.id === selectedSpaceId);
       if (!chatId) {
         chatId = newId();
-        const space = spaces[0];
-        await call('Mutate', { op: 'createChat', chatId, spaceId: space?.id ?? null, deviceId: space ? null : connection.hostDeviceId });
+        await call('Mutate', { op: 'createChat', chatId, spaceId: newSpace?.id ?? null, deviceId: newSpace ? null : connection.hostDeviceId });
         setDrafts(previous => ({ ...previous, [chatId!]: previous.__new__ ?? '' }));
+        setSelectedTargetDeviceId(newSpace?.deviceId ?? connection.hostDeviceId);
         setSelectedId(chatId);
       }
-      if (sendToQueue) await call('QueueMessage', { chatId, text, holdForTurnEnd: true });
-      else await call('QueueCommand', { chatId, command: { kind: 'run', messageId: newId(), request: {
+      const targetDeviceId = chat?.deviceId ?? newSpace?.deviceId ?? connection.hostDeviceId;
+      if (sendToQueue) await call('QueueMessage', { chatId, targetDeviceId, text, holdForTurnEnd: true });
+      else await call('QueueCommand', { chatId, targetDeviceId, command: { kind: 'run', messageId: newId(), request: {
         prompt: text, harness: chat?.config?.harness ?? null, model: chat?.config?.model ?? null,
         reasoning: chat?.config?.reasoning ?? null, modelOptions: chat?.config?.modelOptions ?? {},
-        cwd: chat?.cwd ?? '', sandbox: chat?.config?.sandbox ?? 'workspace-write', autoApprove: false,
+          cwd: chat?.cwd ?? newSpace?.path ?? '', sandbox: chat?.config?.sandbox ?? 'workspace-write', autoApprove: false,
         resume: null, attachments: [],
       } } });
       setDrafts(previous => ({ ...previous, [draftKey]: '', [chatId!]: '' }));
@@ -149,8 +155,9 @@ export default function App() {
   </SafeAreaView>;
 
   return <Shell sessions={sessionPreviews} spaces={spacePreviews(spaces)} selectedId={selectedId}
-    onSelectSession={id => { setSelectedId(id); setSection('chat'); setError(''); }}
-    onNewSession={() => { setSelectedId(undefined); setSection('chat'); setError(''); }}
+    onSelectSpace={setSelectedSpaceId} availableSections={['files', 'terminal']}
+    onSelectSession={id => { setSelectedTargetDeviceId(chats.find(chat => chat.id === id)?.deviceId ?? null); setSelectedId(id); setSection('chat'); setError(''); }}
+    onNewSession={() => { setSelectedTargetDeviceId(null); setSelectedId(undefined); setSection('chat'); setError(''); }}
     onOpenSettings={() => setSection('settings')} onOpenSection={setSection}>
     <StatusBar style="light" />
     {section === 'settings' ? <View style={styles.panel}>
@@ -173,12 +180,15 @@ export default function App() {
       </View>
       <Composer draft={draft} onChangeDraft={text => setDrafts(previous => ({ ...previous, [draftKey]: text }))}
         onSubmit={submit} running={running} busy={busy} error={error}
-        target={selectedChat ? undefined : spaces[0]?.name || 'Your device'} project={selectedChat?.cwd ?? undefined}
+        target={selectedChat ? undefined : spaces.find(space => space.id === selectedSpaceId)?.name || 'Your device'} project={selectedChat?.cwd ?? undefined}
         model={selectedChat?.config?.model ?? selectedChat?.config?.harness ?? undefined}
-        queue={queue} onInterrupt={selectedId ? () => runAction('QueueCommand', { chatId: selectedId, command: { kind: 'interrupt' } }) : undefined}
-        onRemoveQueued={selectedId ? id => runAction('RemoveQueuedMessage', { chatId: selectedId, id }) : undefined}
-        onEditQueued={selectedId ? (id, text) => runAction('UpdateQueuedMessage', { chatId: selectedId, id, text }) : undefined} />
-    </View> : section === 'files' && selectedChat ? <Workspace call={(method, params) => connection.call(method, params)}
+        queue={queue} onInterrupt={selectedId ? () => runAction('QueueCommand', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId, command: { kind: 'interrupt' } }) : undefined}
+        onRemoveQueued={selectedId ? id => runAction('RemoveQueuedMessage', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId, id }) : undefined}
+        onEditQueued={selectedId ? (id, text) => runAction('UpdateQueuedMessage', { chatId: selectedId, targetDeviceId: selectedChat?.deviceId, id, text }) : undefined} />
+    </View> : section === 'terminal' && selectedChat ? <Terminal call={(method, params) => connection.call(method, params)}
+      subscribe={(method, params, onItem, onError) => connection.subscribe(method, params, onItem, onError)}
+      chatId={selectedChat.id} targetDeviceId={selectedChat.deviceId} cwd={selectedChat.cwd} />
+      : section === 'files' && selectedChat ? <Workspace call={(method, params) => connection.call(method, params)}
       chatId={selectedChat.id} targetDeviceId={selectedChat.deviceId} cwd={selectedChat.cwd ?? undefined} /> : <View style={styles.panel}>
       <Text style={styles.heading}>{section[0].toUpperCase() + section.slice(1)}</Text>
       <Text style={styles.muted}>Select a conversation to open its {section}.</Text>

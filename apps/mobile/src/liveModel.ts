@@ -61,7 +61,7 @@ export function applyTranscriptUpdate(current: WireEntry[], update: TranscriptUp
     const part = entry?.parts.find(item => item.id === change.part);
     if (!part || (part.kind !== 'text' && part.kind !== 'reasoning')) throw new Error('Transcript append target missing');
     const body = (part.text ?? '') + change.text;
-    if (new TextEncoder().encode(body).length !== change.len) throw new Error('Transcript append length mismatch');
+    if (utf8Length(body) !== change.len) throw new Error('Transcript append length mismatch');
     part.text = body;
   }
   if (update.count !== undefined && next.length !== update.count) throw new Error('Transcript count mismatch');
@@ -97,7 +97,9 @@ export function previews(chats: Chat[], spaces: Space[], sessions: LiveSession[]
     const live = sessionByChat.get(chat.id);
     const completed = chat.lastMessageAt && (!chat.lastSeenAt || chat.lastSeenAt < chat.lastMessageAt);
     return { id: chat.id, title: chat.title || chat.lastMessagePreview || 'New conversation',
-      spaceId: chat.spaceId ?? undefined, spaceName: space?.name ?? undefined, branch: chat.branch ?? undefined,
+      spaceId: chat.spaceId ?? undefined,
+      spaceName: space ? space.name || space.path.split('/').pop() || space.path : undefined,
+      branch: chat.branch ?? undefined,
       harness: chat.config?.harness, archived: chat.archived,
       status: live?.status === 'idle' && completed ? 'completed' : live?.status ?? 'idle' };
   });
@@ -105,4 +107,8 @@ export function previews(chats: Chat[], spaces: Space[], sessions: LiveSession[]
 
 export function spacePreviews(spaces: Space[]): SpacePreview[] {
   return spaces.map(space => ({ id: space.id, name: space.name || space.path.split('/').pop() || 'Space' }));
+}
+
+function utf8Length(value: string): number {
+  return encodeURIComponent(value).replace(/%[0-9a-f]{2}/gi, 'x').length;
 }
