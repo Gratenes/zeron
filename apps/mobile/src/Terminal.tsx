@@ -4,6 +4,7 @@ import { utf8Decode, utf8Encode } from './connection';
 import { colors, radius, spacing, typography } from './theme';
 
 type Props = {
+  owner: object;
   call: (method: string, params: Record<string, unknown>) => Promise<unknown>;
   subscribe: (method: string, params: Record<string, unknown>, onItem: (item: unknown) => void, onError?: (error: Error) => void) => Promise<() => void>;
   chatId: string;
@@ -14,6 +15,9 @@ type Props = {
 type Session = { id: string; cwd: string; shell: string };
 type Phase = 'opening' | 'ready' | 'reconnecting' | 'exited' | 'closed' | 'error';
 type Active = { id: string; cancelled: boolean; cancelStream?: () => void; retry?: ReturnType<typeof setTimeout> };
+type StoredTerminal = { session: Promise<Session>; output: Output; carry: Uint8Array; lastSeq: number; exited: boolean };
+
+const terminals = new WeakMap<object, Map<string, StoredTerminal>>();
 
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
@@ -129,6 +133,7 @@ class Output {
 
   private control(code: string) {
     const amount = Math.max(1, Number.parseInt(this.sequence, 10) || 1);
+    const steps = Math.min(amount, this.text.length + 1);
     const lineStart = this.text.lastIndexOf('\n', this.cursor - 1) + 1;
     const lineEnd = this.text.indexOf('\n', this.cursor);
     const end = lineEnd < 0 ? this.text.length : lineEnd;
@@ -138,12 +143,12 @@ class Output {
         this.cursor = lineStart;
       } else this.text = this.text.slice(0, this.cursor) + this.text.slice(end);
     } else if (code === 'D') {
-      for (let i = 0; i < amount; i++) this.cursor = previousCharacter(this.text, this.cursor, lineStart);
+      for (let i = 0; i < steps; i++) this.cursor = previousCharacter(this.text, this.cursor, lineStart);
     } else if (code === 'C') {
-      for (let i = 0; i < amount; i++) this.cursor = nextCharacter(this.text, this.cursor, end);
+      for (let i = 0; i < steps; i++) this.cursor = nextCharacter(this.text, this.cursor, end);
     } else if (code === 'G') {
       this.cursor = lineStart;
-      for (let i = 1; i < amount; i++) this.cursor = nextCharacter(this.text, this.cursor, end);
+      for (let i = 1; i < steps; i++) this.cursor = nextCharacter(this.text, this.cursor, end);
     }
   }
 }
@@ -159,16 +164,13 @@ function sessionFrom(value: unknown): Session {
 
 function message(error: unknown): string { return error instanceof Error ? error.message : 'Terminal request failed'; }
 
-export function Terminal({ call, subscribe, chatId, targetDeviceId, cwd }: Props) {
+export function Terminal({ owner, call, subscribe, chatId, targetDeviceId, cwd }: Props) {
   const callRef = useRef(call);
   const subscribeRef = useRef(subscribe);
   callRef.current = call;
   subscribeRef.current = subscribe;
   const active = useRef<Active | null>(null);
   const generation = useRef(0);
-  const output = useRef(new Output());
-  const decoderCarry = useRef<Uint8Array>(new Uint8Array());
-  const lastSeq = useRef(0);
   const size = useRef({ cols: 80, rows: 24 });
   const scroll = useRef<ScrollView>(null);
   const follow = useRef(true);
@@ -190,55 +192,76 @@ export function Terminal({ call, subscribe, chatId, targetDeviceId, cwd }: Props
     const current = ++generation.current;
     let disposed = false;
     setSession(null); setPhase('opening'); setDisplay(''); setDraft(''); setError(''); setSending(false);
-    output.current = new Output(); decoderCarry.current = new Uint8Array(); lastSeq.current = 0;
+    const key = JSON.stringify([chatId, targetDeviceId ?? null]);
+    let terminalMap = terminals.get(owner);
+    if (!terminalMap) { terminalMap = new Map(); terminals.set(owner, terminalMap); }
+    let stored = terminalMap.get(key);
+    if (chatId && !stored) {
+      const requestedSize = { ...size.current };
+      stored = {
+        session: (async () => sessionFrom(await call('OpenTerminal', { chatId, ...requestedSize, ...target })))(),
+        output: new Output(), carry: new Uint8Array(), lastSeq: 0, exited: false,
+      };
+      terminalMap.set(key, stored);
+      const opening = stored;
+      void opening.session.catch(() => { if (terminalMap.get(key) === opening) terminalMap.delete(key); });
+    }
+    const terminalState = stored;
 
     const attach = async (id: string) => {
       const terminal = active.current;
-      if (!terminal || terminal.id !== id || terminal.cancelled || disposed) return;
+      if (!terminalState || !terminal || terminal.id !== id || terminal.cancelled || disposed) return;
+      const failed = (cause: Error) => {
+        if (disposed || terminal.cancelled || current !== generation.current) return;
+        const detail = message(cause);
+        if (detail.includes('Terminal not found')) {
+          terminal.cancelled = true;
+          terminal.cancelStream?.();
+          if (terminalMap.get(key) === terminalState) terminalMap.delete(key);
+          active.current = null;
+          setPhase('error'); setError(detail);
+          return;
+        }
+        setPhase('reconnecting'); setError(detail);
+        terminal.retry = setTimeout(() => { void attach(id); }, 1200);
+      };
       try {
-        const cancel = await subscribeRef.current('SubscribeTerminal', { terminalId: id, afterSeq: lastSeq.current, ...target }, item => {
+        const cancel = await subscribeRef.current('SubscribeTerminal', { terminalId: id, afterSeq: terminalState.lastSeq, ...target }, item => {
           if (disposed || terminal.cancelled || current !== generation.current || !item || typeof item !== 'object') return;
           const event = item as Record<string, unknown>;
-          if (typeof event.seq !== 'number' || event.seq <= lastSeq.current) return;
-          lastSeq.current = event.seq;
+          if (typeof event.seq !== 'number' || event.seq <= terminalState.lastSeq) return;
+          terminalState.lastSeq = event.seq;
           if (event.type === 'data' && typeof event.data === 'string') {
             try {
-              const chunk = decodeChunk(decodeBase64(event.data), decoderCarry.current);
-              decoderCarry.current = chunk.carry;
-              setDisplay(output.current.feed(chunk.text));
+              const chunk = decodeChunk(decodeBase64(event.data), terminalState.carry);
+              terminalState.carry = chunk.carry;
+              setDisplay(terminalState.output.feed(chunk.text));
             }
             catch (cause) { setError(message(cause)); }
           } else if (event.type === 'exit') {
+            terminalState.exited = true;
             terminal.cancelled = true;
             terminal.cancelStream?.();
             setPhase('exited');
-            setDisplay(output.current.feed(`\n[process exited ${typeof event.exitCode === 'number' ? event.exitCode : '?'}]\n`));
+            setDisplay(terminalState.output.feed(`\n[process exited ${typeof event.exitCode === 'number' ? event.exitCode : '?'}]\n`));
           }
-        }, cause => {
-          if (disposed || terminal.cancelled || current !== generation.current) return;
-          setPhase('reconnecting'); setError(message(cause));
-          terminal.retry = setTimeout(() => { void attach(id); }, 1200);
-        });
+        }, failed);
         if (disposed || terminal.cancelled || current !== generation.current) cancel();
         else { terminal.cancelStream = cancel; setPhase('ready'); setError(''); }
       } catch (cause) {
-        if (disposed || terminal.cancelled || current !== generation.current) return;
-        setPhase('reconnecting'); setError(message(cause));
-        terminal.retry = setTimeout(() => { void attach(id); }, 1200);
+        failed(cause as Error);
       }
     };
 
-    if (chatId) void (async () => {
+    if (terminalState) void (async () => {
       try {
-        const requestedSize = { ...size.current };
-        const opened = sessionFrom(await callRef.current('OpenTerminal', { chatId, ...requestedSize, ...target }));
-        if (disposed || current !== generation.current) {
-          void callRef.current('CloseTerminal', { terminalId: opened.id, ...target });
-          return;
-        }
+        const opened = await terminalState.session;
+        if (disposed || current !== generation.current) return;
+        setSession(opened); setDisplay(terminalState.output.text);
+        if (terminalState.exited) { setPhase('exited'); return; }
         active.current = { id: opened.id, cancelled: false };
-        setSession(opened); setPhase('ready');
-        if (size.current.cols !== requestedSize.cols || size.current.rows !== requestedSize.rows) {
+        setPhase('ready');
+        if (size.current.cols !== 80 || size.current.rows !== 24) {
           void callRef.current('ResizeTerminal', { terminalId: opened.id, ...size.current, ...target }).catch(cause => setError(message(cause)));
         }
         void attach(opened.id);
@@ -257,10 +280,9 @@ export function Terminal({ call, subscribe, chatId, targetDeviceId, cwd }: Props
         terminal.cancelStream?.();
         if (terminal.retry) clearTimeout(terminal.retry);
         active.current = null;
-        void callRef.current('CloseTerminal', { terminalId: terminal.id, ...target });
       }
     };
-  }, [chatId, targetDeviceId, restart]);
+  }, [owner, chatId, targetDeviceId, restart]);
 
   const send = async (text: string, clearDraft = false) => {
     const terminal = active.current;
@@ -282,6 +304,7 @@ export function Terminal({ call, subscribe, chatId, targetDeviceId, cwd }: Props
     terminal.cancelStream?.();
     if (terminal.retry) clearTimeout(terminal.retry);
     active.current = null;
+    terminals.get(owner)?.delete(JSON.stringify([chatId, targetDeviceId ?? null]));
     setPhase('closed');
     await close(terminal.id);
   };
@@ -314,7 +337,7 @@ export function Terminal({ call, subscribe, chatId, targetDeviceId, cwd }: Props
     {!!error && <Text accessibilityLiveRegion="polite" style={styles.error}>{error}</Text>}
     {phase === 'reconnecting' && <Text style={styles.notice}>Reconnecting terminal output…</Text>}
     {(phase === 'exited' || phase === 'closed') && <Text style={styles.notice}>{phase === 'exited' ? 'Terminal process exited.' : 'Terminal closed.'}</Text>}
-    {chatId && (phase === 'exited' || phase === 'closed' || phase === 'error') && <Pressable accessibilityRole="button" accessibilityLabel="Open terminal" onPress={() => setRestart(value => value + 1)} style={styles.reopen}><Text style={styles.reopenText}>Open terminal</Text></Pressable>}
+    {chatId && (phase === 'exited' || phase === 'closed' || phase === 'error') && <Pressable accessibilityRole="button" accessibilityLabel="Open terminal" onPress={() => { terminals.get(owner)?.delete(JSON.stringify([chatId, targetDeviceId ?? null])); setRestart(value => value + 1); }} style={styles.reopen}><Text style={styles.reopenText}>Open terminal</Text></Pressable>}
     {(phase === 'ready' || phase === 'reconnecting') && <>
       <View style={styles.controls}>
         {([['Ctrl-C', '\x03'], ['Tab', '\t'], ['Esc', '\x1b'], ['↑', '\x1b[A'], ['↓', '\x1b[B']] as const).map(([label, data]) =>
