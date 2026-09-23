@@ -249,10 +249,11 @@ export function Terminal({ call, subscribe, chatId, targetDeviceId, cwd }: Props
     const terminal = active.current;
     if (!terminal || terminal.cancelled || sending || !text) return;
     const current = generation.current;
+    const submittedDraft = draft;
     setSending(true); setError('');
     try {
       await callRef.current('WriteTerminal', { terminalId: terminal.id, data: encodeBase64(text), ...target });
-      if (clearDraft && current === generation.current) setDraft('');
+      if (clearDraft && current === generation.current) setDraft(previous => previous === submittedDraft ? '' : previous);
     } catch (cause) { if (current === generation.current) setError(message(cause)); }
     finally { if (current === generation.current) setSending(false); }
   };
