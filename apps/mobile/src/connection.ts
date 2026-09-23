@@ -17,10 +17,11 @@ type Pending = {
   timer?: ReturnType<typeof setTimeout>;
 };
 
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
-const rpcHeader = encoder.encode('{"s":"rpc","k":"rpc"}');
-const echoFrame = frame(encoder.encode('{"s":"echo","k":"echo"}'), new Uint8Array());
+import { utf8Decode, utf8Encode } from './utf8';
+export { utf8Decode, utf8Encode } from './utf8';
+
+const rpcHeader = utf8Encode('{"s":"rpc","k":"rpc"}');
+const echoFrame = frame(utf8Encode('{"s":"echo","k":"echo"}'), new Uint8Array());
 
 function frame(header: Uint8Array, payload: Uint8Array): ArrayBuffer {
   const bytes = new Uint8Array(1 + header.length + payload.length);
@@ -40,8 +41,8 @@ function decodeFrame(data: ArrayBuffer): { kind: string; payload: string } {
     shift += 7;
   } while (byte & 0x80);
   if (offset + length > bytes.length) throw new Error('Invalid device frame');
-  const header = JSON.parse(decoder.decode(bytes.subarray(offset, offset + length))) as { k: string };
-  return { kind: header.k, payload: decoder.decode(bytes.subarray(offset + length)) };
+  const header = JSON.parse(utf8Decode(bytes.subarray(offset, offset + length))) as { k: string };
+  return { kind: header.k, payload: utf8Decode(bytes.subarray(offset + length)) };
 }
 
 function parseSession(json: string): Session {
@@ -69,6 +70,7 @@ export class Connection {
   private lastHostProof = 0;
   private echoSeen = false;
   private closed = false;
+  private generation = 0;
 
   constructor(session: Session) {
     this.session = session;
@@ -77,8 +79,8 @@ export class Connection {
     this.deviceId = session.principal.deviceId;
   }
 
-  private async renew() {
-    if (this.session.expiresAt > Date.now() / 1000 + 60) return;
+  private async renew(force = false) {
+    if (!force && this.session.expiresAt > Date.now() / 1000 + 60) return;
     if (!Tailcat) throw new Error('Tailcat is unavailable');
     const next = parseSession(JSON.stringify({ ...JSON.parse(await Tailcat.renew()), baseUrl: this.baseUrl }));
     if (next.principal.profileId !== this.profileId || next.principal.deviceId !== this.deviceId) {
@@ -106,15 +108,27 @@ export class Connection {
     }
     this.engines = engines;
     if (!this.hostDeviceId || !engines.some(engine => engine.deviceId === this.hostDeviceId)) {
+      this.drop(new Error('Host engine changed'));
       this.hostDeviceId = engines[0]?.deviceId ?? null;
     }
     return engines;
   }
 
   async verifyHost(): Promise<void> {
-    if (!this.hostDeviceId) throw new Error('No host engine is paired');
-    const info = await this.call('EngineInfo', {});
-    if (!info || typeof info !== 'object') throw new Error('Host engine returned invalid information');
+    if (!this.engines.length) throw new Error('No host engine is paired');
+    let lastError: unknown;
+    for (const engine of this.engines) {
+      this.selectHostDevice(engine.deviceId);
+      try {
+        const info = await this.call('EngineInfo', {});
+        if (!info || typeof info !== 'object') throw new Error('Host engine returned invalid information');
+        return;
+      } catch (error) {
+        lastError = error;
+        this.drop(error instanceof Error ? error : new Error('Host engine is unavailable'));
+      }
+    }
+    throw lastError;
   }
 
   selectHostDevice(deviceId: string) {
@@ -127,9 +141,14 @@ export class Connection {
     if (this.closed) throw new Error('Connection is closed');
     if (path.startsWith('/') || path.includes('..') || path.includes('://')) throw new Error('Invalid peer path');
     await this.renew();
-    const response = await fetch(new URL(path, this.baseUrl + '/').toString(), {
+    const send = () => fetch(new URL(path, this.baseUrl + '/').toString(), {
       ...init, headers: { ...Object.fromEntries(new Headers(init.headers).entries()), Authorization: `Bearer ${this.session.token}` },
     });
+    let response = await send();
+    if (response.status === 401) {
+      await this.renew(true);
+      response = await send();
+    }
     if (response.status === 401 || response.status === 403) throw new Error('Device access was revoked or expired');
     return response;
   }
@@ -139,6 +158,7 @@ export class Connection {
     if (this.socket?.readyState === WebSocket.OPEN) return this.socket;
     if (this.opening) return this.opening;
     this.opening = (async () => {
+      const generation = this.generation;
       await this.renew();
       const socket = new WebSocket(this.deviceSocketUrl());
       socket.binaryType = 'arraybuffer';
@@ -147,27 +167,31 @@ export class Connection {
         socket.onopen = () => { clearTimeout(timer); resolve(); };
         socket.onerror = () => { clearTimeout(timer); reject(new Error('Peer connection failed')); };
       });
-      if (this.closed) { socket.close(); throw new Error('Connection is closed'); }
+      if (this.closed || this.generation !== generation) { socket.close(); throw new Error('Connection changed'); }
       this.socket = socket;
       this.lastInbound = Date.now();
       this.lastHostProof = Date.now();
       this.echoSeen = false;
       socket.onmessage = event => this.receive(event.data);
-      socket.onclose = () => this.drop(new Error('Peer connection closed'));
-      socket.onerror = () => this.drop(new Error('Peer connection failed'));
-      socket.send(echoFrame);
+      socket.onclose = () => { if (this.socket === socket) this.drop(new Error('Peer connection closed')); };
+      socket.onerror = () => { if (this.socket === socket) this.drop(new Error('Peer connection failed')); };
+      try { socket.send(echoFrame); }
+      catch { this.drop(new Error('Peer connection failed')); throw new Error('Peer connection failed'); }
       this.heartbeat = setInterval(() => {
         if (Date.now() - this.lastInbound > 25000 || (this.echoSeen && Date.now() - this.lastHostProof > 20000)) {
           this.drop(new Error('Peer connection lost'));
           return;
         }
-        socket.send('ping');
-        socket.send(echoFrame);
+        try {
+          socket.send('ping');
+          socket.send(echoFrame);
+        } catch { this.drop(new Error('Peer connection failed')); }
       }, 10000);
       return socket;
     })();
-    try { return await this.opening; }
-    finally { this.opening = null; }
+    const opening = this.opening;
+    try { return await opening; }
+    finally { if (this.opening === opening) this.opening = null; }
   }
 
   private receive(data: unknown) {
@@ -193,6 +217,7 @@ export class Connection {
           pending.onItem?.(reply.item);
         } else if (reply.done) {
           this.finish(reply.id);
+          if (!pending.onItem) pending.reject?.(new Error('Peer ended a unary call without a result'));
         } else if (Object.prototype.hasOwnProperty.call(reply, 'ok') && !pending.onItem) {
           this.finish(reply.id);
           pending.resolve?.(reply.ok);
@@ -208,11 +233,18 @@ export class Connection {
   }
 
   private drop(error: Error) {
+    this.generation++;
+    this.opening = null;
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = null;
     const socket = this.socket;
     this.socket = null;
-    if (socket && socket.readyState !== WebSocket.CLOSED) socket.close();
+    if (socket) {
+      socket.onclose = null;
+      socket.onerror = null;
+      socket.onmessage = null;
+      if (socket.readyState !== WebSocket.CLOSED) socket.close();
+    }
     for (const [id, pending] of this.pending) {
       this.finish(id);
       pending.reject?.(error);
@@ -226,7 +258,7 @@ export class Connection {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.drop(new Error(`${method} timed out`)), 10000);
       this.pending.set(id, { resolve, reject, timer });
-      try { socket.send(frame(rpcHeader, encoder.encode(JSON.stringify({ id, method, params })))); }
+      try { socket.send(frame(rpcHeader, utf8Encode(JSON.stringify({ id, method, params })))); }
       catch (error) { this.finish(id); reject(error); }
     });
   }
@@ -236,12 +268,15 @@ export class Connection {
     const socket = await this.open();
     const id = this.nextId++;
     this.pending.set(id, { onItem, onError });
-    try { socket.send(frame(rpcHeader, encoder.encode(JSON.stringify({ id, method, params })))); }
+    try { socket.send(frame(rpcHeader, utf8Encode(JSON.stringify({ id, method, params })))); }
     catch (error) { this.finish(id); throw error; }
     return () => {
       if (!this.pending.has(id)) return;
       this.finish(id);
-      if (socket.readyState === WebSocket.OPEN) socket.send(frame(rpcHeader, encoder.encode(JSON.stringify({ id, cancel: true }))));
+      if (socket.readyState === WebSocket.OPEN) {
+        try { socket.send(frame(rpcHeader, utf8Encode(JSON.stringify({ id, cancel: true })))); }
+        catch { this.drop(new Error('Peer connection failed')); }
+      }
     };
   }
 
