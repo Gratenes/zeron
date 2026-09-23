@@ -250,6 +250,7 @@ export default function App() {
       subscribe={(method, params, onItem, onError) => connection.subscribe(method, params, onItem, onError)}
       chatId={selectedChat.id} targetDeviceId={selectedChat.deviceId} cwd={selectedChat.cwd} />
       : section === 'terminal' && selectedChat ? <Terminal call={(method, params) => connection.call(method, params)}
+      owner={connection}
       subscribe={(method, params, onItem, onError) => connection.subscribe(method, params, onItem, onError)}
       chatId={selectedChat.id} targetDeviceId={selectedChat.deviceId} cwd={selectedChat.cwd} />
       : section === 'files' && selectedChat ? <Workspace call={(method, params) => connection.call(method, params)}
