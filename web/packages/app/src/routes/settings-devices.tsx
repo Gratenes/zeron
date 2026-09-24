@@ -34,8 +34,7 @@ import {
  * the Mutate renameDevice op) and the connect card that opens the sign-in
  * flow at `/pair` — the page's one entry point for adding engines. Above
  * the device rows sits the engines
- * card: one row per engine this browser signed in to, folded here from the
- * deleted web-only user-menu Engines drawer (ticket 45) — connection state
+ * card: one row per engine this browser signed in to — connection state
  * dot + label, the engine identity line, "Sign in again" when the engine
  * parked (an invalid credential re-signs-in through `/pair`), and Forget.
  *

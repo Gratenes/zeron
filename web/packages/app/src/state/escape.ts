@@ -78,11 +78,9 @@ export function resolveShellEscape(input: ShellEscapeInput): EscapeOutcome {
  * `true` either way.
  *
  * Priorities 10-70 are the desktop's surfaces, in its exact order, reserved
- * for the tickets that own them. `webDrawer` (12) slots the web-only
- * phone-sidebar drawer just under the blocking overlays — a judgment call
- * this ticket makes because the desktop has no drawer; see the ticket's
- * Comments. (The engine drawer that once shared this rung was deleted by
- * ticket 45.)
+ * for their web counterparts. `webDrawer` (12) slots the web-only
+ * phone-sidebar drawer just under the blocking overlays — a judgment call,
+ * since the desktop has no drawer.
  */
 export const ESCAPE_PRIORITY = {
   /**

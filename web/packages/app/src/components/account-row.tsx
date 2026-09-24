@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { Icon } from "@zeron/icons";
 import { useEngineSessions } from "../state/session-provider";
-import { useFleet } from "../state/fleet";
+import { signOut, useFleet } from "../state/fleet";
 import { useWatchSnapshot } from "../state/hooks";
 import { PickerCard } from "./ui/PickerCard";
 
@@ -45,20 +45,36 @@ export function AccountRow() {
   // Escape, the Settings row's navigation) lands here as `false`.
   const [open, setOpen] = useState(false);
 
-  // The connected engine's own device is the identity this row carries — the
-  // desktop's user line is the local device, not the transport. Falls back to
-  // the engine label while the devices stream is still filling; the subline
-  // is gone (f9563394) — the name rides the trigger's aria label alone.
+  // The signed-in WorkOS account is the identity this row carries: the
+  // browser session's profile (name, email, avatar) leads, and the engine's
+  // own device name is the fallback while the profile is absent or still
+  // loading — the engine label the surfaces already show. The subline is
+  // gone (f9563394) — the name rides the trigger's aria label and the
+  // card's account block.
   const engine = fleet.engines.find((candidate) => candidate.baseUrl === fleet.active) ?? null;
   const deviceId = session?.client.engineInfo?.deviceId ?? null;
   const device =
     deviceId === null ? undefined : snapshot?.devices.rows.find((row) => row.id === deviceId);
-  const name = device?.name ?? engine?.label ?? "Zeron";
+  const profile = fleet.session?.profile;
+  const profileName = [profile?.firstName ?? "", profile?.lastName ?? ""]
+    .filter((part) => part.trim().length > 0)
+    .join(" ");
+  const name =
+    profileName.length > 0
+      ? profileName
+      : (profile?.email ?? device?.name ?? engine?.label ?? "Zeron");
   const initial = (name.trim()[0] ?? "?").toUpperCase();
 
   function goSettings(): void {
     setOpen(false);
     void navigate({ to: "/settings/devices" });
+  }
+
+  function goSignOut(): void {
+    setOpen(false);
+    // Revokes the browser session through the edge and reloads into the
+    // login gate (state/fleet.ts `signOut`).
+    void signOut();
   }
 
   return (
@@ -83,15 +99,32 @@ export function AccountRow() {
             aria-haspopup="menu"
           >
             <span className="avatar" aria-hidden="true">
-              {initial}
+              {profile?.avatarUrl !== undefined ? (
+                <img className="avatar-image" src={profile.avatarUrl} alt="" />
+              ) : (
+                initial
+              )}
             </span>
           </button>
         }
       >
-        <div className="user-menu-identity">Stored on this device</div>
+        {profile === undefined ? (
+          <div className="user-menu-identity">Stored on this device</div>
+        ) : (
+          <div className="user-menu-account">
+            <div className="user-menu-account-name">{name}</div>
+            {profile.email !== undefined ? (
+              <div className="user-menu-account-email">{profile.email}</div>
+            ) : null}
+          </div>
+        )}
         <button type="button" className="menu-item" role="menuitem" onClick={goSettings}>
           <Icon name="settingsMinimalistic" size={16} />
           Settings
+        </button>
+        <button type="button" className="menu-item" role="menuitem" onClick={goSignOut}>
+          <Icon name="logout2" size={16} />
+          Sign out
         </button>
       </PickerCard>
     </div>

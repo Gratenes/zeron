@@ -2,14 +2,13 @@ import type { EngineEntrySnapshot } from "@zeron/engine-client";
 import { engineHost, type FleetState } from "./engine-store";
 
 /**
- * The engine-addressing settings vocabulary (ticket 45): which engine
- * the settings pages that silently talk to the *active* one (Remote
- * access, Agents, Accounts) are addressing, and what one paired engine's
- * connection looks like as a row. The desktop has no analog — its
- * settings address the implicit local engine by construction
- * (`remote_access.rs:37-39`); the web's closest concept is
- * `fleet.active`, which until this ticket was invisible and
- * unswitchable.
+ * The engine-addressing settings vocabulary: which engine the settings
+ * pages that silently talk to the *active* one (Remote access, Agents,
+ * Accounts) are addressing, and what one paired engine's connection looks
+ * like as a row. The desktop has no analog — its settings address the
+ * implicit local engine by construction (`remote_access.rs:37-39`); the
+ * web's closest concept is `fleet.active`, surfaced and switched by these
+ * rows.
  */
 
 /**
@@ -33,9 +32,8 @@ export interface EngineConnectionView {
 }
 
 /**
- * The engine-row state mapping, ported from the deleted engine drawer's
- * `entryConnection`: "Starting…" while the registry entry is still
- * pending, "Connected"/"Reconnecting…" off its live state, and parked
+ * The engine-row state mapping: "Starting…" while the registry entry is
+ * still pending, "Connected"/"Reconnecting…" off its live state, and parked
  * reads "Engine changed" when the off-reason names identity, "Session
  * revoked" otherwise — parked alone is pairable.
  */

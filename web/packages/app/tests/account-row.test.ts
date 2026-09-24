@@ -48,13 +48,25 @@ const h = vi.hoisted(() => {
     phone: false,
   };
 
-  return { engines, session, snapshot, navigateCalls, cells };
+  const browserSession: {
+    authenticated: boolean;
+    profile?: { firstName?: string; lastName?: string; email?: string; avatarUrl?: string };
+  } = { authenticated: true };
+
+  const signOutCalls: number[] = [];
+  const signOut = (): Promise<void> => {
+    signOutCalls.push(1);
+    return Promise.resolve();
+  };
+
+  return { engines, session, snapshot, navigateCalls, cells, browserSession, signOut, signOutCalls };
 });
 
 vi.mock("../src/state/fleet", () => ({
   // Exactly what AccountRow reads: the active engine (the routing key) and
   // the registry rows the label fallback resolves from.
-  useFleet: () => ({ active: "local", engines: h.engines, configurationError: null }),
+  useFleet: () => ({ active: "local", engines: h.engines, session: h.browserSession, configurationError: null }),
+  signOut: h.signOut,
 }));
 
 vi.mock("../src/state/session-provider", () => ({
@@ -217,6 +229,56 @@ describe("AccountRow — the user menu escapes the clipping sidebar (bug 2)", ()
     // single Settings row.
     expect(card!.querySelector(".user-menu-identity")!.textContent).toBe("Stored on this device");
     expect(card!.querySelector(".menu-item")!.textContent).toContain("Settings");
+  });
+
+  it("carries the signed-in WorkOS account's profile — avatar, name, email", () => {
+    h.browserSession = {
+      authenticated: true,
+      profile: {
+        firstName: "Vu",
+        lastName: "Khanh",
+        email: "vu@example.com",
+        avatarUrl: "https://example.com/vu.png",
+      },
+    };
+    try {
+      const handle = mountAccountRow();
+      const trigger = handle.trigger();
+      // The account leads the identity: the profile's name in the aria
+      // label, its picture in the avatar circle.
+      expect(trigger.getAttribute("aria-label")).toBe("Account menu: Vu Khanh");
+      const image = trigger.querySelector<HTMLImageElement>(".avatar .avatar-image");
+      expect(image).not.toBeNull();
+      expect(image!.getAttribute("src")).toBe("https://example.com/vu.png");
+
+      press(trigger);
+
+      const card = handle.card()!;
+      // The card's identity block is the signed-in account, not the muted
+      // device line.
+      expect(card.querySelector(".user-menu-account-name")!.textContent).toBe("Vu Khanh");
+      expect(card.querySelector(".user-menu-account-email")!.textContent).toBe("vu@example.com");
+      expect(card.querySelector(".user-menu-identity")).toBeNull();
+    } finally {
+      h.browserSession = { authenticated: true };
+    }
+  });
+
+  it("carries a Sign out row that signs out of the browser session", async () => {
+    const handle = mountAccountRow();
+    press(handle.trigger());
+    const rows = Array.from(handle.card()!.querySelectorAll<HTMLButtonElement>(".menu-item"));
+    const row = rows.find((button) => button.textContent?.includes("Sign out"));
+    expect(row).toBeDefined();
+
+    await act(async () => {
+      row!.click();
+    });
+
+    // The row closes the card first, then revokes the session through the
+    // fleet's signOut.
+    expect(h.signOutCalls.length).toBe(1);
+    expect(handle.card()).toBeNull();
   });
 
   it("closes on Escape and on an outside press", () => {

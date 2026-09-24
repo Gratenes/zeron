@@ -1299,7 +1299,10 @@ a:focus-visible,
 
 .pane-seam-right {
   right: 0;
-  transform: translateX(calc((var(--rb-pane-now) - 10px) * -1));
+  /* The pane's left edge sits LEFT of the docked files column whenever it
+     is open, so the seam's offset is the pane's width plus the files
+     column's (`--rb-files-now`, zero when shut). */
+  transform: translateX(calc((var(--rb-pane-now) + var(--rb-files-now, 0px) - 10px) * -1));
   transition: transform var(--rb-motion-resize) var(--rb-ease-ease-out);
 }
 
@@ -1946,6 +1949,37 @@ a:focus-visible,
  */
 .user-menu-identity {
   padding: 6px var(--rb-space-sm) 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--rb-text-muted) 70%, transparent);
+}
+
+/* The signed-in account's identity in the user menu: the WorkOS profile's
+   name and email replace the muted device line when the session carries a
+   profile, and the avatar circle carries the profile picture. */
+.user-menu-trigger .avatar .avatar-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.user-menu-account {
+  padding: 6px var(--rb-space-sm) 4px;
+  min-width: 0;
+}
+
+.user-menu-account-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.user-menu-account-email {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

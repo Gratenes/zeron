@@ -31,4 +31,15 @@ export default defineConfig({
       "/api/browser": { target: edge, ws: true, changeOrigin: true },
     },
   },
+  // `vite preview` serves the built bundle for the same dev domain: the
+  // unbundled dev server pays the tunnel's per-module latency on ~500
+  // modules and reads as a slow first load, while the preview server pairs
+  // the optimized bundle with the same proxy and host allowlist.
+  preview: {
+    allowedHosts: ["dev.embedez.com", "localhost", "127.0.0.1"],
+    proxy: {
+      "/api/browser": { target: edge, ws: true, changeOrigin: true },
+    },
+  },
+
 });

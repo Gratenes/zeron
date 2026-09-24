@@ -31,7 +31,13 @@ import type { StoredEngine } from "../lib/engine-store";
  */
 
 export interface EdgeFleetState {
-  readonly session: { authenticated: boolean; ownerId?: string; csrfToken?: string };
+  readonly session: {
+    authenticated: boolean;
+    ownerId?: string;
+    csrfToken?: string;
+    /** The signed-in WorkOS user's profile, when the edge reports one. */
+    profile?: { firstName?: string; lastName?: string; email?: string; avatarUrl?: string };
+  };
   readonly devices: readonly BrowserDevice[];
   readonly active: string | null;
   readonly error: string | null;
@@ -202,7 +208,7 @@ if (typeof window !== "undefined") {
 const subscribeFleet = (listener: () => void) => edgeFleet.subscribe(listener);
 const getFleetSnapshot = () => edgeFleet.getSnapshot();
 
-export function useFleet(): { active: string | null; engines: readonly StoredEngine[]; configurationError: string | null } {
+export function useFleet(): { active: string | null; engines: readonly StoredEngine[]; session: EdgeFleetState["session"]; configurationError: string | null } {
   const snapshot = useSyncExternalStore(subscribeFleet, getFleetSnapshot, getFleetSnapshot);
   // `engines` must keep its identity while the device list is unchanged:
   // the session provider reconciles on `fleet.engines`, and
@@ -219,6 +225,7 @@ export function useFleet(): { active: string | null; engines: readonly StoredEng
   return {
     active: snapshot.active,
     engines,
+    session: snapshot.session,
     configurationError: snapshot.error,
   };
 }

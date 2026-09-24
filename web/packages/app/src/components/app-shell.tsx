@@ -812,9 +812,12 @@ export function AppShell() {
       {hasPane && pane.open && !pane.expanded && !glide.gliding && (
         <PaneSeam
           label="Resize panel"
-          // Right-anchored: the pointer's x IS the seam, so the width is the
-          // room left to the window's edge (`on_right_pane_drag`).
-          widthAt={(clientX) => viewport - clientX}
+          // Right-anchored (`on_right_pane_drag`): the seam parks on the
+          // pane's LEFT edge, which sits left of the docked files column
+          // whenever that column is open — so the room from the pointer to
+          // the window's edge includes the files column, and the pane's own
+          // committed width subtracts it back out.
+          widthAt={(clientX) => viewport - clientX - (hasPane && pane.filesOpen ? uiSettings.getSnapshot().filesPanelWidth : 0)}
           onWidth={(width) =>
             rightPaneStore.setWidth(
               paneChatId,

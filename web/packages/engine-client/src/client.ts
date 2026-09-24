@@ -315,11 +315,10 @@ export class EngineClient {
     }
     this.#attempt += 1;
     const dial = ++this.#dialCounter;
-    // Every dial announces itself (ticket 61, hole 3): re-dials used to
-    // stay silent until they failed ("reconnecting") or established
-    // ("connected"), so a status-change heal had no event to consume
-    // between a drop and the re-dial's outcome — dial 1's "connecting"
-    // was the only one ever emitted.
+    // Every dial announces itself: a re-dial must not stay silent until it
+    // fails ("reconnecting") or establishes ("connected") — a status-change
+    // heal needs an event to consume between a drop and the re-dial's
+    // outcome, so every dial emits its own "connecting".
     this.#emit({ state: "connecting", attempt: this.#attempt });
     let socket: WsSocket;
     try {

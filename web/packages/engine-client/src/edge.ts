@@ -7,18 +7,42 @@
 
 const JSON_HEADERS = { accept: "application/json" };
 
+export interface BrowserProfile {
+  readonly firstName?: string;
+  readonly lastName?: string;
+  readonly email?: string;
+  readonly avatarUrl?: string;
+}
+
 export interface BrowserSession {
   readonly authenticated: boolean;
   readonly ownerId?: string;
   readonly organizationId?: string;
   readonly expiresAt?: number;
   readonly csrfToken?: string;
+  readonly profile?: BrowserProfile;
 }
 
 export interface BrowserDevice {
   readonly id: string;
   readonly name?: string;
   readonly online: boolean;
+}
+
+/** The edge session's profile fields, defensively validated. */
+function browserProfile(value: unknown): BrowserProfile | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const source = value as Record<string, unknown>;
+  const profile: { firstName?: string; lastName?: string; email?: string; avatarUrl?: string } = {};
+  for (const key of ["firstName", "lastName", "email", "avatarUrl"] as const) {
+    const item = source[key];
+    if (typeof item === "string" && item.length > 0 && item.length <= 2048) {
+      profile[key] = item;
+    }
+  }
+  return Object.keys(profile).length > 0 ? profile : undefined;
 }
 
 /** `GET /api/browser/session` — the boot probe; never redirects. */
@@ -38,6 +62,7 @@ export async function fetchBrowserSession(): Promise<BrowserSession> {
     organizationId: typeof record.organizationId === "string" ? record.organizationId : undefined,
     expiresAt: typeof record.expiresAt === "number" ? record.expiresAt : undefined,
     csrfToken: typeof record.csrfToken === "string" ? record.csrfToken : undefined,
+    profile: browserProfile(record.profile),
   };
 }
 
