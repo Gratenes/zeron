@@ -105,6 +105,17 @@ function storedEngines(devices: readonly BrowserDevice[], ownerId: string | unde
 let started = false;
 let polling: ReturnType<typeof setInterval> | undefined;
 
+/**
+ * The identity-relevant projection of a device list: the fields the
+ * derived `StoredEngine`s read (`id`, `name`) plus the owner. Everything
+ * else — liveness heartbeats above all — lives in the registry's engine
+ * states, not in the fleet snapshot.
+ */
+function engineListSignature(devices: readonly BrowserDevice[], ownerId: string | undefined): string {
+  return `${devices.map((device) => `${device.id}\u0000${device.name ?? ""}`).join("\u0001")}\u0002${ownerId ?? ""}`;
+}
+
+
 async function refreshDevices(): Promise<void> {
   try {
     const devices = await fetchBrowserDevices();
@@ -113,6 +124,13 @@ async function refreshDevices(): Promise<void> {
       state.active !== null && devices.some((device) => device.id === state.active)
         ? state.active
         : (online[0]?.id ?? devices[0]?.id ?? null);
+    // An unchanged poll keeps the snapshot identity: the store's devices
+    // array is what `useFleet` derives `engines` from, and a new-but-equal
+    // list would churn every reconciled session (and every catalog
+    // consumer) every 10 seconds.
+    if (state.active === active && state.error === null && engineListSignature(devices, state.session.ownerId) === engineListSignature(state.devices, state.session.ownerId)) {
+      return;
+    }
     setState({ devices, active, error: null });
     syncRegistry();
   } catch (error) {
@@ -186,9 +204,21 @@ const getFleetSnapshot = () => edgeFleet.getSnapshot();
 
 export function useFleet(): { active: string | null; engines: readonly StoredEngine[]; configurationError: string | null } {
   const snapshot = useSyncExternalStore(subscribeFleet, getFleetSnapshot, getFleetSnapshot);
+  // `engines` must keep its identity while the device list is unchanged:
+  // the session provider reconciles on `fleet.engines`, and
+  // `reconcileEngineSessions` clones every session whose StoredEngine
+  // wrapper identity changed — a fresh array here re-ran that effect on
+  // every render, cloning sessions forever (the post-login "Maximum
+  // update depth exceeded" loop). Derive only when the devices or the
+  // owner actually change.
+  const ownerId = snapshot.session.ownerId;
+  const engines = useMemo(
+    () => storedEngines(snapshot.devices, ownerId),
+    [snapshot.devices, ownerId],
+  );
   return {
     active: snapshot.active,
-    engines: storedEngines(snapshot.devices, snapshot.session.ownerId),
+    engines,
     configurationError: snapshot.error,
   };
 }
