@@ -9,9 +9,13 @@ import { PickerCard } from "./ui/PickerCard";
 /**
  * The sidebar's bottom identity control — the desktop's `render_user_menu`.
  *
- * Upstream f9563394 compacts it: the row's label and subline collapse into
- * a 21px circular avatar button carrying the name's initial (13px white
- * circle, 9px mono semibold) with the name in the aria label — the menu
+ * Upstream f9563394 compacts it into an initial-only circle; the web
+ * instead makes the row a full-size identity trigger: a 44px avatar
+ * (profile picture, or the name's initial on a white circle) with the
+ * account's name to its right, truncated at the sidebar edge — the
+ * desktop's 21px/13px compact made a profile picture read as a speck and
+ * left no readable hit target, and the name now rides the visible label
+ * as well as the aria label — the menu
  * opens to the RIGHT of the trigger (the desktop's
  * `popover::anchored_menu_right`, shell.rs:6430 — the card's top-left pins
  * at the trigger's top-right + 6, clamped into the window).
@@ -105,6 +109,7 @@ export function AccountRow() {
                 initial
               )}
             </span>
+            <span className="user-menu-label">{name}</span>
           </button>
         }
       >

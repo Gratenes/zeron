@@ -197,13 +197,14 @@ describe("AccountRow — the user menu escapes the clipping sidebar (bug 2)", ()
   it("portals the card to the body, anchored right — never inside the aside", () => {
     const handle = mountAccountRow();
     // Headless while closed: no card anywhere, and the trigger carries the
-    // compact identity (the device's name in the aria label, its initial in
-    // the avatar).
+    // row identity (the device's name in the label and the aria label, its
+    // initial in the avatar).
     expect(handle.card()).toBeNull();
     const trigger = handle.trigger();
     expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
     expect(trigger.getAttribute("aria-label")).toBe("Account menu: Vu's Studio");
     expect(trigger.querySelector(".avatar")!.textContent).toBe("V");
+    expect(trigger.querySelector(".user-menu-label")!.textContent).toBe("Vu's Studio");
 
     press(trigger);
 
@@ -244,12 +245,13 @@ describe("AccountRow — the user menu escapes the clipping sidebar (bug 2)", ()
     try {
       const handle = mountAccountRow();
       const trigger = handle.trigger();
-      // The account leads the identity: the profile's name in the aria
-      // label, its picture in the avatar circle.
+      // The account leads the identity: the profile's name in the row's
+      // label and the aria label, its picture in the avatar circle.
       expect(trigger.getAttribute("aria-label")).toBe("Account menu: Vu Khanh");
       const image = trigger.querySelector<HTMLImageElement>(".avatar .avatar-image");
       expect(image).not.toBeNull();
       expect(image!.getAttribute("src")).toBe("https://example.com/vu.png");
+      expect(trigger.querySelector(".user-menu-label")!.textContent).toBe("Vu Khanh");
 
       press(trigger);
 

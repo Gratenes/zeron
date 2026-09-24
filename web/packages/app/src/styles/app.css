@@ -1877,20 +1877,22 @@ a:focus-visible,
 }
 
 /*
- * f9563394's compact account control: the row collapses to a 21px circular
- * button (4px padding + the 13px avatar), round, with the name in the
- * trigger's aria label — the label and subline are gone. The wash stays
- * quiet until hovered, one step stronger while the menu is open.
+ * The identity row, web-sized: f9563394's compact 21px circle made a
+ * profile picture read as a speck and left no readable hit target, so the
+ * web enlarges the trigger into a full row — a 44px avatar with the
+ * account's name to its right, truncated at the sidebar's edge. The name
+ * also rides the trigger's aria label. The wash stays quiet until hovered,
+ * one step stronger while the menu is open.
  */
 .user-menu-trigger {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 21px;
-  height: 21px;
-  padding: 4px;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 12px 4px 4px;
   border: none;
-  border-radius: 50%;
+  border-radius: 12px;
   background: transparent;
   cursor: pointer;
   transition: background-color var(--rb-motion-hover-fade) var(--rb-ease-ease-tailwind);
@@ -1905,10 +1907,10 @@ a:focus-visible,
   background: var(--rb-hover);
 }
 
-/* The 13px avatar inside: white circle, 9px mono initial in near-black. */
+/* The 44px avatar inside: white circle, 16px mono initial in near-black. */
 .user-menu-trigger .avatar {
-  width: 13px;
-  height: 13px;
+  width: 44px;
+  height: 44px;
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -1916,10 +1918,23 @@ a:focus-visible,
   border-radius: 50%;
   background: var(--rb-text);
   color: var(--rb-bg);
-  font-size: 9px;
-  line-height: 13px;
+  font-size: 16px;
+  line-height: 44px;
   font-weight: 600;
   font-family: var(--rb-font-mono, "Geist Mono", ui-monospace, monospace);
+}
+
+/* The account's name beside the avatar: 13px semibold, truncated at the
+   sidebar's edge — the whole row is the trigger, so the name is part of
+   the clickable surface. */
+.user-menu-trigger .user-menu-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--rb-text);
 }
 
 /*
