@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { Icon } from "@zeron/icons";
-import { methods, type EngineEntrySnapshot } from "@zeron/engine-client";
+import { methods } from "@zeron/engine-client";
 import type { Device } from "@zeron/proto";
 import { useEngineSession } from "../state/session-provider";
-import { useFleet, useFleetRegistry } from "../state/fleet";
+import { useFleet } from "../state/fleet";
 import { useEngineStatus, useNow, useWatchSnapshot } from "../state/hooks";
 import {
   BtnGhost,
@@ -14,8 +13,6 @@ import {
   DialogField,
   DialogTitle,
 } from "../components/ui/Dialog";
-import type { StoredEngine } from "../lib/engine-store";
-import { engineConnection } from "../lib/settings-engine";
 import {
   lastSeenOnline,
   formatLastSeenAt,
@@ -32,18 +29,17 @@ import {
  * the platform tile's corner presence dot, the meta line (platform · version
  * · connection · last seen · added · the click-to-copy id chip), Rename (via
  * the Mutate renameDevice op) and the connect card that opens the sign-in
- * flow at `/pair` — the page's one entry point for adding engines. Above
- * the device rows sits the engines
- * card: one row per engine this browser signed in to — connection state
- * dot + label, the engine identity line, "Sign in again" when the engine
- * parked (an invalid credential re-signs-in through `/pair`), and Forget.
+ * flow at `/pair` — the page's one entry point for adding engines.
  *
- * Web mapping of the desktop's multi-engine registry concepts: the rows come
- * from the connected engine's WatchDevices; the "engine-backed" row is the
- * one whose id matches the connected engine's own device (its presence is
- * the live connection state), a row matching a parked fleet engine is
- * engine-backed-off (Forget removes it from the fleet); every other row
- * falls back to the last-seen window.
+ * One row per engine, period: the legacy "Engines" card (the pairing-era
+ * drawer row ticket 45 folded in above the device rows) listed the fleet's
+ * engines again, so every engine appeared twice — under the WorkOS
+ * browser-session fleet the two lists describe the same engines, and the
+ * device rows are the registry of record. They come from the connected
+ * engine's WatchDevices; the "engine-backed" row is the one whose id
+ * matches the connected engine's own device (its presence is the live
+ * connection state), a row matching a parked fleet engine is
+ * engine-backed-off; every other row falls back to the last-seen window.
  */
 
 interface RenameDialog {
@@ -56,7 +52,6 @@ export function DevicesSettingsPage() {
   const client = session?.client ?? null;
   const status = useEngineStatus(session);
   const fleet = useFleet();
-  const registry = useFleetRegistry();
   const snapshot = useWatchSnapshot(session);
   const now = useNow(15_000);
   const [error, setError] = useState<string | null>(null);
@@ -81,9 +76,6 @@ export function DevicesSettingsPage() {
 
   const devices = snapshot?.devices.rows ?? [];
   const localDeviceId = session?.client.engineInfo?.deviceId ?? null;
-  const activeEngine = fleet.engines.find((engine) => engine.baseUrl === fleet.active) ?? null;
-  // One registry entry per stored engine, keyed by its baseUrl.
-  const registryByEngine = new Map(registry.engines.map((entry) => [entry.key, entry]));
 
   /** The live engine connection behind a row, or null (last-seen fallback). */
   function rowConnection(deviceId: string): EngineConnection | null {
@@ -159,23 +151,6 @@ export function DevicesSettingsPage() {
         </p>
       </section>
 
-      <div className="settings-section-header">
-        <h2>Engines</h2>
-      </div>
-      <section className="settings-card">
-        {fleet.engines.length === 0 ? (
-          <p className="settings-empty">No engines yet. They appear once zeron connects.</p>
-        ) : (
-          fleet.engines.map((engine) => (
-            <EngineRow
-              key={engine.baseUrl}
-              engine={engine}
-              entry={registryByEngine.get(engine.baseUrl) ?? null}
-            />
-          ))
-        )}
-      </section>
-
       <section className="settings-card">
         {count === 0 ? (
           <p className="settings-empty settings-empty-devices">No devices registered</p>
@@ -199,43 +174,6 @@ export function DevicesSettingsPage() {
 
       {rename !== null && (
         <RenameDeviceDialog dialog={rename} onCancel={() => setRename(null)} onSubmit={submitRename} />
-      )}
-    </div>
-  );
-}
-
-interface EngineRowProps {
-  readonly engine: StoredEngine;
-  readonly entry: EngineEntrySnapshot | null;
-}
-
-/**
- * One paired engine's row — the drawer's per-engine row folded here
- * (ticket 45), minus the urgent-chat dot (the sidebar owns urgency).
- * The meta line is the connection label · identity (`Engine {shortId}`,
- * or "Identity unverified" before the first verified connect); "Sign
- * in again" appears only on a parked engine and re-enters the sign-in
- * flow at `/pair`, where a fresh sign-in replaces the stale credential.
- */
-function EngineRow({ engine, entry }: EngineRowProps) {
-  const navigate = useNavigate();
-  const connection = engineConnection(entry);
-
-  return (
-    <div className="settings-row">
-      <span className={`dot ${connection.dot}`} />
-      <div className="settings-row-main">
-        <span className="settings-row-title">{engine.label}</span>
-        <span className="settings-meta-line">
-          {connection.label}
-          <span className="settings-meta-dot" aria-hidden="true">·</span>
-          {engine.deviceId !== null ? `Engine ${engine.deviceId.slice(0, 8)}` : "Identity unverified"}
-        </span>
-      </div>
-      {connection.pairable && (
-        <button type="button" className="btn btn-ghost" onClick={() => void navigate({ to: "/pair" })}>
-          Sign in again
-        </button>
       )}
     </div>
   );
