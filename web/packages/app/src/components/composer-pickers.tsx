@@ -256,6 +256,12 @@ export function ComposerPickers(props: ComposerPickersProps) {
         return;
       }
       pickHarness(harness);
+    } else {
+      // A same-harness model pick is still a harness pick: a fresh chat
+      // resolves the remembered harness first (pickers.rs:713-745), so it
+      // must follow the harness the picked model belongs to. Cross-harness
+      // picks already remember it via `pickHarness`.
+      rememberHarness(harness);
     }
     rememberModel(harness, model.id, model.label);
     commit({ model: model.id });

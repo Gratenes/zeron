@@ -5,6 +5,7 @@ import { SidebarStore } from "../src/lib/sidebar-store";
 import {
   applyDraftUpdate,
   composerDefaults,
+  ComposerDefaultsStore,
   defaultDraft,
   draftFromChat,
   draftsEqual,
@@ -48,6 +49,12 @@ const MODELS: readonly Model[] = [
   { id: "sonnet", label: "Sonnet", reasoningLevels: ["low", "medium", "high"], options: [] },
 ];
 
+const CODEX_MODELS: readonly Model[] = [
+  { id: "gpt-5", label: "GPT-5", reasoningLevels: ["low", "medium", "high"], options: [] },
+  { id: "gpt-6-sol", label: "ChatGPT 6 Sol", reasoningLevels: ["medium"], options: [] },
+];
+
+
 describe("defaultDraft", () => {
   // Ticket 77 intentional correction: the old seed was the model's FIRST
   // level ("low") or a synthetic "medium", bypassing native default
@@ -86,6 +93,51 @@ describe("defaultDraft", () => {
   it("resolves the default against the descriptor when the first model's list is empty", () => {
     const haiku: Model = { id: "haiku", label: "Haiku", reasoningLevels: [], options: [] };
     expect(defaultDraft(HARNESSES, [haiku], null).reasoning).toBe("high");
+  });
+});
+
+describe("defaultDraft sticky picks", () => {
+  // The new-chat pre-selection (pickers.rs:713-745): a fresh chat seeds the
+  // remembered harness and its remembered model while the catalog still
+  // offers them — the picks `pickModel` persists through the composer
+  // defaults — falling back to the default resolution otherwise.
+  const SOL = { id: "gpt-6-sol", label: "ChatGPT 6 Sol" };
+
+  it("seeds the remembered harness and its remembered model", () => {
+    const draft = defaultDraft(HARNESSES, CODEX_MODELS, null, { harness: "codex", model: SOL });
+    expect(draft.harness).toBe("codex");
+    expect(draft.model).toBe("gpt-6-sol");
+    // The ladder follows the seeded row (Sol offers only medium), not the
+    // list's first model (GPT-5 would heal to high).
+    expect(draft.reasoning).toBe("medium");
+  });
+
+  it("falls back to the harness's first model when the list no longer offers the remembered one", () => {
+    const draft = defaultDraft(HARNESSES, [CODEX_MODELS[0]!], null, { harness: "codex", model: SOL });
+    expect(draft.harness).toBe("codex");
+    expect(draft.model).toBe("gpt-5");
+    expect(draft.reasoning).toBe("high");
+  });
+
+  it("falls back to the first enabled harness when the remembered one left the catalog", () => {
+    const draft = defaultDraft(HARNESSES, MODELS, null, { harness: "opencode", model: SOL });
+    expect(draft.harness).toBe("claude-code");
+    expect(draft.model).toBe("sonnet");
+  });
+
+  it("seeds the remembered harness itself while the catalog is still empty", () => {
+    const draft = defaultDraft([], [], null, { harness: "codex", model: SOL });
+    expect(draft.harness).toBe("codex");
+    expect(draft.model).toBeNull();
+    expect(draft.reasoning).toBeNull();
+  });
+
+  it("ignores the remembered model when its harness is not the resolved one", () => {
+    // The remembered harness left the catalog; the sticky model must not
+    // bleed onto the fallback harness even when the list offers the id.
+    const draft = defaultDraft(HARNESSES, CODEX_MODELS, null, { harness: "opencode", model: SOL });
+    expect(draft.harness).toBe("claude-code");
+    expect(draft.model).toBe("gpt-5");
   });
 });
 
@@ -130,6 +182,43 @@ describe("draftFromChat", () => {
       sandbox: "read-only",
     };
     expect(draftFromChat(chat({ config: persisted }), HARNESSES, MODELS, "low").reasoning).toBe("medium");
+  });
+
+  it("seeds a fresh chat from the sticky picks (the new-chat pre-selection)", () => {
+    expect(
+      draftFromChat(chat(), HARNESSES, CODEX_MODELS, null, {
+        harness: "codex",
+        model: { id: "gpt-6-sol", label: "ChatGPT 6 Sol" },
+      }),
+    ).toEqual({
+      harness: "codex",
+      model: "gpt-6-sol",
+      reasoning: "medium",
+      modelOptions: {},
+      sandbox: "workspace-write",
+    });
+  });
+
+  it("an established chat's persisted config wins over the sticky picks outright", () => {
+    const persisted: ChatConfig = {
+      harness: "codex",
+      model: "gpt-5",
+      reasoning: "medium",
+      modelOptions: {},
+      sandbox: "read-only",
+    };
+    expect(
+      draftFromChat(chat({ config: persisted }), HARNESSES, CODEX_MODELS, null, {
+        harness: "codex",
+        model: { id: "gpt-6-sol", label: "ChatGPT 6 Sol" },
+      }),
+    ).toEqual({
+      harness: "codex",
+      model: "gpt-5",
+      reasoning: "medium",
+      modelOptions: {},
+      sandbox: "read-only",
+    });
   });
 });
 
@@ -368,5 +457,28 @@ describe("projectless_new_session_restores_opt_out_and_clears_sidebar_filter", (
     // The clear persists through the ui-settings store, so it survives a
     // refresh.
     expect(new SidebarStore({ storage }).getSnapshot().spaceFilter).toBe(null);
+  });
+});
+
+describe("sticky_picks_persist_the_last_selected_model", () => {
+  // The last selected model rides the sticky-picks store — one
+  // origin-scoped localStorage key (`zeron.composer-defaults.v1`), the
+  // harness remembered alongside the per-harness `modelByHarness` entry —
+  // so a new page load pre-selects the same pick.
+  it("persists the harness + model under the versioned key and reloads them", () => {
+    const storage = memoryStorage();
+    const store = new ComposerDefaultsStore({ storage });
+    store.update({ harness: "codex" });
+    store.update({
+      modelByHarness: { codex: { id: "gpt-6-sol", label: "ChatGPT 6 Sol" } },
+      modelLabels: { "gpt-6-sol": "ChatGPT 6 Sol" },
+    });
+    const raw = storage.getItem("zeron.composer-defaults.v1");
+    expect(raw).not.toBeNull();
+    expect(JSON.parse(raw!).modelByHarness.codex).toEqual({ id: "gpt-6-sol", label: "ChatGPT 6 Sol" });
+    // A fresh page load reads the same picks back.
+    const reloaded = new ComposerDefaultsStore({ storage }).getSnapshot();
+    expect(reloaded.harness).toBe("codex");
+    expect(reloaded.modelByHarness.codex).toEqual({ id: "gpt-6-sol", label: "ChatGPT 6 Sol" });
   });
 });

@@ -21,6 +21,15 @@ function normalizeReasoning(level: ReasoningLevel | null, ladder: readonly Reaso
  * its first model, with `workspace-write` sandbox. The composer only
  * invokes this when the catalog has actually loaded.
  *
+ * A fresh chat also seeds the sticky picks — the native new-chat resolution
+ * (`pickers.rs::effective_harness`/`effective_model_id`, 713-745): the
+ * remembered harness while the catalog still lists it (seeded even while
+ * the catalog is still empty, so the reconciliation lands on it once the
+ * rows arrive), else the first enabled harness; then the remembered model
+ * for that harness while the list still offers it, else the first model. A
+ * remembered pick the catalog no longer offers falls back to the default
+ * exactly as if nothing had been remembered.
+ *
  * Reasoning follows the native precedence (`pickers.rs::effective_reasoning`,
  * 762-775): a fresh chat has NO explicit draft value, so the new-chat
  * `remembered` last-used level is the preference layer — kept verbatim while
@@ -34,11 +43,22 @@ export function defaultDraft(
   catalog: readonly HarnessDescriptor[],
   models: readonly Model[],
   remembered: ReasoningLevel | null = null,
+  sticky: StickyDraftPicks | null = null,
 ): DraftConfig {
-  const harness = catalog.find((row) => row.enabled !== false) ?? catalog[0];
-  const harnessId: HarnessId = harness?.id ?? "claude-code";
-  const model = models[0]?.id ?? null;
-  const ladder = effectiveReasoningLadder(models[0] ?? null, harness ?? null);
+  const harness =
+    (sticky !== null ? catalog.find((row) => row.id === sticky.harness) : undefined) ??
+    catalog.find((row) => row.enabled !== false) ??
+    catalog[0] ??
+    null;
+  // An empty catalog seeds the remembered harness itself (the models have
+  // not landed — a null model, seeded by the reconciliation once they do).
+  const harnessId: HarnessId = harness?.id ?? sticky?.harness ?? "claude-code";
+  // The remembered model only applies while the resolved harness IS the
+  // remembered one — the model list is per-harness.
+  const rememberedModel = sticky !== null && sticky.harness === harnessId ? sticky.model : null;
+  const modelRow = models.find((row) => row.id === rememberedModel?.id) ?? models[0] ?? null;
+  const model = modelRow?.id ?? null;
+  const ladder = effectiveReasoningLadder(modelRow, harness);
   const reasoning = normalizeReasoning(remembered, ladder);
   return {
     harness: harnessId,
@@ -51,19 +71,21 @@ export function defaultDraft(
 
 /**
  * Initialize the composer's draft from the chat's persisted ChatConfig (may
- * be null). `remembered` is the sticky last-used reasoning level — consulted
- * only for a fresh chat (an established chat's persisted config is the
- * explicit layer and wins outright, matching the native precedence).
+ * be null). `remembered` is the sticky last-used reasoning level and `sticky`
+ * the remembered harness/model pair — both consulted only for a fresh chat
+ * (an established chat's persisted config is the explicit layer and wins
+ * outright, matching the native precedence).
  */
 export function draftFromChat(
   chat: Chat,
   catalog: readonly HarnessDescriptor[],
   models: readonly Model[],
   remembered: ReasoningLevel | null = null,
+  sticky: StickyDraftPicks | null = null,
 ): DraftConfig {
   const config = chat.config;
   if (config === null) {
-    return defaultDraft(catalog, models, remembered);
+    return defaultDraft(catalog, models, remembered, sticky);
   }
   const harnessId: HarnessId = config.harness;
   const reasoning = config.reasoning;
@@ -95,6 +117,16 @@ export function draftsEqual(a: DraftConfig, b: DraftConfig): boolean {
 export interface RememberedModel {
   readonly id: string;
   readonly label: string;
+}
+
+/**
+ * The sticky picks a fresh chat pre-selects: the remembered harness plus the
+ * remembered model for it — the `modelByHarness` entry the composer resolves
+ * via `rememberedModelFor`. Null when nothing was remembered.
+ */
+export interface StickyDraftPicks {
+  readonly harness: HarnessId;
+  readonly model: RememberedModel | null;
 }
 
 /** One starred model, kept in starring order. */

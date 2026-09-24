@@ -27,7 +27,7 @@ import {
   noticeToneForMessage,
 } from "../lib/notice-chip";
 import { NoticeChip } from "./notice-chip";
-import { chatDrafts, composerDefaults, draftFromChat } from "../lib/composer-draft";
+import { chatDrafts, composerDefaults, draftFromChat, rememberedModelFor } from "../lib/composer-draft";
 import { useDraftModelReconciliation } from "../lib/composer-reconciliation";
 import { offeredHarnesses } from "../lib/model-rows";
 import {
@@ -493,16 +493,25 @@ export function Composer({
   const projectionRef = useRef(projection);
   projectionRef.current = projection;
   const mentionsActive = projection.mentions.length > 0;
-  const [draft, setDraft] = useState<DraftConfig>(() =>
-    // A fresh chat seeds the remembered last-used reasoning as its preference
-    // layer (pickers.rs:762-775); an established chat replays its config.
-    draftFromChat(
+  const [draft, setDraft] = useState<DraftConfig>(() => {
+    // A fresh chat seeds the sticky picks — the remembered harness and its
+    // remembered model (pickers.rs:713-745, the native new-chat resolution)
+    // — plus the remembered last-used reasoning as its preference layer
+    // (pickers.rs:762-775); an established chat replays its config. The
+    // models list follows the seeded harness so a loaded catalog pre-selects
+    // the remembered model outright (an empty one defers to the model
+    // reconciliation, which seeds it once the list lands).
+    const rememberedHarness = chat.config === null ? composerDefaults.getSnapshot().harness : null;
+    return draftFromChat(
       chat,
       harnesses.rows,
-      catalog.getModels(chat.config?.harness ?? "claude-code").rows,
+      catalog.getModels(chat.config?.harness ?? rememberedHarness ?? "claude-code").rows,
       composerDefaults.getSnapshot().reasoning,
-    ),
-  );
+      rememberedHarness !== null
+        ? { harness: rememberedHarness, model: rememberedModelFor(rememberedHarness) }
+        : null,
+    );
+  });
   const models = useSyncExternalStore(
     useCallback((listener: () => void) => catalog.subscribeModels(draft.harness, listener), [catalog, draft.harness]),
     useCallback(() => catalog.getModels(draft.harness), [catalog, draft.harness]),
