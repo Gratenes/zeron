@@ -5,63 +5,172 @@ import {
   IndexedDbEngineCache,
   encodeScopedId,
   projectRegistrySnapshot,
+  fetchBrowserDevices,
+  fetchBrowserSession,
+  startBrowserLogin,
+  RelaySocket,
+  relayDeviceUrl,
+  type BrowserDevice,
   type EngineRegistrySnapshot,
   type RowSet,
 } from "@zeron/engine-client";
 import type { ChatStatus, ConnectivitySlot, WatchCacheSnapshot } from "@zeron/engine-client";
-import { EngineStore, engineWsEndpoint, type FleetState, type SignInInput, type StoredEngine } from "../lib/engine-store";
+import type { StoredEngine } from "../lib/engine-store";
 
 /**
- * The origin-scoped engine fleet. `fleetStore` is the pairing storage
- * (redeem/persist/setActive/remove/pinDevice, unchanged shape); the
- * `engineRegistry` is ticket 31's fleet supervisor — one supervised
- * connection per stored engine, all driven simultaneously, merging every
- * engine's rows under scoped ids. The registry follows the store: any
- * pairing change (pair, re-pair, forget) starts or stops supervision
- * immediately, so every existing pairing call site gains live connections
- * without redirection.
+ * The engine fleet is the edge's owner-scoped device list (PR #319's
+ * browser-session model): the visitor signs in with WorkOS once —
+ * automatically, by redirect — and every engine they own that is connected
+ * to the edge appears here on its own. No manual pairing, no pasted
+ * addresses, no client-held credentials: the HttpOnly session cookie
+ * authenticates the device relay WebSocket at its upgrade.
+ *
+ * `edgeFleet` is the session + device store; `engineRegistry` is the fleet
+ * supervisor — one supervised relay connection per device, all driven
+ * simultaneously, merging every engine's rows under scoped ids.
  */
 
-export const fleetStore = new EngineStore();
-
-const subscribeFleet = (listener: () => void) => fleetStore.subscribe(listener);
-const getFleetSnapshot = () => fleetStore.getSnapshot();
-
-export function useFleet(): FleetState {
-  return useSyncExternalStore(subscribeFleet, getFleetSnapshot, getFleetSnapshot);
+export interface EdgeFleetState {
+  readonly session: { authenticated: boolean; ownerId?: string; csrfToken?: string };
+  readonly devices: readonly BrowserDevice[];
+  readonly active: string | null;
+  readonly error: string | null;
 }
 
-/** The registry singleton: every paired engine, supervised concurrently. */
+const EMPTY: EdgeFleetState = {
+  session: { authenticated: false },
+  devices: [],
+  active: null,
+  error: null,
+};
+
+let state: EdgeFleetState = EMPTY;
+const listeners = new Set<() => void>();
+
+function setState(next: Partial<EdgeFleetState>): void {
+  state = { ...state, ...next };
+  for (const listener of listeners) {
+    listener();
+  }
+}
+
+/** The fleet store: the browser session and the devices the edge reports. */
+export const edgeFleet = {
+  getSnapshot(): EdgeFleetState {
+    return state;
+  },
+  subscribe(listener: () => void): () => void {
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  },
+};
+
+/** The registry singleton: every discovered device, supervised concurrently. */
 export const engineRegistry = new EngineRegistry({
   cache: new IndexedDbEngineCache(),
+  webSocket: (url) => new RelaySocket(url),
   log: import.meta.env.DEV ? (message, detail) => console.debug("[fleet]", message, detail) : undefined,
 });
 
-function registryConfigs(state: FleetState) {
-  return state.engines.map((engine) => ({
-    key: engine.baseUrl,
-    endpoint: engineWsEndpoint(engine.baseUrl),
-    credential: engine.credential,
-    expectedDeviceId: engine.deviceId,
+function deviceConfigs(devices: readonly BrowserDevice[]) {
+  return devices.map((device) => ({
+    key: device.id,
+    endpoint: relayDeviceUrl(device.id),
+    // The relay socket authenticates with the browser session cookie at
+    // the upgrade; the client holds no credential.
+    credential: "",
+    expectedDeviceId: device.id,
   }));
 }
 
-/** Reconcile the supervised set with whatever the pairing store holds. */
+/** Reconcile the supervised set with whatever the edge reports. */
 function syncRegistry(): void {
-  engineRegistry.sync(registryConfigs(fleetStore.getSnapshot()), fleetStore.getSnapshot().configurationError);
+  engineRegistry.sync(deviceConfigs(state.devices), null);
 }
 
-fleetStore.subscribe(syncRegistry);
-syncRegistry();
-// Verified identities pin back into the store so reloads keep verifying
-// them (the registry re-adopts `expectedDeviceId` on its next spawn).
-engineRegistry.subscribe(() => {
-  for (const engine of engineRegistry.getSnapshot().engines) {
-    if (engine.state === "connected" && engine.info !== null) {
-      fleetStore.pinDevice(engine.key, engine.info.deviceId);
-    }
+/** Devices as the fleet-shaped entries the app's surfaces already read. */
+function storedEngines(devices: readonly BrowserDevice[], ownerId: string | undefined): readonly StoredEngine[] {
+  return devices.map((device) => ({
+    baseUrl: device.id,
+    credential: "",
+    label: device.name ?? device.id,
+    sessionId: ownerId ?? "",
+    pairedAt: 0,
+    deviceId: device.id,
+  }));
+}
+
+let started = false;
+let polling: ReturnType<typeof setInterval> | undefined;
+
+async function refreshDevices(): Promise<void> {
+  try {
+    const devices = await fetchBrowserDevices();
+    const online = devices.filter((device) => device.online);
+    const active =
+      state.active !== null && devices.some((device) => device.id === state.active)
+        ? state.active
+        : (online[0]?.id ?? devices[0]?.id ?? null);
+    setState({ devices, active, error: null });
+    syncRegistry();
+  } catch (error) {
+    // A 401 here means the session expired mid-flight; the next full page
+    // load runs the login gate again. Keep the last-known devices rendered.
+    setState({ error: error instanceof Error ? error.message : String(error) });
   }
-});
+}
+
+/**
+ * Boot the fleet: check the browser session; when signed out, redirect
+ * straight to WorkOS (the edge mints the PKCE authorize URL, and the
+ * callback lands back on the app root with the session cookie set). When
+ * signed in, poll the device list and supervise every device through the
+ * relay. Runs once at module load, so every route sits behind the gate.
+ */
+export function startEdgeFleet(): void {
+  if (started) {
+    return;
+  }
+  started = true;
+  void (async () => {
+    try {
+      const session = await fetchBrowserSession();
+      setState({ session });
+      if (!session.authenticated) {
+        const authorizationUrl = await startBrowserLogin();
+        window.location.href = authorizationUrl;
+        return;
+      }
+      await refreshDevices();
+      polling = setInterval(() => {
+        void refreshDevices();
+      }, 10_000);
+    } catch (error) {
+      setState({ error: error instanceof Error ? error.message : String(error) });
+    }
+  })();
+}
+
+/** Switch the active device (the surface an engine-backed view targets). */
+export function setActiveDevice(deviceId: string): void {
+  if (state.devices.some((device) => device.id === deviceId)) {
+    setState({ active: deviceId });
+  }
+}
+
+/** Sign out of the browser session and reload into the login gate. */
+export async function signOut(): Promise<void> {
+  const csrfToken = state.session.csrfToken;
+  if (csrfToken !== undefined) {
+    const { browserLogout } = await import("@zeron/engine-client");
+    await browserLogout(csrfToken).catch(() => {});
+  }
+  window.location.href = "/";
+}
+
+startEdgeFleet();
 if (typeof window !== "undefined") {
   // A cache write in flight must not be lost when the page goes away — park
   // every entry and flush pending writes (`registry.shutdown`).
@@ -72,27 +181,24 @@ if (typeof window !== "undefined") {
   }
 }
 
+const subscribeFleet = (listener: () => void) => edgeFleet.subscribe(listener);
+const getFleetSnapshot = () => edgeFleet.getSnapshot();
+
+export function useFleet(): { active: string | null; engines: readonly StoredEngine[]; configurationError: string | null } {
+  const snapshot = useSyncExternalStore(subscribeFleet, getFleetSnapshot, getFleetSnapshot);
+  return {
+    active: snapshot.active,
+    engines: storedEngines(snapshot.devices, snapshot.session.ownerId),
+    configurationError: snapshot.error,
+  };
+}
+
 const subscribeRegistry = (listener: () => void) => engineRegistry.subscribe(listener);
 const getRegistrySnapshot = () => engineRegistry.getSnapshot();
 
-/** The registry's live snapshot: one entry per paired engine + its rows. */
+/** The registry's live snapshot: one entry per device + its rows. */
 export function useFleetRegistry(): EngineRegistrySnapshot {
   return useSyncExternalStore(subscribeRegistry, getRegistrySnapshot, getRegistrySnapshot);
-}
-
-/**
- * Sign in to an engine (the store's entry write, with the
- * configuration-error refusal surfaced) — the registry picks the new
- * engine up through its store subscription and starts supervising
- * immediately.
- */
-export function signInEngine(input: SignInInput): Promise<StoredEngine> {
-  return fleetStore.signInEngine(input);
-}
-
-/** Forget one engine: unpersist it; the registry stops and clears its cache. */
-export function forgetEngine(baseUrl: string): void {
-  fleetStore.remove(baseUrl);
 }
 
 const EMPTY_ROWS: RowSet<never> = { rows: [], loaded: false, error: null };
@@ -152,7 +258,7 @@ function mergedRowSet<T>(
 
 /**
  * The `EngineConnectionState` of the engine a device id resolves to, keyed
- * by engine key — the input to `spaceDeviceTag`'s live-presence override
+ * by device id — the input to `spaceDeviceTag`'s live-presence override
  * (§2.5: a device backed by a supervised engine reports that engine's
  * connection state, which beats the heartbeat heuristic).
  */

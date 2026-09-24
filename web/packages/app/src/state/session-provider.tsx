@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { parseScopedId } from "@zeron/engine-client";
 import { engineRegistry, useFleet, useFleetRegistry } from "./fleet";
-import { fleetStore } from "./fleet";
 import { useSidebar } from "./sidebar";
 import { disposeEngineSession, engineSessionKey, reconcileEngineSessions, type EngineSession } from "./engine-session";
 import type { PickerCatalog } from "./picker-catalog";
@@ -120,8 +119,8 @@ export function EngineSessionProvider({ children }: { children: ReactNode }) {
       targets.add(routedKey);
     }
     for (const key of targets) {
-      const stored = fleetStore.getSnapshot().engines.find((engine) => engine.baseUrl === key);
-      engineRegistry.restart(key, stored?.deviceId ?? null);
+      // The registry key is the device id itself in the relay fleet.
+      engineRegistry.restart(key, key);
     }
   }, [routedKey]);
 

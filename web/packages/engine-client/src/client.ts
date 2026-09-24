@@ -381,7 +381,12 @@ export class EngineClient {
     // discards the rest of it, so the envelope always travels alone. A
     // throwing send means the socket died; its close event drives the retry.
     try {
-      socket.send(encodeAuthEnvelope(this.#credential));
+      // An empty credential means the transport already authenticated: the
+      // DeviceRoom relay validates the browser session cookie at the
+      // WebSocket upgrade (PR #319's model), so no Auth envelope is sent.
+      if (this.#credential.length > 0) {
+        socket.send(encodeAuthEnvelope(this.#credential));
+      }
     } catch (error) {
       this.#log("engine auth send failed", describeError(error));
       return;

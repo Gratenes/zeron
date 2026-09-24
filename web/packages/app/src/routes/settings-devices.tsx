@@ -4,7 +4,7 @@ import { Icon } from "@zeron/icons";
 import { methods, type EngineEntrySnapshot } from "@zeron/engine-client";
 import type { Device } from "@zeron/proto";
 import { useEngineSession } from "../state/session-provider";
-import { forgetEngine, useFleet, useFleetRegistry, fleetStore } from "../state/fleet";
+import { useFleet, useFleetRegistry } from "../state/fleet";
 import { useEngineStatus, useNow, useWatchSnapshot } from "../state/hooks";
 import {
   BtnGhost,
@@ -14,7 +14,7 @@ import {
   DialogField,
   DialogTitle,
 } from "../components/ui/Dialog";
-import { engineHost, type StoredEngine } from "../lib/engine-store";
+import type { StoredEngine } from "../lib/engine-store";
 import { engineConnection } from "../lib/settings-engine";
 import {
   lastSeenOnline,
@@ -60,7 +60,6 @@ export function DevicesSettingsPage() {
   const registry = useFleetRegistry();
   const snapshot = useWatchSnapshot(session);
   const now = useNow(15_000);
-  const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [rename, setRename] = useState<RenameDialog | null>(null);
@@ -111,16 +110,7 @@ export function DevicesSettingsPage() {
   }
 
   /** The fleet engine a non-local engine-backed row forgets from, if any. */
-  function forgetTarget(deviceId: string): string | null {
-    const parked = fleet.engines.find(
-      (engine) => engine.deviceId === deviceId && engine.baseUrl !== fleet.active,
-    );
-    return parked?.baseUrl ?? null;
-  }
 
-  function forget(baseUrl: string) {
-    fleetStore.remove(baseUrl);
-  }
 
   /** The dialog closes FIRST, then the trimmed name decides whether an RPC fires (submit_rename's silent-swallow quirk). */
   function submitRename(name: string) {
@@ -164,13 +154,9 @@ export function DevicesSettingsPage() {
       )}
 
       <section className="settings-card settings-pairing-box">
-        <div className="settings-pairing-row">
-          <button type="button" className="btn btn-solid" onClick={() => void navigate({ to: "/pair" })}>
-            Connect an engine
-          </button>
-        </div>
         <p className="settings-pairing-hint">
-          Enter the engine's address on the connect page and sign in — development engines take a user id; WorkOS engines go through AuthKit.
+          Engines appear here automatically: sign in with the same WorkOS account you use for{" "}
+          <code>zeron login</code> on the engine, and every connected device joins this list.
         </p>
       </section>
 
@@ -179,7 +165,7 @@ export function DevicesSettingsPage() {
       </div>
       <section className="settings-card">
         {fleet.engines.length === 0 ? (
-          <p className="settings-empty">No engines paired yet. Pair one above.</p>
+          <p className="settings-empty">No engines yet. They appear once zeron connects.</p>
         ) : (
           fleet.engines.map((engine) => (
             <EngineRow
@@ -205,14 +191,7 @@ export function DevicesSettingsPage() {
               online={lastSeenOnline(device.lastSeenAt, now)}
               copied={copied === device.id}
               now={now}
-              forgetBaseUrl={forgetTarget(device.id)}
               onCopyId={() => copyId(device.id)}
-              onForget={() => {
-                const target = forgetTarget(device.id);
-                if (target !== null) {
-                  forget(target);
-                }
-              }}
               onRename={() => setRename({ deviceId: device.id, name: device.name })}
             />
           ))
@@ -247,7 +226,7 @@ function EngineRow({ engine, entry }: EngineRowProps) {
     <div className="settings-row">
       <span className={`dot ${connection.dot}`} />
       <div className="settings-row-main">
-        <span className="settings-row-title">{engineHost(engine.baseUrl)}</span>
+        <span className="settings-row-title">{engine.label}</span>
         <span className="settings-meta-line">
           {connection.label}
           <span className="settings-meta-dot" aria-hidden="true">·</span>
@@ -259,24 +238,7 @@ function EngineRow({ engine, entry }: EngineRowProps) {
           Sign in again
         </button>
       )}
-      <RemoveEngineButton engine={engine} />
     </div>
-  );
-}
-
-function RemoveEngineButton({ engine }: { engine: StoredEngine }) {
-  const [confirming, setConfirming] = useState(false);
-  if (!confirming) {
-    return (
-      <button type="button" className="btn btn-ghost" onClick={() => setConfirming(true)}>
-        Forget
-      </button>
-    );
-  }
-  return (
-    <button type="button" className="btn btn-danger-ghost" onClick={() => forgetEngine(engine.baseUrl)}>
-      Forget?
-    </button>
   );
 }
 
@@ -288,9 +250,7 @@ function DeviceRow(props: {
   readonly online: boolean;
   readonly copied: boolean;
   readonly now: number;
-  readonly forgetBaseUrl: string | null;
   readonly onCopyId: () => void;
-  readonly onForget: () => void;
   readonly onRename: () => void;
 }) {
   const device = props.device;
@@ -348,11 +308,6 @@ function DeviceRow(props: {
         </span>
       </div>
       {props.isLocal && <span className="badge">This device</span>}
-      {props.forgetBaseUrl !== null && (
-        <button type="button" className="btn btn-ghost" onClick={props.onForget}>
-          Forget
-        </button>
-      )}
       <button type="button" className="btn btn-ghost device-rename" onClick={props.onRename}>
         <Icon name="pen" size={14} />
         Rename

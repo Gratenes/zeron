@@ -1,9 +1,8 @@
 import { useState } from "react";
 import type { ReactElement } from "react";
 import { Icon } from "@zeron/icons";
-import { engineHost } from "../lib/engine-store";
 import { engineConnection, settingsEngineLabel } from "../lib/settings-engine";
-import { fleetStore, useFleet, useFleetRegistry } from "../state/fleet";
+import { setActiveDevice, useFleet, useFleetRegistry } from "../state/fleet";
 import { PickerCard } from "./ui/PickerCard";
 import { MenuRow } from "./ui/MenuRows";
 
@@ -18,7 +17,7 @@ import { MenuRow } from "./ui/MenuRows";
  * its popover lists every paired engine with its connection dot and a
  * check on the active one.
  *
- * Picking a row calls `fleetStore.setActive` — the store's first UI
+ * Picking a row calls `setActiveDevice` — the store's first UI
  * caller for that write. Changing the active engine re-routes
  * `useEngineSession()` on `/settings/*` routes, so the page's data
  * reloads against the chosen engine (the pages already reset on session
@@ -69,12 +68,12 @@ export function SettingsEngineIndicator() {
             fadeKey={`settings-engine-${engine.baseUrl}`}
             selected={isActive}
             onClick={() => {
-              fleetStore.setActive(engine.baseUrl);
+              setActiveDevice(engine.baseUrl);
               setOpen(false);
             }}
           >
             <span className={`dot ${engineConnection(byKey.get(engine.baseUrl) ?? null).dot}`} />
-            <span className="settings-engine-row-host">{engineHost(engine.baseUrl)}</span>
+            <span className="settings-engine-row-host">{engine.label}</span>
             {isActive && <Icon name="check" size={12} className="settings-engine-row-check" />}
           </MenuRow>
         );

@@ -83,3 +83,30 @@ export {
   type EngineCacheStore,
 } from "./engine-cache";
 export * as methods from "./methods";
+
+export {
+  decodeDeviceFrame,
+  encodeDeviceFrame,
+  RelaySocket,
+  ECHO_KIND,
+  ECHO_DEADLINE_MS,
+  MAX_BUFFERED,
+  MAX_FRAME,
+  MAX_OUTBOUND_FRAME,
+  PING_INTERVAL_MS,
+  PING_TEXT,
+  PONG_TEXT,
+  RELAY_KIND,
+  RPC_KIND,
+  SILENCE_LEASE_MS,
+  type DeviceFrameHeader,
+} from "./device-frame";
+export {
+  browserLogout,
+  fetchBrowserDevices,
+  fetchBrowserSession,
+  relayDeviceUrl,
+  startBrowserLogin,
+  type BrowserDevice,
+  type BrowserSession,
+} from "./edge";

@@ -505,13 +505,15 @@ describe("EngineSessionProvider resource lifetime", () => {
     const enginesBefore = store().getSnapshot().engines;
     const oldDispose = vi.spyOn(before.catalog, "dispose");
 
-    // The engine gate's Retry: a registry restart over untouched pairing metadata.
+    // The engine gate's Retry: a registry restart over untouched fleet
+    // metadata. The relay fleet keys engines by device id, so the restart
+    // re-pins identity to the key itself.
     await act(async () => {
       handle.observed.current.retry();
     });
 
     expect(store().getSnapshot().engines).toBe(enginesBefore);
-    expect(h.cells.registry.restartCalls).toEqual([{ key: engine.baseUrl, expectedDeviceId: null }]);
+    expect(h.cells.registry.restartCalls).toEqual([{ key: engine.baseUrl, expectedDeviceId: engine.baseUrl }]);
 
     const after = sessionOf(handle, engine.baseUrl);
     expect(after.engine).toBe(before.engine);
