@@ -24,7 +24,11 @@ export default defineConfig({
       // and the cookie-authenticated device relay WebSocket, proxied to the
       // local staging edge (`wrangler dev`, see scripts/browser-staging.mjs
       // upstream). Same-origin from the browser's point of view.
-      "/api/browser": { target: edge, ws: true },
+      // `changeOrigin` rewrites the proxied Host to the loopback upstream:
+      // the Worker gates its dev paths on `loopback(url)` and rejects other
+      // Hosts, while the browser-side Origin header still validates against
+      // WORKOS_BROWSER_ORIGIN. Upstream's browser-dev-proxy.mjs does the same.
+      "/api/browser": { target: edge, ws: true, changeOrigin: true },
     },
   },
 });
