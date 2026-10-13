@@ -5,7 +5,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.ui.focus.focusRequester
 import sh.zeron.android.core.projectGroups
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,7 +23,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -75,7 +73,10 @@ import uniffi.zeron_core.PullRequestState
 import uniffi.zeron_core.SessionRow
 import uniffi.zeron_core.WorkspaceSnapshot
 
-private enum class Filter(val label: String) { All("All"), NeedsYou("Needs you"), Working("Working"), Pinned("Pinned") }
+/** [share] is each segment's slice of the filter track, sized to its label. */
+internal enum class Filter(val label: String, val share: Float) {
+    All("All", 52f), NeedsYou("Needs you", 84f), Working("Working", 74f), Pinned("Pinned", 66f),
+}
 
 /** "2 working · 1 needs you" — the live summary beside New session. */
 fun liveSummary(ws: WorkspaceSnapshot): String? {
@@ -87,7 +88,7 @@ fun liveSummary(ws: WorkspaceSnapshot): String? {
     return parts.joinToString(" · ").ifEmpty { null }
 }
 
-private fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
+internal fun frontRows(ws: WorkspaceSnapshot): List<SessionRow> {
     val seen = HashSet<String>()
     return (ws.front.pinned + ws.front.sections.flatMap { it.sessions } + ws.front.recent).filter { seen.add(it.id) }
 }
@@ -197,23 +198,18 @@ fun SessionsScreen(model: AppModel, onOpen: (String) -> Unit, onArchived: () -> 
                     }
                 }
                 item("filters") {
-                    Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        for (f in Filter.entries) {
-                            Pill(
-                                f.label,
-                                filter == f,
-                                onClick = { filter = f },
-                                count = when (f) {
-                                    Filter.NeedsYou -> counts.second
-                                    Filter.Working -> counts.first
-                                    else -> null
-                                },
-                            )
-                        }
-                    }
+                    FilterSegments(
+                        filter,
+                        onSelect = { filter = it },
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        count = { f ->
+                            when (f) {
+                                Filter.NeedsYou -> counts.second
+                                Filter.Working -> counts.first
+                                else -> 0
+                            }
+                        },
+                    )
                 }
                 if (ws == null) return@LazyColumn
                 val front = ws.front

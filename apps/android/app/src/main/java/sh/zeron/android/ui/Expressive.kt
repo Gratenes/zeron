@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -75,37 +74,6 @@ fun ScreenHeader(title: String, subtitle: String?, modifier: Modifier = Modifier
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), content = actions)
-    }
-}
-
-/** A filter pill: filled when selected, tonal otherwise, with an optional count. */
-@Composable
-fun Pill(label: String, selected: Boolean, onClick: () -> Unit, count: Int? = null, @DrawableRes icon: Int? = null) {
-    val container by animateColorAsState(
-        if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
-        MaterialTheme.motionScheme.defaultEffectsSpec(),
-        label = "pill",
-    )
-    val fg = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-    Surface(onClick = onClick, shape = RoundedCornerShape(50), color = container, contentColor = fg) {
-        Row(
-            Modifier.heightIn(min = 40.dp).padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            icon?.let { ZIcon(it, null, Modifier.size(18.dp)) }
-            Text(label, style = MaterialTheme.typography.labelLarge)
-            if (count != null && count > 0) {
-                Box(
-                    Modifier
-                        .clip(CircleShape)
-                        .background(if (selected) fg.copy(alpha = 0.2f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
-                        .padding(horizontal = 7.dp, vertical = 1.dp),
-                ) {
-                    Text("$count", style = MaterialTheme.typography.labelMedium, color = if (selected) fg else MaterialTheme.colorScheme.primary)
-                }
-            }
-        }
     }
 }
 

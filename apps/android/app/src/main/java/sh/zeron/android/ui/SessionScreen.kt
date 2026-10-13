@@ -95,7 +95,7 @@ private data class TextSheet(val title: String, val text: String, val mono: Bool
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoice: () -> Unit = {}, onVoiceSettings: () -> Unit = {}) {
+fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoice: () -> Unit = {}, onVoiceSettings: () -> Unit = {}, onOpenHistory: (() -> Unit)? = null) {
     val client by model.client.collectAsState()
     val core = client ?: return
     val handle: SessionHandle = remember(chatId) { runCatching { core.openSession(chatId) }.getOrNull() } ?: run {
@@ -184,7 +184,12 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TonalCircleButton(ZIcons.Back, "Back", onClick = onBack, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                // Phones get the history drawer here; back is the system gesture.
+                if (onOpenHistory != null) {
+                    TonalCircleButton(ZIcons.History, "Open history", onClick = onOpenHistory, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                } else {
+                    TonalCircleButton(ZIcons.Back, "Back", onClick = onBack, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                }
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(composer.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
                     Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

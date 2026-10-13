@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import sh.zeron.android.design.ZIcons
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -102,6 +103,13 @@ private fun MainNav(model: AppModel) {
     // (Width alone would split a phone turned sideways.)
     val wide = maxWidth >= 840.dp && maxHeight >= 480.dp
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
+    var tab by rememberSaveable { mutableStateOf(if (model.launch.route == "settings" || model.launch.route == "more") Tab.Settings else Tab.Sessions) }
+    val history = remember { HistoryDrawerState() }
+    val scope = rememberCoroutineScope()
+    val entry by nav.currentBackStackEntryAsState()
+    val route = entry?.destination?.route
+    val activeChat = if (route == Routes.CHAT) entry?.arguments?.getString("id") else null
+    val openHistory: () -> Unit = { scope.launch { history.open() } }
     val open: (String) -> Unit = { id -> if (wide) selected = id else nav.navigate(Routes.chat(id)) }
     // Folding back to a phone keeps the open chat, full screen.
     LaunchedEffect(wide) {
@@ -137,13 +145,41 @@ private fun MainNav(model: AppModel) {
             }
         },
     ) {
+    HistoryDrawerHost(
+        history,
+        // Wide layouts already show sessions beside the chat.
+        enabled = !wide && (route == Routes.HOME || route == Routes.CHAT),
+        drawer = {
+            HistoryDrawerContent(
+                model,
+                activeId = activeChat,
+                onNewChat = {
+                    scope.launch { history.close() }
+                    nav.navigate(Routes.NEW) { popUpTo(Routes.HOME) }
+                },
+                onPick = { id ->
+                    scope.launch { history.close() }
+                    if (id != activeChat) nav.navigate(Routes.chat(id)) { popUpTo(Routes.HOME) }
+                },
+                onSearch = {
+                    scope.launch { history.close() }
+                    nav.navigate(Routes.SEARCH)
+                },
+                onSettings = {
+                    scope.launch { history.close() }
+                    tab = Tab.Settings
+                    nav.popBackStack(Routes.HOME, inclusive = false)
+                },
+            )
+        },
+    ) {
     NavHost(nav, startDestination = Routes.HOME) {
         composable(Routes.HOME) {
             if (!wide) {
-                Home(model, nav, open)
+                Home(model, nav, open, tab = tab, onTab = { tab = it })
             } else {
                 Row(Modifier.fillMaxSize()) {
-                    Box(Modifier.width(400.dp).fillMaxHeight()) { Home(model, nav, open, selected) }
+                    Box(Modifier.width(400.dp).fillMaxHeight()) { Home(model, nav, open, tab, { tab = it }, selected) }
                     androidx.compose.material3.VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     Box(Modifier.weight(1f).fillMaxHeight()) {
                         val id = selected
@@ -179,6 +215,7 @@ private fun MainNav(model: AppModel) {
                 onBack = { nav.popBackStack() },
                 onOpenVoice = { nav.navigate(Routes.VOICE) { launchSingleTop = true } },
                 onVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
+                onOpenHistory = if (wide) null else openHistory,
             )
         }
         composable(Routes.VOICE) {
@@ -207,6 +244,7 @@ private fun MainNav(model: AppModel) {
                 open(id)
             })
         }
+    }
     }
     Toasts(model, nav)
     }
@@ -239,8 +277,7 @@ private fun androidx.compose.foundation.layout.BoxScope.Toasts(model: AppModel, 
 private enum class Tab { Sessions, Settings }
 
 @Composable
-private fun Home(model: AppModel, nav: NavHostController, open: (String) -> Unit, selected: String? = null) {
-    var tab by rememberSaveable { mutableStateOf(if (model.launch.route == "settings" || model.launch.route == "more") Tab.Settings else Tab.Sessions) }
+private fun Home(model: AppModel, nav: NavHostController, open: (String) -> Unit, tab: Tab, onTab: (Tab) -> Unit, selected: String? = null) {
     val workspace by model.workspace.collectAsState()
     val summary = remember(workspace) { workspace?.let { liveSummary(it) } }
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -271,8 +308,8 @@ private fun Home(model: AppModel, nav: NavHostController, open: (String) -> Unit
             }
             FloatingNavBar(
                 listOf(
-                    NavItem("Sessions", ZIcons.TabSessions, tab == Tab.Sessions) { tab = Tab.Sessions },
-                    NavItem("Settings", ZIcons.TabSettings, tab == Tab.Settings) { tab = Tab.Settings },
+                    NavItem("Sessions", ZIcons.TabSessions, tab == Tab.Sessions) { onTab(Tab.Sessions) },
+                    NavItem("Settings", ZIcons.TabSettings, tab == Tab.Settings) { onTab(Tab.Settings) },
                 ),
                 trailing = {
                     TonalCircleButton(ZIcons.Search, "Search", onClick = { nav.navigate(Routes.SEARCH) }, size = 72.dp)
