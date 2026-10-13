@@ -3,6 +3,8 @@ name: dev-windows
 # Dev desktop build pointed at a non-production edge. Separate data dir and no
 # auto-update so it never collides with (or gets replaced by) a release install.
 on:
+  push:
+    branches: ["dev/**"]
   workflow_dispatch:
     inputs:
       edge_url:
@@ -20,8 +22,8 @@ jobs:
       run:
         shell: pwsh
     env:
-      ZERON_DEFAULT_EDGE_URL: ${{ inputs.edge_url }}
-      ZERON_WORKOS_CLIENT_ID: ${{ inputs.workos_client_id }}
+      ZERON_DEFAULT_EDGE_URL: ${{ inputs.edge_url || 'https://zeron-v2.embedez.com' }}
+      ZERON_WORKOS_CLIENT_ID: ${{ inputs.workos_client_id || 'client_01M270WMSY2KHVFJFZJMG7YTDF' }}
       ZERON_DATA_DIR_NAME: Zeron-dev
       ZERON_NO_AUTO_UPDATE: "1"
     steps:
