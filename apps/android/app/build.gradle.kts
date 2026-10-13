@@ -49,6 +49,9 @@ android {
         versionCode = 1
         versionName = "0.2.97"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        // `-PzeronEdgeUrl=https://…` points the app at a dev edge.
+        val edgeUrl = providers.gradleProperty("zeronEdgeUrl").orNull ?: ""
+        buildConfigField("String", "EDGE_URL_OVERRIDE", "\"$edgeUrl\"")
     }
 
     buildTypes {
@@ -63,7 +66,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 
     sourceSets["main"].apply {
         kotlin.directories.add(coreOut.resolve("kotlin").path)

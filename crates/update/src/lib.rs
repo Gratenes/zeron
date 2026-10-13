@@ -993,7 +993,8 @@ fn auto_update_enabled() -> bool {
 pub fn desktop_auto_update_enabled() -> bool {
     std::env::var("ZERON_AUTO_UPDATE")
         .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
-        .unwrap_or(true)
+        // `ZERON_NO_AUTO_UPDATE` at build time: dev builds never pull a release over themselves.
+        .unwrap_or(option_env!("ZERON_NO_AUTO_UPDATE").is_none())
 }
 
 /// "Nothing would be interrupted by a restart right now" — wired by the engine
