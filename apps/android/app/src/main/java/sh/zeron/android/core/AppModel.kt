@@ -50,6 +50,7 @@ import uniffi.zeron_core.WorkspaceSnapshot
 import uniffi.zeron_core.WorktreeSpec
 import uniffi.zeron_core.authExchangeCode
 import uniffi.zeron_core.authListOrgs
+import sh.zeron.android.BuildConfig
 import uniffi.zeron_core.authProductionEdgeUrl
 import uniffi.zeron_core.authRefresh
 import uniffi.zeron_core.parseAuthCallback
@@ -297,7 +298,7 @@ class AppModel(private val app: Application) {
         start(Credentials.Demo(demoOptions()))
     }
 
-    val edgeUrl: String get() = authProductionEdgeUrl()
+    val edgeUrl: String get() = BuildConfig.EDGE_URL_OVERRIDE.ifEmpty { authProductionEdgeUrl() }
 
     private val deviceId: String
         get() {
