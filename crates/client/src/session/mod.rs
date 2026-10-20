@@ -295,10 +295,19 @@ impl SessionCore {
         if lock(&self.room).is_some() {
             return;
         }
-        let Some(chat) = client.workspace.chat(&self.chat_id) else {
-            return;
+        // A subagent doc has no registry row: the engine opens it on a chat2
+        // room from birth (an absent row reads as generation 2 host-side).
+        // Its pushes go to the parent chat's host.
+        let (room_gen, host_device_id) = match client.workspace.chat(&self.chat_id) {
+            Some(chat) => (chat.room_gen.unwrap_or(1), chat.device_id.clone()),
+            None => match crate::subagents::subagent_source_chat(&self.chat_id)
+                .and_then(|parent| client.workspace.chat(parent))
+            {
+                Some(parent) => (2, parent.device_id.clone()),
+                None => return,
+            },
         };
-        if chat.room_gen.unwrap_or(1) < 2 {
+        if room_gen < 2 {
             // A retired legacy (s2) room: nothing to dial. Show what's local
             // instead of an endless loader.
             let newly = !std::mem::replace(&mut lock(&self.state).hydrated, true);
@@ -343,7 +352,7 @@ impl SessionCore {
                 bearer: crate::live::LiveBackend::bearer(client),
                 edge: live.edge.clone(),
                 device_id: client.config.device_id.clone(),
-                host_device_id: chat.device_id.clone(),
+                host_device_id,
                 store: live.store.clone(),
                 on_applied,
                 on_status,

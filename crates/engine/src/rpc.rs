@@ -63,7 +63,7 @@ use tokio::sync::watch;
 
 use zeron_doc::{MessagePart, SessionCommandPayload};
 use zeron_proto::{
-    ChatConfig, CreateWorktreeOutcome, EngineInfo, HarnessId, HarnessUpdatePolicy,
+    AgentEvent, ChatConfig, CreateWorktreeOutcome, EngineInfo, HarnessId, HarnessUpdatePolicy,
     ProjectActionDraft, Space, ToolCall, WorkspaceScope,
 };
 use zeron_rpc::{
@@ -99,6 +99,27 @@ struct ListModelsParams {
     harness: HarnessId,
     #[serde(default)]
     force: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UninstallHarnessParams {
+    harness: HarnessId,
+    /// Report what would be removed (or why nothing will be) without
+    /// touching the device — the confirmation dialog's copy.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// `UninstallHarness` reply: what went, plus the fresh catalog so the page
+/// repaints in one round trip (like `InstallHarness`).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UninstallHarnessResult {
+    harness: HarnessId,
+    #[serde(flatten)]
+    report: zeron_harness::uninstall::UninstallReport,
+    harnesses: Vec<crate::registry::HarnessDescriptor>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -499,6 +520,71 @@ struct ReadAttachmentChunkParams {
     path: String,
     #[serde(default)]
     offset: u64,
+}
+
+const _: () = assert!(zeron_proto::VISUAL_MAX_BYTES == zeron_visual::MAX_SCRIPT_BYTES);
+const _: () = assert!(zeron_proto::VISUAL_MAX_ASSETS == zeron_visual::assets::MAX_ASSETS);
+const _: () = assert!(zeron_proto::VISUAL_MAX_ASSET_BYTES == zeron_visual::assets::MAX_ASSET_BYTES);
+const _: () =
+    assert!(zeron_proto::VISUAL_MAX_TOTAL_ASSET_BYTES == zeron_visual::assets::MAX_TOTAL_ASSET_BYTES);
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishVisualParams {
+    chat_id: String,
+    title: String,
+    script: String,
+    /// Files the script uses, base64 by name.
+    #[serde(default)]
+    assets: std::collections::BTreeMap<String, String>,
+}
+
+fn no_turn_for_visual() -> RpcError {
+    RpcError::Failed(
+        "This chat has no running turn on this device; show_visual only works from inside a turn.".into(),
+    )
+}
+
+/// Decode and bound a visual's assets.
+fn decode_visual_assets(
+    assets: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<(String, Vec<u8>)>, RpcError> {
+    use base64::Engine as _;
+    use zeron_visual::assets::{MAX_ASSET_BYTES, MAX_ASSETS, MAX_TOTAL_ASSET_BYTES, valid_name};
+    if assets.len() > MAX_ASSETS {
+        return Err(RpcError::BadParams(format!(
+            "a visual takes at most {MAX_ASSETS} assets"
+        )));
+    }
+    let mut total = 0;
+    let mut out = Vec::with_capacity(assets.len());
+    let mut seen = std::collections::HashSet::new();
+    for (name, data) in assets {
+        if !valid_name(name) {
+            return Err(RpcError::BadParams(format!(
+                "asset name '{name}' must be a plain file name"
+            )));
+        }
+        // Stored as files, and file systems often ignore case.
+        if !seen.insert(name.to_ascii_lowercase()) {
+            return Err(RpcError::BadParams(format!(
+                "asset names must differ by more than case ('{name}')"
+            )));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|e| RpcError::BadParams(format!("asset '{name}' is not base64: {e}")))?;
+        total += bytes.len();
+        if bytes.len() > MAX_ASSET_BYTES || total > MAX_TOTAL_ASSET_BYTES {
+            return Err(RpcError::BadParams(format!(
+                "asset '{name}' is too large ({} MB each, {} MB together)",
+                MAX_ASSET_BYTES / (1024 * 1024),
+                MAX_TOTAL_ASSET_BYTES / (1024 * 1024)
+            )));
+        }
+        out.push((name.clone(), bytes));
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1330,9 +1416,14 @@ impl Drop for Installing<'_> {
 }
 impl Installations {
     fn begin(&self, harness: HarnessId) -> Result<Installing<'_>, RpcError> {
+        self.begin_as(harness, "already installing")
+    }
+    /// Installs and uninstalls of one harness exclude each other, and
+    /// `CancelInstall` cancels whichever is running.
+    fn begin_as(&self, harness: HarnessId, busy: &str) -> Result<Installing<'_>, RpcError> {
         let mut installs = self.0.lock().unwrap_or_else(|e| e.into_inner());
         if installs.contains_key(&harness) {
-            return Err(RpcError::Failed("already installing".into()));
+            return Err(RpcError::Failed(busy.into()));
         }
         let cancel = zeron_harness::CancellationToken::new();
         installs.insert(harness, cancel.clone());
@@ -1386,6 +1477,63 @@ where
     Ok(registry.descriptors())
 }
 
+async fn run_requested_uninstall(
+    harness: HarnessId,
+    cancel: zeron_harness::CancellationToken,
+) -> Result<zeron_harness::uninstall::UninstallReport, zeron_harness::uninstall::UninstallError> {
+    zeron_harness::uninstall::uninstall_harness(harness, cancel).await
+}
+
+/// How long an uninstall waits for parked runtimes of the harness to retire
+/// before removing files anyway. A turn still running past it keeps its
+/// already-started process; its next spawn reports the agent not installed.
+const UNINSTALL_RETIRE_GRACE: Duration = Duration::from_secs(5);
+
+async fn uninstall_harness_with<F, Fut>(
+    registry: &HarnessRegistry,
+    updates: Option<&crate::harness_updates::HarnessUpdateCoordinator>,
+    harness: HarnessId,
+    grace: Duration,
+    uninstall: F,
+) -> Result<zeron_harness::uninstall::UninstallReport, RpcError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<
+            Output = Result<
+                zeron_harness::uninstall::UninstallReport,
+                zeron_harness::uninstall::UninstallError,
+            >,
+        >,
+{
+    // Serialized with update checks/applies of the same provider.
+    let _operation = match updates {
+        Some(coordinator) => Some(
+            coordinator
+                .begin_uninstall(harness)
+                .await
+                .map_err(RpcError::Failed)?,
+        ),
+        None => None,
+    };
+    // The pending-update marker holds new runs of this harness at dispatch
+    // (they resume once it clears and then fail as not installed) and retires
+    // parked persistent runtimes at once.
+    let Some(_marker) = registry.claim_update(harness) else {
+        return Err(RpcError::Failed(
+            "an update of this agent is in progress; try again when it finishes".into(),
+        ));
+    };
+    let lease = tokio::time::timeout(grace, registry.update_lease(harness))
+        .await
+        .ok();
+    let result = uninstall().await;
+    drop(lease);
+    if let Some(coordinator) = updates {
+        coordinator.forget_install(harness);
+    }
+    result.map_err(|error| RpcError::Failed(error.to_string()))
+}
+
 fn forward_deadline(method: &str) -> std::time::Duration {
     if method == methods::PREPARE_VOICE_V2 {
         return Duration::from_secs(65);
@@ -1405,6 +1553,10 @@ fn forward_deadline(method: &str) -> std::time::Duration {
         // Leave headroom beyond the provider's 15-minute mutation timeout for
         // queueing, verification, and the relayed response itself.
         methods::APPLY_HARNESS_UPDATE => Duration::from_secs(20 * 60),
+        // Checks every monitored provider, then applies updates one at a time.
+        methods::APPLY_ALL_HARNESS_UPDATES => Duration::from_secs(60 * 60),
+        // Retire grace plus npm's own uninstall bound (five minutes).
+        methods::UNINSTALL_HARNESS => Duration::from_secs(6 * 60),
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         // Allow the adapter discovery budget plus relay and shutdown overhead.
         methods::LIST_MODELS | methods::LIST_COMMANDS => Duration::from_secs(100),
@@ -1428,6 +1580,7 @@ fn forwardable(method: &str) -> bool {
         methods::FORK_SIDE_CHAT
             | methods::LIST_HARNESSES
             | methods::INSTALL_HARNESS
+            | methods::UNINSTALL_HARNESS
             | methods::CANCEL_INSTALL
             | methods::GET_TITLE_SETTINGS
             | methods::SET_TITLE_SETTINGS
@@ -1463,6 +1616,8 @@ fn forwardable(method: &str) -> bool {
             | methods::FETCH_ALL
             | methods::SWITCH_REF
             | methods::LIST_FOLDERS
+            | methods::GET_WORKTREE_SETTINGS
+            | methods::SET_WORKTREE_SETTINGS
             | methods::LIST_DRIVES
             | methods::SEARCH_HOME_FOLDERS
             | methods::RELEASE_HOME_FOLDER_SEARCH
@@ -1475,6 +1630,7 @@ fn forwardable(method: &str) -> bool {
             | methods::READ_WORKSPACE_FILE
             | methods::DELETE_WORKSPACE_ENTRY
             | methods::MOVE_WORKSPACE_ENTRY
+            | methods::READ_WORKSPACE_BYTES
             | methods::WRITE_WORKSPACE_FILE
             | methods::WATCH_WORKSPACE_FILES
             | methods::CREATE_WORKTREE
@@ -1522,6 +1678,8 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_HARNESS_UPDATES
             | methods::CHECK_HARNESS_UPDATES
             | methods::APPLY_HARNESS_UPDATE
+            | methods::APPLY_ALL_HARNESS_UPDATES
+            | methods::LIST_HARNESS_UPDATES
             | methods::CANCEL_HARNESS_UPDATE
             | methods::DISMISS_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY
@@ -1833,6 +1991,31 @@ impl RpcService for EngineRpc {
                 })
                 .await?;
                 RpcReply::value(&descriptors)
+            }
+            methods::UNINSTALL_HARNESS => {
+                let p: UninstallHarnessParams = parse_params(params)?;
+                let report = if p.dry_run {
+                    zeron_harness::uninstall::preview(p.harness)
+                        .map_err(|error| RpcError::Failed(error.to_string()))?
+                } else {
+                    let running = self
+                        .registry
+                        .installs
+                        .begin_as(p.harness, "already installing or uninstalling")?;
+                    uninstall_harness_with(
+                        &self.registry,
+                        self.harness_updates.as_ref(),
+                        p.harness,
+                        UNINSTALL_RETIRE_GRACE,
+                        || run_requested_uninstall(p.harness, running.cancel.clone()),
+                    )
+                    .await?
+                };
+                RpcReply::value(&UninstallHarnessResult {
+                    harness: p.harness,
+                    report,
+                    harnesses: self.registry.descriptors(),
+                })
             }
             methods::CANCEL_INSTALL => {
                 let p: ListModelsParams = parse_params(params)?;
@@ -2500,6 +2683,14 @@ impl RpcService for EngineRpc {
                     .map_err(RpcError::Failed)?;
                 RpcReply::value(&serde_json::json!({ "ok": true, "version": version }))
             }
+            methods::APPLY_ALL_HARNESS_UPDATES => RpcReply::value(
+                &self
+                    .harness_updates()?
+                    .apply_all()
+                    .await
+                    .map_err(RpcError::Failed)?,
+            ),
+            methods::LIST_HARNESS_UPDATES => RpcReply::value(&self.harness_updates()?.snapshot()),
             methods::CANCEL_HARNESS_UPDATE => {
                 let p: HarnessUpdateParams = parse_params(params)?;
                 let harness = p
@@ -3164,6 +3355,16 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&serde_json::json!({ "branch": branch }))
             }
+            methods::GET_WORKTREE_SETTINGS => RpcReply::value(&self.repos.worktree_settings()),
+            methods::SET_WORKTREE_SETTINGS => {
+                let settings: zeron_proto::WorktreeSettings = parse_params(params)?;
+                let status = self
+                    .repos
+                    .set_worktree_settings(settings)
+                    .await
+                    .map_err(|error| RpcError::Failed(error.to_string()))?;
+                RpcReply::value(&status)
+            }
             methods::LIST_FOLDERS => {
                 let p: ListFoldersParams = parse_params(params)?;
                 let listing = self
@@ -3270,6 +3471,17 @@ impl RpcService for EngineRpc {
                 .map_err(|_| RpcError::Failed("workspace search warm-up timed out".into()))?
                 .map_err(RpcError::from)?;
                 RpcReply::value(&result)
+            }
+            methods::READ_WORKSPACE_BYTES => {
+                let request: zeron_proto::ReadWorkspaceBytesRequest = parse_params(params)?;
+                let chunk = tokio::time::timeout(
+                    crate::workspace_files::WORKSPACE_FILE_RPC_TIMEOUT,
+                    self.workspace_files.read_bytes(request),
+                )
+                .await
+                .map_err(|_| RpcError::Failed("Workspace file read timed out".into()))?
+                .map_err(RpcError::from)?;
+                RpcReply::value(&chunk)
             }
             methods::READ_WORKSPACE_IMAGE => {
                 let request: zeron_proto::ReadWorkspaceImageRequest = parse_params(params)?;
@@ -3679,6 +3891,76 @@ impl RpcService for EngineRpc {
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&chunk)
             }
+            methods::PUBLISH_VISUAL => {
+                let p: PublishVisualParams = parse_params(params)?;
+                let title: String = p
+                    .title
+                    .trim()
+                    .chars()
+                    .take(zeron_proto::VISUAL_MAX_TITLE_CHARS)
+                    .collect();
+                if title.is_empty() {
+                    return Err(RpcError::BadParams("title is empty".into()));
+                }
+                if p.script.trim().is_empty() || p.script.len() > zeron_proto::VISUAL_MAX_BYTES {
+                    return Err(RpcError::BadParams(format!(
+                        "script must be 1 to {} bytes",
+                        zeron_proto::VISUAL_MAX_BYTES
+                    )));
+                }
+                // Before decoding and storing anything (checked again below).
+                if !self.sessions.has_run(&p.chat_id) {
+                    return Err(no_turn_for_visual());
+                }
+                let id = format!("v:{}", crate::new_id());
+                let assets = decode_visual_assets(&p.assets)?;
+                // Run the script the way the desktop will (setup, render,
+                // every draw, every control) before anyone sees it, so the
+                // agent gets its errors with line numbers and can fix them.
+                let uploads = self.uploads.clone();
+                let (stored_id, script) = (id.clone(), p.script);
+                let (path, report) = tokio::task::spawn_blocking(move || {
+                    let files = zeron_visual::Assets::new(
+                        assets
+                            .iter()
+                            .map(|(name, bytes)| (name.clone(), bytes.as_slice().into()))
+                            .collect(),
+                    );
+                    let checked = zeron_visual::check_with_assets(
+                        &script,
+                        zeron_visual::seed_for(&stored_id),
+                        files,
+                    );
+                    let report = checked
+                        .map_err(|e| RpcError::BadParams(format!("visual script failed: {e}")))?;
+                    // Assets first: a script is only ever found with its files.
+                    uploads
+                        .store_visual_assets(&stored_id, &assets)
+                        .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    let path = uploads.store_visual(&stored_id, &script).map_err(|e| {
+                        uploads.remove_visual(&stored_id);
+                        RpcError::Failed(e.to_string())
+                    })?;
+                    Ok::<_, RpcError>((path, report))
+                })
+                .await
+                .map_err(|e| RpcError::Failed(e.to_string()))??;
+                let event = AgentEvent::Visual {
+                    id: id.clone(),
+                    path: path.clone(),
+                    title: title.clone(),
+                };
+                if !self.sessions.inject_event(&p.chat_id, event) {
+                    self.uploads.remove_visual(&id);
+                    return Err(no_turn_for_visual());
+                }
+                RpcReply::value(&serde_json::json!({
+                    "id": id,
+                    "title": title,
+                    "checkedInteractions": report.interactions,
+                    "printed": report.logs,
+                }))
+            }
             methods::FETCH_TOOL_BLOB => {
                 let p: FetchToolBlobParams = parse_params(params)?;
                 let text = self
@@ -3943,6 +4225,293 @@ mod tests {
     #[ignore = "downloads the official npm package into an isolated temporary prefix"]
     async fn installer_rpc_npm() {
         installer_rpc_fixture("npm").await;
+    }
+
+    // Install → uninstall → reinstall through the RPC surface, one install
+    // method per mode, each in a subprocess with a private HOME/PATH.
+    #[cfg(unix)]
+    async fn uninstall_rpc_fixture(mode: &str) {
+        use std::sync::Arc;
+        const CHILD: &str = "ZERON_UNINSTALL_FIXTURE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let root = root.path().canonicalize().unwrap();
+            let bin = root.join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            // Vendor layouts, written the way each installer writes them.
+            let (variable, script) = match mode {
+                "vendor" => (
+                    "ZERON_INSTALLER_COMMAND_CLAUDECODE",
+                    "mkdir -p \"$HOME/.local/share/claude/versions\" \"$HOME/.local/bin\" && \
+                     printf '#!/bin/sh\\necho 2.1.14\\n' > \"$HOME/.local/share/claude/versions/2.1.14\" && \
+                     /bin/chmod +x \"$HOME/.local/share/claude/versions/2.1.14\" && \
+                     ln -sf \"$HOME/.local/share/claude/versions/2.1.14\" \"$HOME/.local/bin/claude\"",
+                ),
+                "npm" => (
+                    "ZERON_INSTALLER_COMMAND_OPENCODE",
+                    "p=\"$HOME/npm/lib/node_modules/opencode-ai/bin\" && mkdir -p \"$p\" \"$HOME/npm/bin\" && \
+                     printf '#!/bin/sh\\necho 1.14.0\\n' > \"$p/opencode\" && /bin/chmod +x \"$p/opencode\" && \
+                     ln -sf \"$p/opencode\" \"$HOME/npm/bin/opencode\"",
+                ),
+                _ => ("ZERON_UNUSED", ""),
+            };
+            let npm_bin = root.join("npm/bin");
+            std::fs::create_dir_all(&npm_bin).unwrap();
+            // The prefix's npm: records its argv, removes the package + shim.
+            std::fs::write(
+                npm_bin.join("npm"),
+                "#!/bin/sh\necho \"$@\" > \"$HOME/npm.log\"\nfor last; do :; done\n\
+                 /bin/rm -rf \"$7/lib/node_modules/$last\" \"$7/bin/opencode\"\n",
+            )
+            .unwrap();
+            std::process::Command::new("/bin/chmod")
+                .arg("+x")
+                .arg(npm_bin.join("npm"))
+                .status()
+                .unwrap();
+            let test = format!("rpc::tests::uninstall_rpc_{mode}");
+            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture"])
+                .env(CHILD, &root)
+                .env(variable, script)
+                .env("ZERON_NO_LOGIN_SHELL", "1")
+                .env("HOME", &root)
+                .env("XDG_CONFIG_HOME", root.join("config"))
+                .env_remove("XDG_DATA_HOME")
+                .env_remove("CODEX_HOME")
+                .env_remove("ZERON_DATA_DIR")
+                .env("ZERON_ADAPTERS_DIR", root.join(".zeron/adapters"))
+                .env(
+                    "PATH",
+                    std::env::join_paths([
+                        bin.as_path(),
+                        &npm_bin,
+                        "/usr/bin".as_ref(),
+                        "/bin".as_ref(),
+                    ])
+                    .unwrap(),
+                )
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            println!("{}", String::from_utf8_lossy(&output.stdout));
+            return;
+        }
+        let root = std::path::PathBuf::from(std::env::var_os(CHILD).unwrap());
+        let harness = match mode {
+            "vendor" => HarnessId::ClaudeCode,
+            "npm" => HarnessId::Opencode,
+            "archive" => HarnessId::Antigravity,
+            "outside" => HarnessId::Codex,
+            _ => unreachable!(),
+        };
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(match harness {
+            HarnessId::ClaudeCode => Arc::new(zeron_harness::ClaudeHarness::new()),
+            HarnessId::Opencode => Arc::new(zeron_harness::OpencodeHarness::new()),
+            HarnessId::Antigravity => Arc::new(zeron_harness::AcpHarness::antigravity()),
+            _ => Arc::new(zeron_harness::CodexHarness::new()) as Arc<dyn zeron_harness::Harness>,
+        });
+        let core =
+            crate::EngineCore::assemble(&root.join("engine"), registry.clone(), harness, None)
+                .unwrap();
+        let rpc = core.rpc_service();
+        let params = serde_json::json!({ "harness": harness });
+        let dry = serde_json::json!({ "harness": harness, "dryRun": true });
+        let value = |reply: Result<RpcReply, RpcError>| match reply {
+            Ok(RpcReply::Value(value)) => value,
+            Ok(_) => panic!("expected a value"),
+            Err(error) => panic!("{error}"),
+        };
+        let installed = |value: &serde_json::Value| value["harnesses"][0]["installed"] == true;
+        match mode {
+            "vendor" | "npm" => {
+                rpc.handle(methods::INSTALL_HARNESS, params.clone())
+                    .await
+                    .unwrap();
+                assert!(registry.descriptors()[0].installed);
+                std::fs::create_dir_all(root.join(".claude")).unwrap();
+                std::fs::write(root.join(".claude/.credentials.json"), "{}").unwrap();
+
+                let preview = value(rpc.handle(methods::UNINSTALL_HARNESS, dry.clone()).await);
+                assert_eq!(preview["dryRun"], true);
+                assert!(installed(&preview), "a dry run changes nothing");
+                let done = value(rpc.handle(methods::UNINSTALL_HARNESS, params.clone()).await);
+                assert!(!installed(&done), "{done}");
+                assert_eq!(done["harnesses"][0]["enabled"], false);
+                assert_eq!(done["removed"], preview["removed"], "the preview was exact");
+                if mode == "vendor" {
+                    assert_eq!(
+                        done["removed"],
+                        serde_json::json!(["~/.local/bin/claude", "~/.local/share/claude"])
+                    );
+                    assert!(!root.join(".local/bin/claude").exists());
+                } else {
+                    assert_eq!(
+                        done["removed"],
+                        serde_json::json!(["npm uninstall -g opencode-ai (~/npm)"])
+                    );
+                    let argv = std::fs::read_to_string(root.join("npm.log")).unwrap();
+                    assert!(argv.contains("uninstall -g") && argv.ends_with("opencode-ai\n"));
+                    assert!(!root.join("npm/lib/node_modules/opencode-ai").exists());
+                }
+                assert!(
+                    root.join(".claude/.credentials.json").is_file(),
+                    "credentials stay"
+                );
+                // Idempotent: nothing left to remove is a clear error.
+                assert!(matches!(
+                    rpc.handle(methods::UNINSTALL_HARNESS, params.clone()).await,
+                    Err(RpcError::Failed(e)) if e.contains("is not installed")
+                ));
+                // And the same installer brings it back.
+                rpc.handle(methods::INSTALL_HARNESS, params.clone())
+                    .await
+                    .unwrap();
+                assert!(registry.descriptors()[0].installed);
+                println!(
+                    "UninstallHarness ({mode}): removed {} -> installed=false; reinstall -> installed=true",
+                    done["removed"]
+                );
+            }
+            "archive" => {
+                let Some(pin) = zeron_harness::acp::antigravity_archive() else {
+                    return;
+                };
+                let dir = root
+                    .join(".zeron/adapters")
+                    .join(pin.name)
+                    .join(pin.version);
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join(pin.entry), "#!/bin/sh\n").unwrap();
+                std::fs::write(dir.join(".zeron-install-ok"), format!("{}\n", pin.sha512)).unwrap();
+                assert!(registry.descriptors()[0].installed);
+                let done = value(rpc.handle(methods::UNINSTALL_HARNESS, params.clone()).await);
+                assert!(!installed(&done), "{done}");
+                assert_eq!(
+                    done["removed"],
+                    serde_json::json!(["~/.zeron/adapters/antigravity-acp"])
+                );
+                assert!(!root.join(".zeron/adapters/antigravity-acp").exists());
+                println!("UninstallHarness (archive): {}", done["removed"]);
+            }
+            "outside" => {
+                let codex = root.join("bin/codex");
+                std::fs::write(&codex, "#!/bin/sh\necho 0.42.0\n").unwrap();
+                std::process::Command::new("/bin/chmod")
+                    .arg("+x")
+                    .arg(&codex)
+                    .status()
+                    .unwrap();
+                assert!(registry.descriptors()[0].installed);
+                for request in [dry, params] {
+                    let error = match rpc.handle(methods::UNINSTALL_HARNESS, request).await {
+                        Err(RpcError::Failed(error)) => error,
+                        _ => panic!("a CLI outside Zeron must be refused"),
+                    };
+                    assert!(
+                        error.contains("installed outside Zeron")
+                            && error.contains("remove it with `rm"),
+                        "{error}"
+                    );
+                }
+                assert!(codex.is_file(), "nothing was removed");
+                assert!(registry.descriptors()[0].installed);
+                println!("UninstallHarness (outside): refused, binary kept");
+            }
+            _ => unreachable!(),
+        }
+        // Mid-uninstall the pending-update marker was held and released.
+        assert!(!registry.update_pending(harness));
+        assert!(forwardable(methods::UNINSTALL_HARNESS));
+        core.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uninstall_rpc_vendor() {
+        uninstall_rpc_fixture("vendor").await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uninstall_rpc_npm() {
+        uninstall_rpc_fixture("npm").await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uninstall_rpc_archive() {
+        uninstall_rpc_fixture("archive").await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn uninstall_rpc_outside() {
+        uninstall_rpc_fixture("outside").await;
+    }
+
+    /// A turn still running when its agent is uninstalled neither blocks the
+    /// uninstall nor survives it for new work: removal proceeds after the
+    /// retire grace, and a dispatch queued behind the marker resumes once it
+    /// clears (to find the agent gone).
+    #[tokio::test]
+    async fn uninstall_does_not_wait_out_a_running_turn() {
+        const GRACE: Duration = Duration::from_millis(200);
+        use std::sync::Arc;
+        let registry = Arc::new(HarnessRegistry::new());
+        let running = registry.execution_lease(HarnessId::Codex).await;
+        let queued = {
+            let registry = registry.clone();
+            let started = tokio::time::Instant::now();
+            tokio::spawn(async move {
+                // Give the uninstall time to claim the marker first.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let _lease = registry.execution_lease(HarnessId::Codex).await;
+                started.elapsed()
+            })
+        };
+        let removed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = removed.clone();
+        let report =
+            uninstall_harness_with(&registry, None, HarnessId::Codex, GRACE, || async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(zeron_harness::uninstall::UninstallReport::default())
+            })
+            .await
+            .unwrap();
+        assert_eq!(report, Default::default());
+        assert!(removed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!registry.update_pending(HarnessId::Codex));
+        // The running turn still holds its lease; the queued dispatch waited
+        // for the marker (not the turn) and runs now.
+        drop(running);
+        let waited = queued.await.unwrap();
+        assert!(waited >= GRACE, "{waited:?}");
+        // A second concurrent uninstall of the same agent is refused while
+        // an update holds the marker.
+        registry.begin_update(HarnessId::Codex);
+        assert!(matches!(
+            uninstall_harness_with(&registry, None, HarnessId::Codex, GRACE, || async {
+                unreachable!("must not run")
+            })
+            .await,
+            Err(RpcError::Failed(e)) if e.contains("update of this agent is in progress")
+        ));
+        registry.end_update(HarnessId::Codex);
+        assert_eq!(
+            forward_deadline(methods::UNINSTALL_HARNESS),
+            Duration::from_secs(6 * 60)
+        );
+        assert_eq!(
+            forward_deadline(methods::APPLY_ALL_HARNESS_UPDATES),
+            Duration::from_secs(60 * 60)
+        );
+        assert!(forwardable(methods::APPLY_ALL_HARNESS_UPDATES));
+        assert!(forwardable(methods::LIST_HARNESS_UPDATES));
     }
 
     #[tokio::test]
@@ -4216,6 +4785,8 @@ mod tests {
         assert!(forwardable(methods::READ_WORKSPACE_IMAGE));
         assert!(forwardable(methods::DELETE_WORKSPACE_ENTRY));
         assert!(forwardable(methods::MOVE_WORKSPACE_ENTRY));
+        assert!(forwardable(methods::READ_WORKSPACE_BYTES));
+        assert!(!is_stream_method(methods::READ_WORKSPACE_BYTES));
         assert!(forwardable(methods::WRITE_WORKSPACE_FILE));
         assert!(forwardable(methods::WATCH_WORKSPACE_FILES));
         assert!(forwardable(methods::WATCH_WORKSPACE_GIT_STATUS));

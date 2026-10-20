@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use zeron_client::events::NullListener;
 use zeron_client::{
     ChatIndicator, Client, ClientConfig, Credentials, DemoFixture, DemoOptions, MessageRole,
-    MessageStatus, SendOutcome, SendRequest, StreamSpeed, TranscriptScale,
+    MessageStatus, SendOutcome, SendRequest, StreamSpeed, SubagentGroups, SubagentState,
+    TranscriptScale,
 };
 
 fn demo(options: DemoOptions) -> (Client, tempfile::TempDir) {
@@ -61,7 +62,15 @@ fn front_page_mirrors_the_desktop_sidebar() {
     // Recency order; archived + child chats never appear.
     assert_eq!(
         ids(&ws.front.recent),
-        ["chat-cjk", "chat-home", "chat-deploy", "chat-blog"]
+        [
+            "chat-visuals",
+            "chat-fanout",
+            "chat-cjk",
+            "chat-background",
+            "chat-home",
+            "chat-deploy",
+            "chat-blog"
+        ]
     );
     assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
     assert_eq!(ids(ws.children("chat-veil")), ["chat-side"]);
@@ -105,7 +114,7 @@ fn front_page_mirrors_the_desktop_sidebar() {
     let cjk = ws.session("chat-cjk").unwrap();
     assert_eq!(cjk.project.as_ref().unwrap().color_index, zeron.color_index);
     assert_ne!(ws.project("space-edge").unwrap().group_key, zeron.group_key);
-    assert_eq!(ids(&ws.projectless), ["chat-home"]);
+    assert_eq!(ids(&ws.projectless), ["chat-visuals", "chat-home"]);
     assert!(ws.devices.iter().any(|d| d.is_self && d.id == "ios-test"));
     assert!(!ws.device("dev-studio").unwrap().online);
 
@@ -137,6 +146,49 @@ fn sidebar_writes_reorder_the_front_page() {
     let later = ws.front.sections.iter().find(|s| s.id == section).unwrap();
     assert_eq!(ids(&later.sessions), ["chat-deploy"]);
     assert!(!ids(&ws.front.recent).contains(&"chat-deploy"));
+    // A section lists its members in their placed order, as desktop does,
+    // and a placement out of Pinned unpins.
+    let members = |client: &Client| {
+        let ws = client.workspace();
+        ids(&ws
+            .front
+            .sections
+            .iter()
+            .find(|s| s.id == section)
+            .unwrap()
+            .sessions)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+    };
+    client
+        .place_session(
+            "chat-home",
+            Some(section.clone()),
+            None,
+            Some("chat-deploy".into()),
+        )
+        .unwrap();
+    assert_eq!(members(&client), ["chat-home", "chat-deploy"]);
+    assert!(!ids(&client.workspace().front.pinned).contains(&"chat-home"));
+    client
+        .place_session(
+            "chat-home",
+            Some(section.clone()),
+            Some("chat-deploy".into()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(members(&client), ["chat-deploy", "chat-home"]);
+    // A drop into Pinned lands between its neighbours.
+    client
+        .pin_session_at("chat-home", None, Some("chat-picker".into()))
+        .unwrap();
+    assert_eq!(
+        ids(&client.workspace().front.pinned),
+        ["chat-home", "chat-picker"]
+    );
+    assert_eq!(members(&client), ["chat-deploy"]);
     client.set_section_collapsed(&section, true).unwrap();
     client.rename_section(&section, "Someday").unwrap();
     let ws = client.workspace();
@@ -549,4 +601,81 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
     let row = client.workspace().session("chat-blog").unwrap().clone();
     assert_eq!(row.send_state, Some(zeron_client::SendState::Queued));
     assert_eq!(row.host_indicator, ChatIndicator::Idle);
+}
+
+#[test]
+fn rows_count_running_subagents_even_when_the_parent_is_done() {
+    let (client, _dir) = demo(fast());
+    let ws = client.workspace();
+    let fanout = ws.session("chat-fanout").unwrap();
+    assert_eq!(fanout.indicator, ChatIndicator::Working);
+    assert_eq!(fanout.running_subagents, 3);
+    // The parent's turn settled; two of its subagents still run.
+    let background = ws.session("chat-background").unwrap();
+    assert_eq!(background.indicator, ChatIndicator::Completed);
+    assert_eq!(background.running_subagents, 2);
+    assert_eq!(ws.session("chat-cjk").unwrap().running_subagents, 0);
+}
+
+#[test]
+fn subagents_group_like_the_desktop_and_open_read_only() {
+    let (client, _dir) = demo(fast());
+    let parent = client.open_session("chat-fanout").unwrap();
+    let groups = SubagentGroups::from_entries(&parent.snapshot().transcript_messages());
+    assert_eq!(
+        (
+            groups.running(),
+            groups.completed.len(),
+            groups.failed.len()
+        ),
+        (3, 13, 2)
+    );
+    // Longest-running first; the newest settled first.
+    let active: Vec<&str> = groups.active.iter().map(|r| r.doc_id.as_str()).collect();
+    assert_eq!(
+        active,
+        [
+            "chat-fanout--sub--fo-soak",
+            "chat-fanout--sub--fo-fuzz",
+            "chat-fanout--sub--fo-docs"
+        ]
+    );
+    assert_eq!(groups.failed[0].doc_id, "chat-fanout--sub--fo-ios");
+    assert_eq!(groups.active[0].title, "Soak-test reconnect storms");
+    assert_eq!(
+        groups.active[0].agent_type.as_deref(),
+        Some("general-purpose")
+    );
+
+    // A running subagent streams; a finished one is settled.
+    let live = client
+        .open_subagent("chat-fanout", "chat-fanout--sub--fo-fuzz")
+        .unwrap();
+    let snapshot = live.snapshot();
+    assert!(snapshot.hydrated && snapshot.streaming);
+    assert_eq!(snapshot.transcript()[0].message.role, MessageRole::User);
+    let done = client
+        .open_subagent("chat-fanout", &groups.completed[0].doc_id)
+        .unwrap();
+    assert!(!done.snapshot().streaming);
+    assert_eq!(groups.completed[0].state, SubagentState::Completed);
+    // Reopening returns the same session; chats and unknown docs refuse.
+    assert_eq!(
+        client
+            .open_subagent("chat-fanout", "chat-fanout--sub--fo-fuzz")
+            .unwrap()
+            .chat_id(),
+        "chat-fanout--sub--fo-fuzz"
+    );
+    assert!(client.open_subagent("chat-fanout", "chat-fanout").is_err());
+    assert!(
+        client
+            .open_subagent("chat-fanout", "chat-fanout--sub--nope")
+            .is_err()
+    );
+    assert!(
+        client
+            .open_subagent("chat-missing", "chat-fanout--sub--fo-docs")
+            .is_err()
+    );
 }

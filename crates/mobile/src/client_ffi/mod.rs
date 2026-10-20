@@ -12,9 +12,12 @@
 //! (`snapshot()` / `subscribe()`), never over FFI.
 
 mod accounts;
+mod demo_host;
 mod session;
 mod voice;
 pub use voice::*;
+mod subagents;
+mod tools;
 mod types;
 
 use std::sync::Arc;
@@ -22,6 +25,8 @@ use std::sync::Arc;
 use zeron_client as zc;
 
 pub use session::*;
+pub use subagents::*;
+pub use tools::*;
 pub use types::*;
 
 /// Receives coalesced change events (at most one burst per display frame).
@@ -58,6 +63,8 @@ where
 #[derive(uniffi::Object)]
 pub struct CoreClient {
     pub(crate) client: zc::Client,
+    /// Answers `host_call` in Demo mode (there is no engine to relay to).
+    demo_host: demo_host::DemoHost,
 }
 
 #[allow(dead_code)] // consumed in Rust by the layout engine
@@ -70,8 +77,11 @@ impl CoreClient {
     /// The Rust session handle for `chat_id` — opening it if needed — for the
     /// layout engine: `handle.snapshot()` (an `Arc<SessionSnapshot>`) and
     /// `handle.subscribe()` (a `watch::Receiver`). `None` for an unknown chat.
+    /// A subagent transcript is found once `open_subagent` has opened it.
     pub fn session_handle(&self, chat_id: &str) -> Option<zc::SessionHandle> {
-        self.client.open_session(chat_id).ok()
+        self.client
+            .session(chat_id)
+            .or_else(|| self.client.open_session(chat_id).ok())
     }
 }
 
@@ -90,7 +100,10 @@ impl CoreClient {
             credentials.into(),
             Arc::new(ListenerBridge(listener)),
         )?;
-        Ok(Arc::new(Self { client }))
+        Ok(Arc::new(Self {
+            client,
+            demo_host: demo_host::DemoHost::default(),
+        }))
     }
 
     pub fn is_demo(&self) -> bool {
@@ -249,6 +262,16 @@ impl CoreClient {
         Ok(self.client.pin_session(&chat_id)?)
     }
 
+    /// Pin between neighbours (`None` at either end).
+    pub fn pin_session_at(
+        &self,
+        chat_id: String,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> CoreResult<()> {
+        Ok(self.client.pin_session_at(&chat_id, after, before)?)
+    }
+
     pub fn unpin_session(&self, chat_id: String) -> CoreResult<()> {
         Ok(self.client.unpin_session(&chat_id)?)
     }
@@ -283,6 +306,20 @@ impl CoreClient {
     /// Move a session into a section (`None` = back to recent).
     pub fn assign_section(&self, chat_id: String, section_id: Option<String>) -> CoreResult<()> {
         Ok(self.client.assign_section(&chat_id, section_id)?)
+    }
+
+    /// Move a session into a section between its members (`None` at either
+    /// end), as a drop into the section does.
+    pub fn place_session(
+        &self,
+        chat_id: String,
+        section_id: Option<String>,
+        after: Option<String>,
+        before: Option<String>,
+    ) -> CoreResult<()> {
+        Ok(self
+            .client
+            .place_session(&chat_id, section_id, after, before)?)
     }
 
     /// Create (or find) the project for `path` on `device_id`. Returns its id.
@@ -484,6 +521,32 @@ impl CoreClient {
         let bytes =
             on_runtime(async move { client.read_attachment(&device_id, &path).await }).await?;
         Ok(bytes.as_ref().clone())
+    }
+
+    /// Untyped host RPC to `device_id`'s engine: `method` with JSON
+    /// `params_json` (an object; empty = `{}`), returning the reply as JSON.
+    /// For engine surfaces the typed API doesn't wrap yet (harness installs,
+    /// agent sign-ins). Demo mode answers from a simulated engine.
+    pub async fn host_call(
+        &self,
+        device_id: String,
+        method: String,
+        params_json: String,
+    ) -> CoreResult<String> {
+        let params: serde_json::Value = if params_json.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(&params_json).map_err(|e| CoreError::InvalidArgument {
+                message: format!("params: {e}"),
+            })?
+        };
+        let reply = if self.client.is_demo() {
+            self.demo_host.call(&method, params).await?
+        } else {
+            let client = self.client.clone();
+            on_runtime(async move { client.host_call(&device_id, &method, params).await }).await?
+        };
+        Ok(reply.to_string())
     }
 
     // ── lifecycle ──────────────────────────────────────────────────────────
