@@ -345,7 +345,7 @@ private fun SessionChips(app: AppModel, client: CoreClient, c: ComposerState, ro
 
     val modelLabel = row?.modelLabel ?: row?.harnessLabel
     // Plan usage of the agent's login on the host, with a quick account switcher.
-    PlanUsageChip(accounts, harness, onError = { app.toast(it) }, onDetails = onUsage)
+    PlanUsageChip(accounts, harness, onError = { app.toast(it) }, onDetails = onUsage, context = c.contextUsage)
     if (modelLabel != null) {
         val label = row?.harnessLabel ?: harnessLabel(harness)
         val catalog = models.orEmpty().map { ModelChoice(harness, label, it) }
@@ -404,7 +404,8 @@ private fun SessionChips(app: AppModel, client: CoreClient, c: ComposerState, ro
     if (project?.gitDetected == true || !row?.branch.isNullOrEmpty()) {
         SessionBranchChip(row?.branch?.takeIf { it.isNotEmpty() }, row?.cwd, project?.path)
     }
-    ContextUsageChip(c.contextUsage)
+    // Folded into the plan-usage pill when that shows.
+    if (!planUsageShown(accounts, harness)) ContextUsageChip(c.contextUsage)
 }
 
 @Composable

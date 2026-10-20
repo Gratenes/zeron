@@ -777,10 +777,16 @@ fun AgentLoginDialog(state: AgentAccountsState, deviceName: String) {
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun PlanUsageChip(state: AgentAccountsState?, harness: String?, onError: (String) -> Unit, onDetails: () -> Unit) {
+fun PlanUsageChip(
+    state: AgentAccountsState?,
+    harness: String?,
+    onError: (String) -> Unit,
+    onDetails: () -> Unit,
+    context: uniffi.zeron_core.ContextUsage? = null,
+) {
+    if (!planUsageShown(state, harness)) return
     val provider = agentProvider(harness) ?: return
-    if (state == null || !provider.reportsUsage) return
-    val active = state.active(harness) ?: return
+    val active = state?.active(harness) ?: return
     val fraction = active.usedFraction
     var open by remember { mutableStateOf(false) }
     ContextChip(
@@ -808,6 +814,14 @@ fun PlanUsageChip(state: AgentAccountsState?, harness: String?, onError: (String
                     } else {
                         active.usageWindows.forEach { w -> CompactMeter(w.label, w.usedFraction, w.resetLabel) }
                         active.usageError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                    }
+                }
+                // This chat's context window (the composer shows one usage pill, not two).
+                if (ContextUsageText.hasWindow(context)) {
+                    androidx.compose.material3.HorizontalDivider(Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                        Text("This chat", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        CompactMeter("Context", (ContextUsageText.fraction(context) ?: 0.0).toFloat(), ContextUsageText.details(context).firstOrNull())
                     }
                 }
                 val accounts = state.accounts(provider.harness).filter { it.provider == active.provider }
@@ -903,4 +917,10 @@ private fun QuickAccountRow(a: AgentAccount, busy: Boolean, onSwitch: () -> Unit
             Text(percent(f), style = MaterialTheme.typography.labelMedium, color = if (f >= 0.75f) usageColor(f) else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(44.dp), textAlign = androidx.compose.ui.text.style.TextAlign.End)
         }
     }
+}
+
+/** Whether [PlanUsageChip] shows for this agent; when it does it carries the chat's context window too. */
+fun planUsageShown(state: AgentAccountsState?, harness: String?): Boolean {
+    val provider = agentProvider(harness) ?: return false
+    return state != null && provider.reportsUsage && state.active(harness) != null
 }
