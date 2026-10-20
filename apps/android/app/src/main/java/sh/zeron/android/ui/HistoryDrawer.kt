@@ -12,6 +12,14 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.Dp
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.input.pointer.util.addPointerInputChange
+import kotlin.math.abs
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.MutatorMutex
@@ -41,7 +49,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -62,7 +69,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -79,13 +85,11 @@ import uniffi.zeron_core.ChatIndicator
 import uniffi.zeron_core.SessionRow
 
 private val DrawerWidth = 312.dp
-/** How far the page behind slides while the drawer opens. */
-private val ContentShift = 36.dp
-/** The left-edge strip that starts the swipe. */
-private val EdgeWidth = 20.dp
-/** Android exempts at most 200dp per edge from the system back gesture. */
-private val ExclusionHeight = 200.dp
+/** How far the page behind slides while the drawer opens (parallax). */
+private val ContentShift = 96.dp
 private val NeedsYou = Color(0xFFF5B963)
+/** Critically damped: carries the release velocity, never overshoots. */
+private val DrawerSpring = spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 520f)
 
 /** 0 = closed, 1 = open; follows the finger mid-swipe. */
 @Stable
@@ -98,8 +102,9 @@ class HistoryDrawerState {
     suspend fun open() = animateTo(1f)
     suspend fun close() = animateTo(0f)
 
+    /** [velocity] is in progress units per second. */
     internal suspend fun animateTo(target: Float, velocity: Float = 0f) = mutex.mutate {
-        animate(progress, target, velocity, tween(260, easing = CubicBezierEasing(.2f, .8f, .2f, 1f))) { v, _ -> progress = v }
+        animate(progress, target, velocity, DrawerSpring) { v, _ -> progress = v.coerceIn(0f, 1f) }
     }
 
     /** A finger takes over: cancels any running open/close animation. */
@@ -111,9 +116,11 @@ class HistoryDrawerState {
 }
 
 /**
- * Swipe right from the left edge for chat history. The drawer tracks the
- * finger, the page behind slides and dims, and a release past 40% (or a
- * flick) opens it. [enabled] gates the edge swipe; [drawer] is its content.
+ * Swipe right anywhere on the page for chat history. Children get the first
+ * say: vertical scrolling, code blocks that scroll sideways and row swipes keep
+ * their gestures; a mostly-horizontal rightward drag nobody claimed opens the
+ * drawer, which tracks the finger 1:1 and settles on a spring that carries the
+ * release velocity. [enabled] gates the swipe; [drawer] is its content.
  */
 @Composable
 fun HistoryDrawerHost(
@@ -127,9 +134,9 @@ fun HistoryDrawerHost(
     val widthPx = with(density) { DrawerWidth.toPx() }
     val settle: (Float) -> Unit = { velocity ->
         val target = when {
-            velocity > 800f -> 1f
-            velocity < -800f -> 0f
-            state.progress > 0.4f -> 1f
+            velocity > 600f -> 1f
+            velocity < -600f -> 0f
+            state.progress > 0.5f -> 1f
             else -> 0f
         }
         scope.launch { state.animateTo(target, velocity / widthPx) }
@@ -145,41 +152,18 @@ fun HistoryDrawerHost(
 
     Box(Modifier.fillMaxSize()) {
         val p = state.progress
-        Box(Modifier.fillMaxSize().graphicsLayer { translationX = state.progress * ContentShift.toPx() }) { content() }
-        if (enabled && !state.isOpen) {
-            // The grip hints the gesture.
-            Box(
-                Modifier
-                    .align(Alignment.CenterStart)
-                    .padding(start = 3.dp)
-                    .size(4.dp, 56.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(MaterialTheme.colorScheme.outlineVariant),
-            )
-        }
-        if (enabled) {
-            // The strip that catches the swipe stays put while the drawer opens:
-            // removing it mid-gesture would drop the drag.
-            Box(
-                Modifier
-                    .align(Alignment.CenterStart)
-                    .width(EdgeWidth)
-                    .fillMaxHeight()
-                    // Keep the system back swipe off the middle band, where the grip is.
-                    .systemGestureExclusion { coords ->
-                        val band = with(density) { ExclusionHeight.toPx() }
-                        val mid = coords.size.height / 2f
-                        Rect(0f, mid - band / 2, coords.size.width.toFloat(), mid + band / 2)
-                    }
-                    .then(dragModifier),
-            )
-        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { translationX = state.progress * ContentShift.toPx() }
+                .openSwipe(enabled, state, widthPx, settle),
+        ) { content() }
         if (p > 0f) {
             Box(
                 Modifier
                     .fillMaxSize()
                     .graphicsLayer { alpha = state.progress }
-                    .background(Color.Black.copy(alpha = 0.62f))
+                    .background(Color.Black.copy(alpha = 0.55f))
                     .pointerInput(Unit) { detectTapGestures { scope.launch { state.close() } } }
                     .then(dragModifier),
             )
@@ -187,10 +171,61 @@ fun HistoryDrawerHost(
                 Modifier
                     .width(DrawerWidth)
                     .fillMaxHeight()
-                    .graphicsLayer { translationX = (state.progress - 1f) * (widthPx + 24.dp.toPx()) }
+                    .graphicsLayer { translationX = (state.progress - 1f) * widthPx }
                     .then(dragModifier),
             ) { drawer() }
         }
+    }
+}
+
+/**
+ * Claims a rightward, mostly-horizontal drag that no child consumed (children
+ * see pointer events first in the Main pass), then drives [state] with it.
+ */
+private fun Modifier.openSwipe(
+    enabled: Boolean,
+    state: HistoryDrawerState,
+    widthPx: Float,
+    onRelease: (Float) -> Unit,
+): Modifier = if (!enabled) this else pointerInput(state, widthPx) {
+    val slop = viewConfiguration.touchSlop
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        if (state.isOpen) return@awaitEachGesture
+        var dx = 0f
+        var dy = 0f
+        // Decide: wait out the touch slop, backing off if anyone else claims it.
+        while (true) {
+            val event = awaitPointerEvent()
+            if (event.changes.size > 1) return@awaitEachGesture
+            val change = event.changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
+            if (!change.pressed || change.isConsumed) return@awaitEachGesture
+            val delta = change.positionChange()
+            dx += delta.x
+            dy += delta.y
+            if (abs(dy) > slop && abs(dy) >= abs(dx)) return@awaitEachGesture
+            if (dx < -slop) return@awaitEachGesture
+            if (dx > slop && dx > abs(dy) * 1.2f) {
+                change.consume()
+                break
+            }
+        }
+        // Drive: the drawer's edge follows the finger from the touch-down point.
+        val velocity = VelocityTracker()
+        velocity.addPosition(down.uptimeMillis, down.position)
+        state.dragBy(dx / widthPx)
+        while (true) {
+            val event = awaitPointerEvent()
+            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+            velocity.addPointerInputChange(change)
+            if (!change.pressed) {
+                change.consume()
+                break
+            }
+            state.dragBy(change.positionChange().x / widthPx)
+            change.consume()
+        }
+        onRelease(velocity.calculateVelocity().x)
     }
 }
 
