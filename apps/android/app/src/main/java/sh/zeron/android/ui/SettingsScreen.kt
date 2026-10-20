@@ -53,7 +53,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings: () -> Unit = {}) {
+fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings: () -> Unit = {}, onOpenAccounts: (String) -> Unit = {}) {
     val appearance by model.appearance.collectAsState()
     val groupByProject by model.groupByProject.collectAsState()
     var confirmSignOut by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
@@ -184,7 +184,8 @@ fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings:
                 Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
                     devices.forEachIndexed { i, device ->
                         SegmentedListItem(
-                            onClick = {},
+                            // A host's agent logins (Claude Code, Codex, …) and their plan usage.
+                            onClick = { if (device.isExecutionHost) onOpenAccounts(device.id) },
                             shapes = segmentedShapes(i, devices.size),
                             colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                             leadingContent = {
@@ -206,11 +207,17 @@ fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings:
                                 )
                             },
                             trailingContent = {
-                                Box(
-                                    Modifier.size(10.dp).clip(CircleShape).background(
-                                        if (device.online || device.isSelf) successColor() else MaterialTheme.colorScheme.outlineVariant,
-                                    ),
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        Modifier.size(10.dp).clip(CircleShape).background(
+                                            if (device.online || device.isSelf) successColor() else MaterialTheme.colorScheme.outlineVariant,
+                                        ),
+                                    )
+                                    if (device.isExecutionHost) {
+                                        Spacer(Modifier.width(12.dp))
+                                        ZIcon(ZIcons.ChevronRight, "Accounts", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline)
+                                    }
+                                }
                             },
                         ) { Text(device.name) }
                     }

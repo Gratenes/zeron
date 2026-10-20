@@ -92,7 +92,9 @@ object Routes {
     const val ARCHIVED = "archived"
     const val VOICE = "voice"
     const val VOICE_SETTINGS = "voice-settings"
+    const val ACCOUNTS = "accounts/{device}"
     fun chat(id: String) = "chat/$id"
+    fun accounts(deviceId: String) = "accounts/${android.net.Uri.encode(deviceId)}"
 }
 
 @Composable
@@ -125,7 +127,10 @@ private fun MainNav(model: AppModel) {
             "new" -> nav.navigate(Routes.NEW)
             "search" -> nav.navigate(Routes.SEARCH)
             "archived" -> nav.navigate(Routes.ARCHIVED)
-            else -> if (route.startsWith("chat:")) nav.navigate(Routes.chat(route.removePrefix("chat:")))
+            else -> when {
+                route.startsWith("chat:") -> nav.navigate(Routes.chat(route.removePrefix("chat:")))
+                route.startsWith("accounts:") -> nav.navigate(Routes.accounts(route.removePrefix("accounts:")))
+            }
         }
     }
     // The notification, a snackbar Retry or `voice-stage` asks for the call.
@@ -191,6 +196,7 @@ private fun MainNav(model: AppModel) {
                                     onBack = { selected = null },
                                     onOpenVoice = { nav.navigate(Routes.VOICE) { launchSingleTop = true } },
                                     onVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
+                                    onOpenAccounts = { nav.navigate(Routes.accounts(it)) },
                                 )
                             }
                         } else {
@@ -216,7 +222,12 @@ private fun MainNav(model: AppModel) {
                 onOpenVoice = { nav.navigate(Routes.VOICE) { launchSingleTop = true } },
                 onVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
                 onOpenHistory = if (wide) null else openHistory,
+                onOpenAccounts = { nav.navigate(Routes.accounts(it)) },
             )
+        }
+        composable(Routes.ACCOUNTS) { entry ->
+            val device = entry.arguments?.getString("device") ?: return@composable
+            AgentAccountsScreen(model, device, onBack = { nav.popBackStack() })
         }
         composable(Routes.VOICE) {
             sh.zeron.android.voice.VoiceStageScreen(
@@ -283,7 +294,7 @@ private fun Home(model: AppModel, nav: NavHostController, open: (String) -> Unit
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         when (tab) {
             Tab.Sessions -> SessionsScreen(model, onOpen = open, onArchived = { nav.navigate(Routes.ARCHIVED) }, selected = selected)
-            Tab.Settings -> SettingsScreen(model, onArchived = { nav.navigate(Routes.ARCHIVED) }, onOpenVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) })
+            Tab.Settings -> SettingsScreen(model, onArchived = { nav.navigate(Routes.ARCHIVED) }, onOpenVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) }, onOpenAccounts = { nav.navigate(Routes.accounts(it)) })
         }
         // Floating chrome over a soft scrim: new session, then the nav capsule.
         Column(

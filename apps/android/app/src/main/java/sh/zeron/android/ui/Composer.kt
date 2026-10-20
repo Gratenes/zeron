@@ -118,6 +118,8 @@ fun Composer(
     row: SessionRow?,
     transcript: TranscriptState,
     draft: ComposerModel,
+    accounts: AgentAccountsState? = null,
+    onUsage: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val focus = remember { FocusRequester() }
@@ -275,7 +277,7 @@ fun Composer(
             focusRequester = focus,
         ) {
             if (running && editingId == null) DeliveryChip(delivery, canSteer) { delivery = it }
-            SessionChips(client, c, row)
+            SessionChips(model, client, c, row, accounts, onUsage)
         }
     }
 }
@@ -316,7 +318,7 @@ private fun DeliveryChip(current: Delivery, canSteer: Boolean, onChange: (Delive
 }
 
 @Composable
-private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?) {
+private fun SessionChips(model: AppModel, client: CoreClient, c: ComposerState, row: SessionRow?, accounts: AgentAccountsState?, onUsage: () -> Unit) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val harness = row?.harness ?: "claude-code"
@@ -336,6 +338,8 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
     }
 
     val modelLabel = row?.modelLabel ?: row?.harnessLabel
+    // Plan usage of the agent's login on the host, with a quick account switcher.
+    PlanUsageChip(accounts, harness, onError = { model.toast(it) }, onDetails = onUsage)
     if (modelLabel != null) {
         ContextChip(modelLabel, leading = { HarnessMark(harness, 14.dp) }, onClick = { open("model") }) {
             ChoiceMenu(menu == "model", { menu = null }, listOf(MenuSection(row?.harnessLabel, models.orEmpty().map { m ->
@@ -377,7 +381,7 @@ private fun SessionChips(client: CoreClient, c: ComposerState, row: SessionRow?)
             ContextChip(
                 "${(fraction * 100).toInt()}% context",
                 leading = { ZIcon(if (fraction >= 0.85) ZIcons.Warning else ZIcons.Context, null, Modifier.size(16.dp)) },
-                onClick = {},
+                onClick = onUsage,
                 tint = if (fraction >= 0.85) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }

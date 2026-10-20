@@ -95,7 +95,7 @@ private data class TextSheet(val title: String, val text: String, val mono: Bool
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoice: () -> Unit = {}, onVoiceSettings: () -> Unit = {}, onOpenHistory: (() -> Unit)? = null) {
+fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoice: () -> Unit = {}, onVoiceSettings: () -> Unit = {}, onOpenHistory: (() -> Unit)? = null, onOpenAccounts: (String) -> Unit = {}) {
     val client by model.client.collectAsState()
     val core = client ?: return
     val handle: SessionHandle = remember(chatId) { runCatching { core.openSession(chatId) }.getOrNull() } ?: run {
@@ -129,6 +129,9 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
     // Upload rings on pending thumbnails follow the escort.
     LaunchedEffect(composer.transferProgress) { transcript.uploadProgress = composer.transferProgress }
     val row = remember(workspace, chatId) { model.row(chatId) }
+    // The host's login for this agent: plan usage in the composer and the usage sheet.
+    val accounts = rememberAgentAccounts(core, composer.host.deviceId, enabled = agentProvider(row?.harness)?.reportsUsage == true)
+    var usageSheet by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -205,6 +208,7 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
                         overflow,
                         { overflow = false },
                         listOfNotNull(
+                            MenuAction("Usage & account", ZIcons.Context) { usageSheet = true },
                             MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
                             row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
                             row?.let {
@@ -242,12 +246,27 @@ fun SessionScreen(model: AppModel, chatId: String, onBack: () -> Unit, onOpenVoi
             if (input != null) {
                 QuestionPanel(input) { answers -> runCatching { handle.respondInput(input.requestId, answers) } }
             } else {
-                Composer(model, core, handle, composer, row, transcript, draft)
+                Composer(model, core, handle, composer, row, transcript, draft, accounts = accounts, onUsage = { usageSheet = true })
             }
         }
     }
 
     viewing?.let { ImageViewer(it) { viewing = null } }
+
+    if (usageSheet) {
+        SessionUsageSheet(
+            model,
+            accounts,
+            composer,
+            harness = row?.harness,
+            harnessLabel = row?.harnessLabel,
+            onManage = {
+                usageSheet = false
+                onOpenAccounts(composer.host.deviceId)
+            },
+            onDismiss = { usageSheet = false },
+        )
+    }
 
     sheet?.let { s ->
         ModalBottomSheet(onDismissRequest = { sheet = null }) {

@@ -24,6 +24,7 @@
 //! Demo mode ([`Credentials::Demo`]) runs the *same* registry/session code
 //! against an in-process simulated host, so it exercises the real pipeline.
 
+pub mod agent_accounts;
 pub mod attachments;
 pub mod auth;
 pub mod catalog;

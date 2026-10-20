@@ -9,6 +9,7 @@
 //! id), streaming replies through `SegmentWriter`, flipping session status
 //! rows, draining the queue, and answering relay RPCs.
 
+mod accounts;
 mod fixtures;
 mod png;
 mod transcripts;
@@ -79,6 +80,7 @@ pub(crate) struct DemoHost {
     uploads: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     rng: Mutex<Rng>,
     cancel: Mutex<Option<CancellationToken>>,
+    accounts: Mutex<accounts::DemoAccounts>,
 }
 
 fn doc_err(err: zeron_doc::DocError) -> ClientError {
@@ -99,6 +101,7 @@ impl DemoHost {
             uploads: Mutex::new(HashMap::new()),
             rng: Mutex::new(Rng(0x9e37_79b9_7f4a_7c15)),
             cancel: Mutex::new(None),
+            accounts: Mutex::new(accounts::DemoAccounts::default()),
         })
     }
 
