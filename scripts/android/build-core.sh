@@ -19,15 +19,18 @@ cd "$ROOT"
 
 cargo build --locked -p zeron-mobile --lib --profile mobile
 cargo build --locked -p zeron-mobile --bin uniffi-bindgen --features bindgen --profile mobile
-HOST_LIB="$ROOT/target/mobile/libzeron_mobile.$([[ "$(uname)" == Darwin ]] && echo dylib || echo so)"
-"$ROOT/target/mobile/uniffi-bindgen" generate --library "$HOST_LIB" --language kotlin \
+# Honour a custom target dir (CARGO_TARGET_DIR or cargo config).
+TARGET_DIR="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+HOST_LIB="$TARGET_DIR/mobile/libzeron_mobile.$([[ "$(uname)" == Darwin ]] && echo dylib || echo so)"
+"$TARGET_DIR/mobile/uniffi-bindgen" generate --library "$HOST_LIB" --language kotlin \
   --no-format --out-dir "$OUT/kotlin"
 echo "kotlin bindings: $OUT/kotlin"
 
 if command -v cargo-ndk >/dev/null && [[ -n "${ANDROID_NDK_HOME:-}" ]]; then
   ABIS=()
   for abi in ${ZERON_ANDROID_ABIS:-arm64-v8a x86_64}; do ABIS+=(-t "$abi"); done
-  cargo ndk "${ABIS[@]}" -o "$OUT/jniLibs" \
+  # Luau (agent visuals) is C++: ship the NDK's libc++_shared.so beside the core.
+  cargo ndk "${ABIS[@]}" --link-libcxx-shared -o "$OUT/jniLibs" \
     build --locked -p zeron-mobile --lib --profile mobile
   echo "jniLibs: $OUT/jniLibs"
 else

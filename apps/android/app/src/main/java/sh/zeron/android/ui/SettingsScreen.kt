@@ -53,7 +53,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings: () -> Unit = {}) {
+fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings: () -> Unit = {}, onOpen: (String) -> Unit = {}) {
     val appearance by model.appearance.collectAsState()
     val groupByProject by model.groupByProject.collectAsState()
     var confirmSignOut by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
@@ -87,6 +87,20 @@ fun SettingsScreen(model: AppModel, onArchived: () -> Unit, onOpenVoiceSettings:
                         Text(model.accountDetail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
                     }
                 }
+            }
+        }
+        section("Agents")
+        item {
+            // The agents on any engine device (Demo: a simulated one).
+            Column(Modifier.padding(horizontal = 16.dp)) {
+                SegmentedListItem(
+                    onClick = { onOpen(Routes.AGENTS) },
+                    shapes = segmentedShapes(0, 1),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(ZIcons.Bot) },
+                    supportingContent = { Text("Install agents and sign in to their accounts") },
+                    trailingContent = { ZIcon(ZIcons.ChevronRight, null, Modifier.size(20.dp)) },
+                ) { Text("Coding agents") }
             }
         }
         section("Appearance")

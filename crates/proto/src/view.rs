@@ -269,6 +269,21 @@ mod gate_tests {
     }
 
     #[test]
+    fn session_rows_from_older_engines_count_no_subagents() {
+        let row: Session = serde_json::from_value(serde_json::json!({
+            "chatId": "chat",
+            "deviceId": "dev",
+            "status": "working",
+            "startedAt": null,
+            "updatedAt": "2026-09-29T10:00:00Z",
+        }))
+        .unwrap();
+        assert_eq!(row.running_subagents, 0);
+        let wire = serde_json::to_value(running_session(3, Utc::now())).unwrap();
+        assert_eq!(wire["runningSubagents"], 3);
+    }
+
+    #[test]
     fn running_subagents_count_only_while_the_session_row_is_fresh() {
         let now = Utc::now();
         let fresh = running_session(3, now - chrono::Duration::seconds(10));

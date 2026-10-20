@@ -1115,6 +1115,49 @@ impl Client {
         Ok(SessionHandle { core })
     }
 
+    /// Open a SUBAGENT's transcript (`{chatId}--sub--{suffix}`, the doc ref
+    /// on a spawn chip of `parent_chat_id`) read-only. It syncs like a chat —
+    /// the engine publishes every subagent doc to its own chat2 room, which
+    /// keeps the log after the subagent settles — but it has no registry row,
+    /// so there is nothing to send, queue or interrupt through it. Instant:
+    /// the local copy renders first.
+    pub fn open_subagent(&self, parent_chat_id: &str, doc_id: &str) -> Result<SessionHandle> {
+        if !crate::subagents::is_subagent_doc(doc_id) {
+            return Err(ClientError::InvalidArgument(format!(
+                "{doc_id} is not a subagent transcript"
+            )));
+        }
+        if let Some(core) = self.inner.session_core(doc_id) {
+            return Ok(SessionHandle { core });
+        }
+        if self.inner.workspace.chat(parent_chat_id).is_none() {
+            return Err(ClientError::NotFound(parent_chat_id.to_owned()));
+        }
+        let (doc, cursor, hydrated) = match self.inner.backend() {
+            Backend::Demo(demo) => (demo.subagent_doc(parent_chat_id, doc_id)?, 0, true),
+            Backend::Live(live) => {
+                let local = crate::live::room::load_local(&live.store, doc_id);
+                (local.doc, local.cursor, local.had_content)
+            }
+        };
+        let core = SessionCore::new(doc_id, &self.inner, doc, cursor);
+        let core = {
+            let mut sessions = lock(&self.inner.sessions);
+            sessions
+                .entry(doc_id.to_owned())
+                .or_insert_with(|| core.clone())
+                .clone()
+        };
+        if hydrated {
+            core.set_hydrated();
+        }
+        core.ensure_room(&self.inner);
+        core.touch();
+        core.refresh();
+        self.inner.evict_sessions();
+        Ok(SessionHandle { core })
+    }
+
     /// An already-open session, if any.
     pub fn session(&self, chat_id: &str) -> Option<SessionHandle> {
         self.inner
@@ -1365,6 +1408,46 @@ impl Client {
                     .call(device_id, zeron_rpc::methods::LIST_FOLDERS, params)
                     .await?;
                 serde_json::from_value(value).map_err(|e| ClientError::HostError(e.to_string()))
+            }
+        }
+    }
+
+    /// Untyped relay call to `device_id`'s engine, for host RPCs the typed
+    /// surface doesn't wrap (Android settings: harness installs, agent
+    /// logins). Demo mode has no generic host: `Unsupported`.
+    pub async fn host_call(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Err(ClientError::Unsupported(method.to_owned())),
+            Backend::Live(live) => live.relay.call(device_id, method, params).await,
+        }
+    }
+
+    /// Untyped host stream from `device_id`'s engine (`SubscribeTerminal`,
+    /// `WatchWorkspaceFiles`, `WatchPreviews`…): returns once the host has
+    /// accepted it (an unknown method or bad params fail here), then pumps
+    /// items into `sink` until the host ends it or the handle is dropped, over
+    /// the device relay. Demo mode has no generic host: `Unsupported`.
+    pub async fn host_watch(
+        &self,
+        device_id: &str,
+        method: &str,
+        params: serde_json::Value,
+        sink: Arc<dyn crate::rpc::HostWatchSink>,
+    ) -> Result<crate::rpc::HostWatch> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Err(ClientError::Unsupported(method.to_owned())),
+            Backend::Live(live) => {
+                let stream = live.relay.subscribe(device_id, method, params).await?;
+                Ok(crate::rpc::HostWatch::spawn(
+                    stream,
+                    sink,
+                    &self.inner.cancel,
+                ))
             }
         }
     }

@@ -13736,6 +13736,8 @@ name = "zeron-mobile"
 version = "0.2.114"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "similar",
@@ -13755,6 +13757,7 @@ dependencies = [
  "zeron-visual",
  "zeron-visual-gpu",
  "zeron-voice-session",
+ "zeron-vt",
 ]
 
 [[package]]
@@ -13986,6 +13989,7 @@ dependencies = [
  "zeron-voice",
  "zeron-voice-media",
  "zeron-voice-session",
+ "zeron-vt",
 ]
 
 [[package]]
@@ -14077,6 +14081,13 @@ dependencies = [
  "zeron-orb",
  "zeron-proto",
  "zeron-rpc",
+]
+
+[[package]]
+name = "zeron-vt"
+version = "0.2.114"
+dependencies = [
+ "alacritty_terminal",
 ]
 
 [[package]]

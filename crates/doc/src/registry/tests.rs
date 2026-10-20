@@ -1247,6 +1247,24 @@ fn completion_marker_replicates_and_survives_next_turn() {
     assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
 }
 
+#[test]
+fn running_subagent_count_replicates_and_clears() {
+    let mut source = RegistryDoc::new("dev-a");
+    let mut viewer = RegistryDoc::new("dev-b");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    // The parent turn has settled; its subagents still run.
+    let mut row = session("chat-1", "dev-a", SessionStatus::Idle);
+    row.running_subagents = 12;
+    source.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row.clone()]);
+    row.running_subagents = 0;
+    source.upsert_session(&row).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut source, &mut viewer]);
+    assert_eq!(viewer.read_sessions().unwrap(), vec![row]);
+}
+
 fn section_change(doc: &mut RegistryDoc, change: zeron_proto::SidebarSectionChange) {
     doc.change_sidebar_pin(&zeron_proto::SidebarPinChange::Section { change })
         .unwrap();

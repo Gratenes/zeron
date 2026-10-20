@@ -419,7 +419,7 @@ fn hermes_spec() -> AcpAgentSpec {
 
 /// google's builds as the acp registry lists them (`antigravity-acp`); `None`
 /// on platforms without one, where only an explicit override can launch.
-fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
+pub fn antigravity_archive() -> Option<crate::archive_install::ArchivePin> {
     let (url, entry, sha512) = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         (
             "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.2.1-darwin-arm64.zip",
@@ -852,6 +852,19 @@ fn comparable_path(path: &str) -> String {
     } else {
         path.to_owned()
     }
+}
+
+/// Directory names (under the managed adapters root) of every npm adapter
+/// Zeron installs on demand for `harness`; an uninstall removes them all.
+pub(crate) fn managed_adapter_dirs(harness: HarnessId) -> Vec<String> {
+    let spec = match harness {
+        HarnessId::Grok => grok_spec(),
+        _ => return Vec::new(),
+    };
+    spec.npm_package
+        .map(|pkg| crate::adapter_install::NpmPin::parse(pkg).dir_name())
+        .into_iter()
+        .collect()
 }
 
 /// Whether the listing device has a pinned, explicitly installable archive.
