@@ -66,7 +66,8 @@ fun CloudRepoPickerScreen(model: AppModel, onBack: () -> Unit, onCreated: (proje
 
     val all = cloud.repos.orEmpty().sortedByDescending { it.pushedAtMs }
     val q = query.trim().lowercase()
-    val repos = if (q.isEmpty()) all else all.filter { it.fullName.lowercase().contains(q) || it.description?.lowercase()?.contains(q) == true }
+    // The pickers' shared matching: best by name (owner or repository), then by description.
+    val repos = PickerSearch.filter(all, query, { it.fullName }) { listOf(it.description) }
 
     fun create(repo: String) {
         if (creating != null) return
