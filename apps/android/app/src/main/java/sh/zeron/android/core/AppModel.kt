@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
+import sh.zeron.android.BuildConfig
 import sh.zeron.android.design.Appearance
 import sh.zeron.android.design.ThemeMode
 import kotlinx.coroutines.MainScope
@@ -306,7 +307,7 @@ class AppModel(private val app: Application) {
         start(Credentials.Demo(demoOptions()))
     }
 
-    val edgeUrl: String get() = authProductionEdgeUrl()
+    val edgeUrl: String get() = BuildConfig.EDGE_URL_OVERRIDE.ifEmpty { authProductionEdgeUrl() }
 
     private val deviceId: String
         get() {

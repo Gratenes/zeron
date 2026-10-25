@@ -1,0 +1,46 @@
+name: dev-windows
+
+# Dev desktop build pointed at a non-production edge. Separate data dir and no
+# auto-update so it never collides with (or gets replaced by) a release install.
+on:
+  push:
+    branches: ["dev/**"]
+  workflow_dispatch:
+    inputs:
+      edge_url:
+        description: Edge URL baked in as the default
+        default: https://zeron-v2.embedez.com
+      workos_client_id:
+        description: WorkOS client id baked in as the default
+        default: client_01M270WMSY2KHVFJFZJMG7YTDF
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      ZERON_DEFAULT_EDGE_URL: ${{ inputs.edge_url || 'https://zeron-v2.embedez.com' }}
+      ZERON_WORKOS_CLIENT_ID: ${{ inputs.workos_client_id || 'client_01M270WMSY2KHVFJFZJMG7YTDF' }}
+      ZERON_DATA_DIR_NAME: Zeron-dev
+      ZERON_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: rust toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Locate Windows SDK shader compiler
+        run: |
+          $fxc = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/fxc.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK fxc.exe is required for GPUI release shaders' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: build
+        run: cargo build --locked --release -p zeron
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zeron-dev-windows-x86_64
+          path: target/release/zeron.exe
+          if-no-files-found: error
