@@ -34,6 +34,8 @@ pub(crate) fn deadline(method: &str) -> Duration {
         methods::CREATE_WORKTREE => Duration::from_secs(120),
         methods::LIST_MODELS => Duration::from_secs(100),
         methods::UPLOAD_COMMIT => Duration::from_secs(150),
+        // A forced list probes every agent's plan usage.
+        methods::LIST_AGENT_ACCOUNTS => Duration::from_secs(60),
         _ => CALL_TIMEOUT,
     }
 }
