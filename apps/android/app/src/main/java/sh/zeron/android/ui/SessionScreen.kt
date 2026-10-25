@@ -11,13 +11,11 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.animation.animateColorAsState
 import sh.zeron.android.design.ZIcon
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.statusBarsPadding
 import sh.zeron.android.design.ZIcons
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -72,7 +70,6 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -252,74 +249,65 @@ fun SessionScreen(
     var overflow by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
 
-    // Flat Material chrome: the header sits on the page and takes the
-    // container tone once the transcript scrolls under it; the transcript
-    // ends where the composer begins (nothing streams behind it).
-    val scrolled by remember { derivedStateOf { transcript.offset > 1f } }
-    val headerColor by animateColorAsState(
-        if (scrolled) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.background,
-        MaterialTheme.motionScheme.defaultEffectsSpec(),
-        label = "header",
-    )
+    // The header sits on the page, as on New session: no band of its own.
+    // The transcript fades out under it once scrolled, and ends where the
+    // composer begins (nothing streams behind it).
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Surface(color = headerColor) {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+        PageTopBar(
+            title = headerTitle,
+            subtitle = subtitle,
+            leading = {
                 if (onOpenHistory != null) {
-                    TonalCircleButton(ZIcons.History, "Chat history", onClick = onOpenHistory, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                    TonalCircleButton(ZIcons.History, "Chat history", onClick = onOpenHistory, size = PageTopBarButton)
                 } else {
-                    TonalCircleButton(ZIcons.Back, "Back", onClick = onBack, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                    TonalCircleButton(ZIcons.Back, "Back", onClick = onBack, size = PageTopBarButton)
                 }
-                Column(Modifier.weight(1f).padding(horizontal = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(headerTitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
-                    Text(subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                // The session has its own composer; the call stays a tap away up here.
-                if (sh.zeron.android.voice.rememberVoiceVisible(model.voice)) {
-                    sh.zeron.android.voice.VoiceHeaderButton(model.voice, onOpenStage = onOpenVoice, onOpenSettings = onVoiceSettings)
-                    androidx.compose.foundation.layout.Spacer(Modifier.size(8.dp))
-                }
-                // Agents, side chats and terminals; a badge while agents work.
-                androidx.compose.material3.BadgedBox(
-                    badge = {
-                        if (companions.runningAgents > 0) {
-                            androidx.compose.material3.Badge(containerColor = MaterialTheme.colorScheme.primary) { Text("${companions.runningAgents}") }
-                        }
-                    },
-                ) {
-                    TonalCircleButton(ZIcons.Companions, "Agents, side chats and terminals", onClick = { onShowCompanions?.invoke(null) ?: run { showCompanions = true } }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
-                }
-                androidx.compose.foundation.layout.Spacer(Modifier.size(8.dp))
-                Box {
-                    TonalCircleButton(ZIcons.More, "More", onClick = { overflow = true }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
-                    GroupedActionMenu(
-                        overflow,
-                        { overflow = false },
+            },
+        ) {
+            // The session has its own composer; the call stays a tap away up here.
+            if (sh.zeron.android.voice.rememberVoiceVisible(model.voice)) {
+                sh.zeron.android.voice.VoiceHeaderButton(
+                    model.voice,
+                    onOpenStage = onOpenVoice,
+                    onOpenSettings = onVoiceSettings,
+                    size = PageTopBarButton,
+                    container = MaterialTheme.colorScheme.surfaceContainerHigh,
+                )
+            }
+            // Agents, side chats and terminals; a badge while agents work.
+            androidx.compose.material3.BadgedBox(
+                badge = {
+                    if (companions.runningAgents > 0) {
+                        androidx.compose.material3.Badge(containerColor = MaterialTheme.colorScheme.primary) { Text("${companions.runningAgents}") }
+                    }
+                },
+            ) {
+                TonalCircleButton(ZIcons.Companions, "Agents, side chats and terminals", onClick = { onShowCompanions?.invoke(null) ?: run { showCompanions = true } }, size = PageTopBarButton)
+            }
+            Box {
+                TonalCircleButton(ZIcons.More, "More", onClick = { overflow = true }, size = PageTopBarButton)
+                GroupedActionMenu(
+                    overflow,
+                    { overflow = false },
+                    listOf(
                         listOf(
-                            listOf(
-                                MenuAction("New side chat", ZIcons.SideChats) { newSideChat() },
-                                MenuAction("Fork into side chat", ZIcons.Fork) { fork() },
-                                MenuAction("Terminal", ZIcons.Terminal) { openTerminal() },
-                            ),
-                            listOfNotNull(
-                                row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
-                                MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
-                                row?.let {
-                                    MenuAction("Archive", ZIcons.Archive) {
-                                        model.archive(chatId)
-                                        onBack()
-                                    }
-                                },
-                            ),
-                            listOfNotNull(row?.let { MenuAction("Delete", ZIcons.Delete, destructive = true) { confirmDelete = true } }),
+                            MenuAction("New side chat", ZIcons.SideChats) { newSideChat() },
+                            MenuAction("Fork into side chat", ZIcons.Fork) { fork() },
+                            MenuAction("Terminal", ZIcons.Terminal) { openTerminal() },
                         ),
-                    )
-                }
+                        listOfNotNull(
+                            row?.let { r -> MenuAction(if (r.pinned) "Unpin" else "Pin", ZIcons.Pin) { model.setPinned(chatId, !r.pinned) } },
+                            MenuAction("Copy transcript", ZIcons.Copy) { transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) } },
+                            row?.let {
+                                MenuAction("Archive", ZIcons.Archive) {
+                                    model.archive(chatId)
+                                    onBack()
+                                }
+                            },
+                        ),
+                        listOfNotNull(row?.let { MenuAction("Delete", ZIcons.Delete, destructive = true) { confirmDelete = true } }),
+                    ),
+                )
             }
         }
         // The transcript runs on under the chips and composer and fades out
@@ -329,6 +317,7 @@ fun SessionScreen(
             var stack by remember { mutableStateOf(0.dp) }
             LaunchedEffect(stack) { transcript.bottomInset = stack.value + 12f }
             Transcript(transcript, actions, Modifier.fillMaxSize())
+            TopEdgeFade { transcript.offset }
             val page = MaterialTheme.colorScheme.background
             Box(
                 Modifier
