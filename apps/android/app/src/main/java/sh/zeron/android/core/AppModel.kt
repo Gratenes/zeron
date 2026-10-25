@@ -56,6 +56,8 @@ import uniffi.zeron_core.parseAuthCallback
 import uniffi.zeron_core.workosAuthorizeUrl
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /** How the app was launched (adb extras mirror the iOS launch arguments). */
 data class LaunchOptions(
@@ -203,7 +205,11 @@ class AppModel(private val app: Application) {
         private set
 
     val isDemo: Boolean get() = _client.value?.isDemo() == true
-    private var refreshScheduled = false
+    /** One background thread builds snapshots, so they finish in the order they started. */
+    private val snapshotBuilder = Executors.newSingleThreadExecutor { Thread(it, "zeron-workspace").apply { isDaemon = true } }
+    private val refreshQueued = AtomicBoolean(false)
+    /** The client [workspace] was built from (revisions are per client). */
+    @Volatile private var publishedBy: CoreClient? = null
     /** The pending sign-in's OAuth `state` (persisted: the process may die while the browser is up). */
     private var authState: String?
         get() = settings.getString("authState", null)
@@ -437,20 +443,48 @@ class AppModel(private val app: Application) {
         }
     }
 
-    /** Coalesce bursts of registry frames into one rebuild per loop turn. */
+    /**
+     * Registry frames rebuild the snapshot off the main thread: the FFI build
+     * copies every row (archived ones too) and arrives continuously while an
+     * agent works, which cost the home page frames. Bursts coalesce: at most
+     * one build running and one queued.
+     */
     private fun scheduleRefresh() {
-        if (refreshScheduled) return
-        refreshScheduled = true
-        main.post {
-            refreshScheduled = false
-            refreshWorkspace()
+        val client = _client.value ?: return
+        if (!refreshQueued.compareAndSet(false, true)) return
+        snapshotBuilder.execute {
+            refreshQueued.set(false)
+            val snapshot = runCatching { buildWorkspace(client) }.getOrNull() ?: return@execute
+            main.post { if (publishWorkspace(client, snapshot)) sweepFreshSideChats() }
         }
     }
 
+    /** Rebuild now, on the main thread (explicit refreshes the caller reads back). */
     fun refreshWorkspace() {
         val client = _client.value ?: return
-        _workspace.value = client.workspace()
+        buildWorkspace(client)?.let { publishWorkspace(client, it) }
         sweepFreshSideChats()
+    }
+
+    /** [client]'s snapshot, or null when the published one is already its current revision. */
+    private fun buildWorkspace(client: CoreClient): WorkspaceSnapshot? {
+        val current = _workspace.value
+        if (current != null && publishedBy === client && client.workspaceRevision() == current.revision) return null
+        return client.workspace()
+    }
+
+    /**
+     * Main thread. Revisions only move forward: a build that finished after a
+     * fresher one (background vs [refreshWorkspace]) is dropped, and so is one
+     * from a client that has since been replaced. True when published.
+     */
+    private fun publishWorkspace(client: CoreClient, snapshot: WorkspaceSnapshot): Boolean {
+        if (client !== _client.value) return false
+        val current = _workspace.value
+        if (current != null && publishedBy === client && snapshot.revision <= current.revision) return false
+        publishedBy = client
+        _workspace.value = snapshot
+        return true
     }
 
     fun onForeground() {

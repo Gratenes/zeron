@@ -136,3 +136,7 @@ kotlin {
         )
     }
 }
+
+composeCompiler {
+    stabilityConfigurationFiles.add(layout.projectDirectory.file("compose-stability.conf"))
+}
