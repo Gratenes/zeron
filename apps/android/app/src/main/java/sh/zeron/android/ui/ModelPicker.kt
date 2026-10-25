@@ -21,10 +21,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -41,8 +43,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -106,15 +106,38 @@ suspend fun <T> within(ms: Long, block: suspend () -> T): T? {
     return kotlinx.coroutines.withTimeoutOrNull(ms) { answer.await() }
 }
 
-/** A list this long gets a search field (OpenCode can offer hundreds). */
-private const val SEARCH_THRESHOLD = 12
+/** The model picker's search and sort rules (JVM-tested). */
+object ModelPickerSearch {
+    /** The sorts the picker offers: the provider's own order, or by name. */
+    val SORTS = listOf(PickerSort.Default, PickerSort.Name)
+
+    /** Offered once any provider lists this many models (OpenCode can offer hundreds). */
+    fun offered(lists: Collection<List<ModelPickerRow>?>): Boolean =
+        lists.any { (it?.size ?: 0) >= PickerSearch.SEARCH_AT }
+
+    /**
+     * One provider's [rows] in [sort] order, then those matching [query]:
+     * by name first, then by id, description or the provider's [label].
+     */
+    fun rows(rows: List<ModelPickerRow>, query: String, sort: PickerSort, label: String? = null): List<ModelPickerRow> =
+        PickerSearch.filter(PickerSearch.sorted(rows, sort, { it.label }), query, { it.label }) { listOf(it.id, it.detail, label) }
+
+    /**
+     * The page a search should show: [at] while it has a match, else the
+     * first provider that does (a search spans them all), else [at].
+     */
+    fun page(at: Int, matches: List<Int>): Int =
+        if (matches.getOrElse(at) { 0 } > 0) at else matches.indexOfFirst { it > 0 }.takeIf { it >= 0 } ?: at
+}
 
 /**
  * The model picker (iOS `ModelPickerViewController`): a sheet sized to its
  * list. A left-aligned title says where the chat runs; with more than one
  * provider a switcher sits over swipeable pages (the current provider
  * first). Models sit right on the sheet — no cards, no rules — and the
- * current one is held in a soft accent tint with a check.
+ * current one is held in a soft accent tint with a check. A long list gets
+ * a search, with the sort beside it, at the sheet's foot: it filters every
+ * provider's page, so a swipe keeps the search.
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
@@ -136,6 +159,8 @@ fun ModelPickerSheet(
     val rows = remember { mutableStateMapOf<String, List<ModelPickerRow>>() }
     var current by remember { mutableStateOf(harness to model) }
     var picked by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    var sort by rememberPickerSort("models", ModelPickerSearch.SORTS)
 
     // The current provider first, then the rest, so a swipe lands on a loaded
     // list; a provider that joins later (the host's list arrived) loads then.
@@ -177,10 +202,27 @@ fun ModelPickerSheet(
     val longest = tabs.indices.maxOfOrNull { ix ->
         val list = rows[tabs[ix].harness]
         val notice = if ((tabs[ix].footer ?: if (ix == start) note else null) != null) 72 else 0
-        val search = if ((list?.size ?: 0) > SEARCH_THRESHOLD) 64 else 0
-        (list?.size ?: 4).coerceAtMost(14) * 66 + notice + search + 24
+        (list?.size ?: 4).coerceAtMost(14) * 66 + notice + 24
     } ?: 300
-    val pagerHeight by animateDpAsState(longest.dp.coerceIn(260.dp, screen * 0.66f), MaterialTheme.motionScheme.defaultSpatialSpec(), label = "fit")
+    val searchable = ModelPickerSearch.offered(rows.values)
+    // The search at the foot takes its room from the list's, and the keyboard's while it's up.
+    val keyboard = with(LocalDensity.current) { WindowInsets.ime.getBottom(this).toDp() }
+    val pagerHeight by animateDpAsState(
+        if (searchable) {
+            longest.dp.coerceIn(260.dp, screen * 0.66f - SEARCH_BAR).let { if (keyboard > 0.dp) (it - keyboard).coerceAtLeast(120.dp) else it }
+        } else {
+            longest.dp.coerceIn(260.dp, screen * 0.66f)
+        },
+        MaterialTheme.motionScheme.defaultSpatialSpec(),
+        label = "fit",
+    )
+    // A search that finds nothing on this provider turns to one where it does.
+    LaunchedEffect(query) {
+        if (query.isBlank()) return@LaunchedEffect
+        val matches = tabs.map { ModelPickerSearch.rows(rows[it.harness].orEmpty(), query, sort, it.label).size }
+        val to = ModelPickerSearch.page(pager.currentPage, matches)
+        if (to != pager.currentPage) pager.animateScrollToPage(to)
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -232,49 +274,48 @@ fun ModelPickerSheet(
                 rows[tab.harness],
                 notice = tab.footer ?: if (ix == start) note else null,
                 current = current,
+                query = query,
+                sort = sort,
                 onPick = { pick(tab, it) },
+            )
+        }
+        if (searchable) {
+            PickerSearchBar(
+                query,
+                { query = it },
+                placeholder = if (tabs.size > 1) "Search all models" else "Search ${tabs.firstOrNull()?.label.orEmpty()} models",
+                sort = sort,
+                sorts = ModelPickerSearch.SORTS,
+                onSort = { sort = it },
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp),
             )
         }
     }
 }
 
-/** One provider's models: a notice over them when there's something to know, and a search field once the list is long. */
+/** The search pill and its padding at the sheet's foot. */
+private val SEARCH_BAR = 68.dp
+
+/** One provider's models, in the picker's sort and narrowed by its search: a notice over them when there's something to know. */
 @Composable
 private fun ProviderPage(
     tab: ModelPickerTab,
     rows: List<ModelPickerRow>?,
     notice: String?,
     current: Pair<String, String?>,
+    query: String,
+    sort: PickerSort,
     onPick: (ModelPickerRow) -> Unit,
 ) {
-    var query by remember { mutableStateOf("") }
-    val visible = remember(rows, query) {
-        val q = query.trim().lowercase()
-        if (q.isEmpty()) rows.orEmpty() else rows.orEmpty().filter { it.label.lowercase().contains(q) || it.id.lowercase().contains(q) }
-    }
+    val visible = remember(rows, query, sort) { ModelPickerSearch.rows(rows.orEmpty(), query, sort, tab.label) }
     Column(Modifier.fillMaxSize()) {
-        if ((rows?.size ?: 0) > SEARCH_THRESHOLD) {
-            OutlinedTextField(
-                query,
-                { query = it },
-                placeholder = { Text("Search ${tab.label} models") },
-                leadingIcon = { ZIcon(ZIcons.Search, null, Modifier.size(20.dp)) },
-                singleLine = true,
-                shape = CircleShape,
-                colors = OutlinedTextFieldDefaults.colors(
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                    unfocusedBorderColor = Color.Transparent,
-                ),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp),
-            )
-        }
-        // The current model in view once the list arrives (it may sit below the fold).
+        // The current model in view once the list arrives (it may sit below the fold); a search starts at its best match.
         val list = androidx.compose.foundation.lazy.rememberLazyListState()
-        LaunchedEffect(rows != null) {
+        LaunchedEffect(rows != null, sort) {
             val at = visible.indexOfFirst { tab.harness == current.first && it.id == current.second }
-            if (at > 2) list.scrollToItem(at - 1 + (if (notice != null) 1 else 0))
+            if (at > 2) list.scrollToItem(at - 1 + (if (notice != null) 1 else 0)) else list.scrollToItem(0)
         }
+        LaunchedEffect(query) { if (query.isNotBlank()) list.scrollToItem(0) }
         LazyColumn(
             state = list,
             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 20.dp),
