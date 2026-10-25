@@ -195,6 +195,9 @@ fun SessionsScreen(
     val pull = rememberPullToRefreshState()
     val ws = workspace
     val counts = remember(ws) { ws?.let { liveCounts(it) } ?: (0 to 0) }
+    // Groups showing every row, not just the first [GROUP_PREVIEW].
+    var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
+    fun expander(id: String): (Boolean) -> Unit = { open -> expanded = if (open) expanded + id else expanded - id }
 
     val subtitle = when {
         connectivity?.state == ConnectivityState.OFFLINE -> "Offline"
@@ -316,6 +319,8 @@ fun SessionsScreen(
                                 "pinned", "Pinned", front.pinned, actions,
                                 collapsed = "pinned" in collapsedGroups,
                                 onToggle = { model.setGroupCollapsed("pinned", "pinned" !in collapsedGroups) },
+                                expanded = "pinned" in expanded,
+                                onExpand = expander("pinned"),
                                 menu = listOf(MenuAction("Reorder…", ZIcons.Sort) { reorder = true }),
                             )
                         }
@@ -324,6 +329,8 @@ fun SessionsScreen(
                                 section.id, section.name, section.sessions, actions,
                                 collapsed = section.collapsed,
                                 onToggle = { model.setSectionCollapsed(section.id, !section.collapsed) },
+                                expanded = section.id in expanded,
+                                onExpand = expander(section.id),
                                 menu = listOf(
                                     MenuAction("Rename section…", ZIcons.Rename) { renameSection = section },
                                     MenuAction("Delete section", ZIcons.Delete, destructive = true) { model.deleteSection(section.id) },
@@ -337,6 +344,8 @@ fun SessionsScreen(
                                     g.id, g.name, g.sessions, actions,
                                     collapsed = g.id in collapsedGroups,
                                     onToggle = { model.setGroupCollapsed(g.id, g.id !in collapsedGroups) },
+                                    expanded = g.id in expanded,
+                                    onExpand = expander(g.id),
                                 )
                             }
                         } else if (front.recent.isNotEmpty()) {
@@ -344,6 +353,8 @@ fun SessionsScreen(
                                 "recent", "Recent", front.recent, actions,
                                 collapsed = "recent" in collapsedGroups,
                                 onToggle = { model.setGroupCollapsed("recent", "recent" !in collapsedGroups) },
+                                expanded = "recent" in expanded,
+                                onExpand = expander("recent"),
                             )
                         }
                     }
@@ -417,6 +428,9 @@ class RowActions(
     val selected: String? = null,
 )
 
+/** Rows a home-page group shows until "Show all": long lists were slow to scroll and hard to scan. */
+private const val GROUP_PREVIEW = 5
+
 private fun LazyListScope.group(
     id: String,
     title: String?,
@@ -425,6 +439,9 @@ private fun LazyListScope.group(
     collapsed: Boolean = false,
     onToggle: (() -> Unit)? = null,
     menu: List<MenuAction> = emptyList(),
+    /** Showing every row; with [onExpand], the group otherwise shows [GROUP_PREVIEW]. */
+    expanded: Boolean = false,
+    onExpand: ((Boolean) -> Unit)? = null,
 ) {
     if (title != null) {
         item("h-$id") {
@@ -463,9 +480,20 @@ private fun LazyListScope.group(
         item("h-$id") { Spacer(Modifier.height(8.dp)) }
     }
     if (collapsed) return
-    itemsIndexed(rows, key = { _, r -> "$id/${r.id}" }) { i, row ->
+    val capped = onExpand != null && rows.size > GROUP_PREVIEW
+    val shown = if (capped && !expanded) rows.take(GROUP_PREVIEW) else rows
+    itemsIndexed(shown, key = { _, r -> "$id/${r.id}" }) { i, row ->
         Box(Modifier.animateItem().padding(horizontal = 16.dp).padding(bottom = ListItemDefaults.SegmentedGap)) {
-            SwipeableSessionRow(row, i, rows.size, actions)
+            SwipeableSessionRow(row, i, shown.size, actions)
+        }
+    }
+    if (capped) {
+        item("more-$id") {
+            Box(Modifier.animateItem().fillMaxWidth().padding(horizontal = 16.dp), contentAlignment = Alignment.CenterStart) {
+                TextButton(onClick = { onExpand?.invoke(!expanded) }) {
+                    Text(if (expanded) "Show less" else "Show all ${rows.size}")
+                }
+            }
         }
     }
 }
