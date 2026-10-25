@@ -42,6 +42,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -65,8 +66,10 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
+import sh.zeron.android.core.inProject
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import sh.zeron.android.design.ZeronTheme
@@ -127,6 +130,18 @@ private fun MainNav(model: AppModel) {
     val sidebarWidth = if (maxWidth < 1000.dp) 320.dp else 380.dp
     val shell = remember { TabletShellState() }
     val open: (String) -> Unit = { id -> if (wide) shell.select(id) else nav.navigate(Routes.chat(id)) }
+    // Phones: chat history in a drawer (swipe right, or the chat header's button); swipe left goes home.
+    val history = remember { HistoryDrawerState() }
+    val homeSwipe = remember { HomeSwipeState() }
+    val scope = rememberCoroutineScope()
+    val entry by nav.currentBackStackEntryAsState()
+    val route = entry?.destination?.route
+    val activeChat = if (route == Routes.CHAT) entry?.arguments?.getString("id") else null
+    val openHistory: () -> Unit = { scope.launch { history.open() } }
+    // The drawer's "New chat" while New session is already open.
+    val newSessionProject = remember { MutableSharedFlow<String?>(extraBufferCapacity = 1) }
+    // Large screens show sessions beside the chat: no drawer there.
+    LaunchedEffect(wide) { if (wide) history.snapTo(0f) }
     // Folding back to a phone keeps the open chat, full screen; unfolding brings it beside the list.
     LaunchedEffect(wide) {
         if (!wide) {
@@ -200,6 +215,7 @@ private fun MainNav(model: AppModel) {
             onOpenAccounts = { target, signIn -> nav.navigate(Routes.accounts(target.encode(), signIn)) },
             onOpenBilling = { if (wide) shell.settings = Routes.BILLING else nav.navigate(Routes.BILLING) },
             onShowCompanions = if (beside) ({ section -> shell.toggleCompanions(id, section) }) else null,
+            onOpenHistory = if (beside) null else openHistory,
         )
     }
 
@@ -220,6 +236,43 @@ private fun MainNav(model: AppModel) {
                 e.key == Key.Zero && e.isAltPressed && chat != null && wide -> true.also { shell.toggleCompanions(chat, null) }
                 else -> false
             }
+        },
+    ) {
+    HistoryDrawerHost(
+        history,
+        enabled = !wide && (route == Routes.HOME || route == Routes.CHAT || route == Routes.NEW),
+        home = homeSwipe,
+        page = entry?.id,
+        onSwipeHome = if (!wide && (route == Routes.CHAT || route == Routes.NEW)) ({ nav.popBackStack(Routes.HOME, inclusive = false) }) else null,
+        drawer = {
+            HistoryDrawerContent(
+                model,
+                history,
+                activeId = activeChat,
+                onNewChat = { projectId ->
+                    scope.launch { history.close() }
+                    if (route == Routes.NEW) {
+                        // Already there: keep what's typed, switch to the drawer's project.
+                        newSessionProject.tryEmit(projectId)
+                    } else {
+                        // A drawer filtered to one project starts the chat there.
+                        if (projectId != null) model.lastDraft = model.lastDraft.inProject(projectId, model.workspace.value)
+                        nav.navigate(Routes.NEW) { popUpTo(Routes.HOME) }
+                    }
+                },
+                onPick = { id ->
+                    scope.launch { history.close() }
+                    if (id != activeChat) nav.navigate(Routes.chat(id)) { popUpTo(Routes.HOME) }
+                },
+                onSearch = {
+                    scope.launch { history.close() }
+                    nav.navigate(Routes.SEARCH)
+                },
+                onSettings = {
+                    scope.launch { history.close() }
+                    nav.navigate(Routes.SETTINGS) { popUpTo(Routes.HOME) }
+                },
+            )
         },
     ) {
     NavHost(nav, startDestination = Routes.HOME) {
@@ -282,7 +335,9 @@ private fun MainNav(model: AppModel) {
         })
         composable(Routes.CHAT) { entry ->
             val id = entry.arguments?.getString("id") ?: return@composable
-            Session(id, onBack = { nav.popBackStack() })
+            Box(Modifier.fillMaxSize().homeSwipeLayer(homeSwipe, entry.id)) {
+                Session(id, onBack = { nav.popBackStack() })
+            }
         }
         composable(
             Routes.TERMINAL,
@@ -328,16 +383,19 @@ private fun MainNav(model: AppModel) {
                 wallpaper = model.wallpaper,
             )
         }
-        composable(Routes.NEW) {
-            NewSessionScreen(
-                model,
-                onClose = { nav.popBackStack() },
-                onCreated = { id ->
-                    nav.popBackStack()
-                    open(id)
-                },
-                onOpenBilling = { nav.navigate(Routes.BILLING) },
-            )
+        composable(Routes.NEW) { entry ->
+            Box(Modifier.fillMaxSize().homeSwipeLayer(homeSwipe, entry.id)) {
+                NewSessionScreen(
+                    model,
+                    onClose = { nav.popBackStack() },
+                    onCreated = { id ->
+                        nav.popBackStack()
+                        open(id)
+                    },
+                    onOpenBilling = { nav.navigate(Routes.BILLING) },
+                    projectPicks = newSessionProject,
+                )
+            }
         }
         composable(Routes.SEARCH) {
             SearchScreen(model, onBack = { nav.popBackStack() }, onOpen = { id ->
@@ -353,6 +411,7 @@ private fun MainNav(model: AppModel) {
                 }
             }
         }
+    }
     }
     // Settings on a large screen: a dialog over the shell with its own pages (iPad's form sheet).
     shell.settings?.let { start ->
