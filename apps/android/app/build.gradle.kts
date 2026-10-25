@@ -61,6 +61,9 @@ android {
         // The ABIs the core was built for (`ZERON_ANDROID_ABIS`): a dependency's
         // native libraries for others would only add weight.
         ndk { abiFilters += (System.getenv("ZERON_ANDROID_ABIS") ?: "arm64-v8a x86_64").split(" ").filter { it.isNotBlank() } }
+        // `-PzeronEdgeUrl=https://…` points the app at a dev edge.
+        val edgeUrl = providers.gradleProperty("zeronEdgeUrl").orNull ?: ""
+        buildConfigField("String", "EDGE_URL_OVERRIDE", "\"$edgeUrl\"")
     }
 
     signingConfigs {
@@ -86,7 +89,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
 
     sourceSets["main"].apply {
         kotlin.directories.add(coreOut.resolve("kotlin").path)
