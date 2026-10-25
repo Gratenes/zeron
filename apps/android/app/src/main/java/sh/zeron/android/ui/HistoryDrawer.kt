@@ -473,12 +473,13 @@ fun HistoryDrawerContent(
                     listOf(
                         MenuSection(
                             "Project",
-                            listOf(MenuChoice("All projects", projectId == null, leading = { ZIcon(ZIcons.Home, null, Modifier.size(20.dp)) }) { projectId = null }) +
+                            listOf(MenuChoice("All projects", projectId == null, leading = { ZIcon(ZIcons.Home, null, Modifier.size(20.dp)) }, fixed = true) { projectId = null }) +
                                 projects.map { project ->
                                     MenuChoice(project.name, projectId == project.id, supporting = host(project), leading = { ProjectTile(project.name, project.colorIndex.toInt(), 20.dp) }) { projectId = project.id }
                                 },
                         ),
                     ),
+                    searchable = true,
                 )
             }
             FilterSegments(filter, onSelect = { filter = it })
