@@ -84,7 +84,10 @@ fun BoxScope.TopEdgeFade(scrolled: () -> Float) {
             .align(Alignment.TopCenter)
             .fillMaxWidth()
             .height(TopEdgeFadeHeight)
-            .graphicsLayer { alpha = (scrolled() / TopEdgeFadeHeight.value).coerceIn(0f, 1f) }
+            .graphicsLayer { alpha = topEdgeFadeAlpha(scrolled()) }
             .background(Brush.verticalGradient(0f to page.copy(alpha = 0.94f), 1f to page.copy(alpha = 0f))),
     )
 }
+
+/** [TopEdgeFade]'s strength [scrolled] dp down: none at rest, full a fade's height in. */
+internal fun topEdgeFadeAlpha(scrolled: Float): Float = (scrolled / TopEdgeFadeHeight.value).coerceIn(0f, 1f)
