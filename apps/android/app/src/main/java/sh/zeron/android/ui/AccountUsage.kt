@@ -91,8 +91,7 @@ object DeviceAccountsCache {
     }
 
     /** Whether a forced probe of `deviceId` may go out now (and note that it does). */
-    fun takeForce(deviceId: String, explicit: Boolean): Boolean {
-        val now = System.currentTimeMillis()
+    fun takeForce(deviceId: String, explicit: Boolean, now: Long = System.currentTimeMillis()): Boolean {
         if (!explicit && now - (forcedAt[deviceId] ?: 0L) < FORCE_MIN_INTERVAL_MS) return false
         forcedAt[deviceId] = now
         return true
@@ -166,7 +165,8 @@ fun withActive(list: List<DeviceAccountInfo>, account: DeviceAccountInfo): List<
  */
 @Stable
 class AccountUsageState(private val core: CoreClient, val deviceId: String, val harness: String, private val scope: CoroutineScope) {
-    val rules = agentLoginRules(harness)
+    // Lazy: a native call, and the loading and switching below don't need it (JVM tests run without the core).
+    val rules by lazy { agentLoginRules(harness) }
 
     /** Account id with a switch in flight. */
     var busy by mutableStateOf<String?>(null)

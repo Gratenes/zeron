@@ -1,13 +1,20 @@
 package sh.zeron.android.ui
 
 import androidx.compose.runtime.snapshots.Snapshot
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import uniffi.zeron_core.ContextUsage
 import uniffi.zeron_core.CoreClient
+import uniffi.zeron_core.CoreException
 import uniffi.zeron_core.DeviceAccountInfo
 import uniffi.zeron_core.NoHandle
 import uniffi.zeron_core.UsageWindowInfo
@@ -36,6 +43,28 @@ private fun login(
     usage = usage,
     usageError = null,
 )
+
+/** A client whose account calls answer from the test (UniFFI's fake-object constructor). */
+private class FakeCore : CoreClient(NoHandle) {
+    val calls = mutableListOf<String>()
+    var accounts: suspend () -> List<DeviceAccountInfo> = { emptyList() }
+    var activate: suspend (String) -> List<DeviceAccountInfo> = { emptyList() }
+
+    override suspend fun deviceAgentAccounts(deviceId: String): List<DeviceAccountInfo> {
+        calls += "accounts"
+        return accounts()
+    }
+
+    override suspend fun deviceAgentUsage(deviceId: String): List<DeviceAccountInfo> {
+        calls += "usage"
+        return accounts()
+    }
+
+    override suspend fun deviceActivateAccount(deviceId: String, harness: String, accountId: String): List<DeviceAccountInfo> {
+        calls += "activate $accountId"
+        return activate(accountId)
+    }
+}
 
 class AccountUsageTest {
     // The cache is app-wide: each test starts signed out.
@@ -153,5 +182,68 @@ class AccountUsageTest {
         // Even for the very same client: nothing of the signed-out account answers.
         assertNull(DeviceAccountsCache.get(core, "dev"))
         assertTrue(DeviceAccountsCache.takeForce("dev", explicit = false))
+    }
+
+    @Test fun forcedProbesAreThrottledPerComputerUnlessAskedFor() {
+        val t = 1_000_000L
+        assertTrue(DeviceAccountsCache.takeForce("a", explicit = false, now = t))
+        assertFalse(DeviceAccountsCache.takeForce("a", explicit = false, now = t + 29_999))
+        // Another computer has its own window.
+        assertTrue(DeviceAccountsCache.takeForce("b", explicit = false, now = t + 1))
+        assertTrue(DeviceAccountsCache.takeForce("a", explicit = false, now = t + 30_000))
+        // The refresh button always goes through, and restarts the window.
+        assertTrue(DeviceAccountsCache.takeForce("a", explicit = true, now = t + 30_001))
+        assertFalse(DeviceAccountsCache.takeForce("a", explicit = false, now = t + 59_999))
+        assertTrue(DeviceAccountsCache.takeForce("a", explicit = false, now = t + 60_001))
+    }
+
+    @Test fun aForcedLoadProbesOnceThenReadsTheCacheUntilTheWindowPasses() = runBlocking {
+        val core = FakeCore()
+        core.accounts = { listOf(login("a", active = true)) }
+        val state = AccountUsageState(core, "dev", "claude-code", this)
+        state.load(force = false)
+        state.load(force = true)
+        state.load(force = true)
+        assertEquals(listOf("accounts", "usage", "accounts"), core.calls)
+        assertEquals("a", state.active?.id)
+    }
+
+    @Test fun aListAskedForBeforeASwitchDoesntUndoIt() = runBlocking {
+        val before = listOf(login("a", active = true), login("b"))
+        val core = FakeCore()
+        DeviceAccountsCache.put(core, "dev", before)
+        val stale = CompletableDeferred<List<DeviceAccountInfo>>()
+        core.accounts = { stale.await() }
+        core.activate = { withActive(before, before[1]) }
+        val state = AccountUsageState(core, "dev", "claude-code", this)
+        val load = launch { state.load(force = false) }
+        yield()
+        assertEquals(listOf("accounts"), core.calls)
+        state.activate(before[1]) { fail(it) }
+        while (state.busy != null) yield()
+        // The list from before the switch lands last.
+        stale.complete(before)
+        load.join()
+        assertEquals("b", state.active?.id)
+    }
+
+    @Test fun aRefusedSwitchPutsTheListBack() = runBlocking {
+        val before = listOf(login("a", active = true), login("b"), login("c"))
+        val core = FakeCore()
+        DeviceAccountsCache.put(core, "dev", before)
+        val answer = CompletableDeferred<List<DeviceAccountInfo>>()
+        core.activate = { answer.await() }
+        val errors = mutableListOf<String>()
+        val state = AccountUsageState(core, "dev", "claude-code", this)
+        state.activate(before[1]) { errors += it }
+        // Shown in use before the computer answers, and no second switch meanwhile.
+        assertEquals("b", state.active?.id)
+        assertEquals("b", state.busy)
+        state.activate(before[2]) { errors += it }
+        answer.completeExceptionally(CoreException.HostException("Claude Code is busy"))
+        while (state.busy != null) yield()
+        assertEquals(before, DeviceAccountsCache.get(core, "dev"))
+        assertEquals(listOf("Couldn't switch: Claude Code is busy"), errors)
+        assertEquals(listOf("activate b"), core.calls)
     }
 }
