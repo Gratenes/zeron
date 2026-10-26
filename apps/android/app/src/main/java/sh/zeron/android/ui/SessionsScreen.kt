@@ -429,7 +429,18 @@ class RowActions(
 )
 
 /** Rows a home-page group shows until "Show all": long lists were slow to scroll and hard to scan. */
-private const val GROUP_PREVIEW = 5
+internal const val GROUP_PREVIEW = 5
+
+/** What a group lists under its header: [shown] rows, then a "Show all" / "Show less" button labelled [toggle] (null: none). */
+internal data class GroupRows<T>(val shown: List<T>, val toggle: String?)
+
+/** A [cappable] group longer than [GROUP_PREVIEW] shows its first rows until [expanded]; a [collapsed] one shows nothing. */
+internal fun <T> groupRows(rows: List<T>, collapsed: Boolean, cappable: Boolean, expanded: Boolean): GroupRows<T> = when {
+    collapsed -> GroupRows(emptyList(), null)
+    !cappable || rows.size <= GROUP_PREVIEW -> GroupRows(rows, null)
+    expanded -> GroupRows(rows, "Show less")
+    else -> GroupRows(rows.take(GROUP_PREVIEW), "Show all ${rows.size}")
+}
 
 private fun LazyListScope.group(
     id: String,
@@ -479,20 +490,16 @@ private fun LazyListScope.group(
     } else {
         item("h-$id") { Spacer(Modifier.height(8.dp)) }
     }
-    if (collapsed) return
-    val capped = onExpand != null && rows.size > GROUP_PREVIEW
-    val shown = if (capped && !expanded) rows.take(GROUP_PREVIEW) else rows
+    val (shown, toggle) = groupRows(rows, collapsed, cappable = onExpand != null, expanded)
     itemsIndexed(shown, key = { _, r -> "$id/${r.id}" }) { i, row ->
         Box(Modifier.animateItem().padding(horizontal = 16.dp).padding(bottom = ListItemDefaults.SegmentedGap)) {
             SwipeableSessionRow(row, i, shown.size, actions)
         }
     }
-    if (capped) {
+    if (toggle != null) {
         item("more-$id") {
             Box(Modifier.animateItem().fillMaxWidth().padding(horizontal = 16.dp), contentAlignment = Alignment.CenterStart) {
-                TextButton(onClick = { onExpand?.invoke(!expanded) }) {
-                    Text(if (expanded) "Show less" else "Show all ${rows.size}")
-                }
+                TextButton(onClick = { onExpand?.invoke(!expanded) }) { Text(toggle) }
             }
         }
     }
