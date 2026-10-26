@@ -412,3 +412,17 @@ fn spawn_watch(weak: Weak<ClientInner>, key: WatchKey, cancel: CancellationToken
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_account_list_waits_out_a_usage_probe() {
+        assert_eq!(
+            deadline(methods::LIST_AGENT_ACCOUNTS),
+            Duration::from_secs(60)
+        );
+        assert_eq!(deadline(methods::ACTIVATE_AGENT_ACCOUNT), CALL_TIMEOUT);
+    }
+}
