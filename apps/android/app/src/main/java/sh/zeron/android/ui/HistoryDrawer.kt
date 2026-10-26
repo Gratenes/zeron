@@ -1,9 +1,12 @@
 package sh.zeron.android.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.MutatorMutex
 import androidx.compose.foundation.background
@@ -34,6 +37,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.AbsoluteRoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -56,6 +60,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -71,9 +76,11 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.ZIcon
@@ -123,18 +130,42 @@ class HistoryDrawerState : SwipeProgress() {
     internal var projectId by mutableStateOf<String?>(null)
     suspend fun open() = animateTo(1f)
     suspend fun close() = animateTo(0f)
+
+    /** Shut at once, stopping any swipe or animation in flight. */
+    internal suspend fun dismiss() {
+        stop()
+        snapTo(0f)
+    }
 }
 
 /**
  * A page sliding off to the left on its way home: 0 at rest, 1 gone. Only the
- * page that took the swipe ([owner], its back stack entry) moves, so it stays
- * gone while it fades out and Home comes in untouched.
+ * page that took the swipe ([owner], its back stack entry) moves. Once it's
+ * let go for home the page is popped where it is, and its exit transition
+ * ([homeSwipeExitOffset]) finishes the slide over Home.
  */
 @Stable
 class HomeSwipeState : SwipeProgress() {
     var owner by mutableStateOf<String?>(null)
         internal set
+
+    /** A new swipe on [page]: one still springing back carries on from where it is. */
+    internal fun begin(page: String?) {
+        if (owner == page) return
+        owner = page
+        snapTo(0f)
+    }
+
+    /** Whether back stack entry [entry] is being popped by a swipe (it's already partly off screen). */
+    fun leaving(entry: String): Boolean = owner == entry && progress > 0f
 }
+
+/** The rest of the slide for a page popped by a home swipe, from where the finger let it go. */
+fun HomeSwipeState.exit(): ExitTransition =
+    slideOutHorizontally(spring(Spring.DampingRatioNoBouncy, 520f, IntOffset.VisibilityThreshold)) { homeSwipeExitOffset(it, progress) }
+
+/** How much further a page let go at [progress] slides to be fully off the left edge. */
+fun homeSwipeExitOffset(fullWidth: Int, progress: Float): Int = -(fullWidth * (1f - progress.coerceIn(0f, 1f))).roundToInt()
 
 /** Draws the page [owner] where the home swipe has it. */
 fun Modifier.homeSwipeLayer(state: HomeSwipeState, owner: String): Modifier = graphicsLayer {
@@ -178,30 +209,35 @@ fun HistoryDrawerHost(
         onDragStarted = { state.stop() },
         onDragStopped = { settle(it) },
     )
-    // The keyboard (New session opens with it up) doesn't stay over the drawer.
+    // The keyboard (New session opens with it up) doesn't stay over the drawer,
+    // but a drag that springs back leaves it where it was.
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     LaunchedEffect(state) {
-        snapshotFlow { state.isOpen }.collect { open ->
+        snapshotFlow { drawerTakesKeyboard(state.progress) }.collect { open ->
             if (open) {
                 focus.clearFocus(force = true)
                 keyboard?.hide()
             }
         }
     }
+    // Navigation the drawer didn't start (a notification, a toast) can land on a page without it.
+    LaunchedEffect(enabled) { if (!enabled) state.dismiss() }
     val swipes = SwipeTargets(
         drawer = if (enabled) state else null,
         drawerWidthPx = widthPx,
         onDrawerRelease = settle,
         home = if (onSwipeHome != null && page != null) home else null,
         page = page,
+        // A spring-back still running would fight the finger.
+        onHomeStart = { scope.launch { home.stop() } },
         onHomeRelease = { pageWidth, velocity ->
-            // Leftward is negative: progress grows as the page leaves.
-            val v = -velocity
-            val gone = homeSwipeLeaves(home.progress, velocity)
-            scope.launch {
-                home.animateTo(if (gone) 1f else 0f, v / pageWidth)
-                if (gone) onSwipeHome?.invoke()
+            if (homeSwipeLeaves(home.progress, velocity)) {
+                // Popped now, Home is there under the page as it finishes sliding off.
+                onSwipeHome?.invoke()
+            } else {
+                // Leftward is negative: progress grows as the page leaves.
+                scope.launch { home.animateTo(0f, -velocity / pageWidth) }
             }
         },
     )
@@ -222,8 +258,10 @@ fun HistoryDrawerHost(
                     .pointerInput(Unit) { detectTapGestures { scope.launch { state.close() } } }
                     .then(dragModifier),
             )
+            // Pinned to the left in right-to-left layouts too: it slides in from there.
             Box(
                 Modifier
+                    .align(AbsoluteAlignment.TopLeft)
                     .width(DrawerWidth)
                     .fillMaxHeight()
                     .graphicsLayer { translationX = (state.progress - 1f) * widthPx }
@@ -242,6 +280,7 @@ private class SwipeTargets(
     val onDrawerRelease: (Float) -> Unit,
     val home: HomeSwipeState?,
     val page: String?,
+    val onHomeStart: () -> Unit,
     /** (page width px, release velocity px/s) */
     val onHomeRelease: (Float, Float) -> Unit,
 )
@@ -282,8 +321,8 @@ private fun Modifier.pageSwipes(targets: State<SwipeTargets>): Modifier =
             val drawer = t.drawer
             val home = t.home
             if (!toDrawer && home != null) {
-                home.owner = t.page
-                home.snapTo(0f)
+                t.onHomeStart()
+                home.begin(t.page)
             }
             fun move(x: Float) {
                 if (toDrawer) drawer?.dragBy(x / t.drawerWidthPx) else home?.dragBy(-x / pageWidth)
@@ -324,6 +363,9 @@ internal fun claimSwipe(dx: Float, dy: Float, slop: Float, drawer: Boolean, home
 /** A released drawer opens on a rightward fling, closes on a leftward one, else goes to the nearer side. */
 internal fun drawerSettlesOpen(progress: Float, velocityX: Float): Boolean = settlesForward(progress, velocityX, past = 0.5f)
 
+/** The drawer clears focus (and the keyboard) once it's all the way open, not at the first pixel of a drag. */
+internal fun drawerTakesKeyboard(progress: Float): Boolean = progress >= 1f
+
 /** A released page goes home on a leftward fling or once it's 40% gone; otherwise it springs back. */
 internal fun homeSwipeLeaves(progress: Float, velocityX: Float): Boolean = settlesForward(progress, -velocityX, past = 0.4f)
 
@@ -342,6 +384,10 @@ internal fun drawerShows(projectId: String?, filter: Filter, rowProjectId: Strin
         Filter.Working -> indicator == ChatIndicator.WORKING
         Filter.Pinned -> pinned
     }
+
+/** The drawer's project filter, or null (all projects) once that project has no chats left to show. */
+internal fun drawerProject(projectId: String?, projects: List<ProjectRef>): String? =
+    projectId?.takeIf { id -> projects.any { it.id == id } }
 
 /**
  * Checkouts of one repository on several hosts share a name: the host tells
@@ -378,14 +424,15 @@ fun HistoryDrawerContent(
         sameNameHosts(projects) { devices[it] }
     }
     fun host(project: ProjectRef) = hosts[project.id]
-    val shown = all.filter { row -> drawerShows(projectId, filter, row.project?.id, row.indicator, row.pinned) }
+    val project = drawerProject(projectId, projects)
+    val shown = all.filter { row -> drawerShows(project, filter, row.project?.id, row.indicator, row.pinned) }
     val active = remember(activeId, workspace) { activeId?.let { id -> model.row(id)?.parentChatId ?: id } }
     val colors = MaterialTheme.colorScheme
 
     Surface(
         Modifier.fillMaxSize(),
         color = colors.surfaceContainerLow,
-        shape = RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp),
+        shape = AbsoluteRoundedCornerShape(topRight = 28.dp, bottomRight = 28.dp),
         shadowElevation = 12.dp,
     ) {
         Column(
@@ -397,7 +444,7 @@ fun HistoryDrawerContent(
                 IconButton(onClick = onSearch) { ZIcon(ZIcons.Search, "Search sessions", Modifier.size(20.dp), tint = colors.onSurfaceVariant) }
             }
             Button(
-                onClick = { onNewSession(projectId) },
+                onClick = { onNewSession(project) },
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = colors.primaryContainer, contentColor = colors.onPrimaryContainer),
             ) {
@@ -419,7 +466,7 @@ fun HistoryDrawerContent(
                     ZIcon(ZIcons.Folder, null, Modifier.size(16.dp), tint = colors.onSurface)
                     Spacer(Modifier.width(10.dp))
                     Text(
-                        projects.firstOrNull { it.id == projectId }?.let { p -> listOfNotNull(p.name, host(p)).joinToString(" · ") } ?: "All projects",
+                        projects.firstOrNull { it.id == project }?.let { p -> listOfNotNull(p.name, host(p)).joinToString(" · ") } ?: "All projects",
                         Modifier.weight(1f),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium,
@@ -434,9 +481,9 @@ fun HistoryDrawerContent(
                     listOf(
                         MenuSection(
                             "Project",
-                            listOf(MenuChoice("All projects", projectId == null, leading = { ZIcon(ZIcons.Home, null, Modifier.size(20.dp)) }) { projectId = null }) +
-                                projects.map { project ->
-                                    MenuChoice(project.name, projectId == project.id, supporting = host(project), leading = { ProjectTile(project.name, project.colorIndex.toInt(), 20.dp) }) { projectId = project.id }
+                            listOf(MenuChoice("All projects", project == null, leading = { ZIcon(ZIcons.Home, null, Modifier.size(20.dp)) }) { projectId = null }) +
+                                projects.map { p ->
+                                    MenuChoice(p.name, project == p.id, supporting = host(p), leading = { ProjectTile(p.name, p.colorIndex.toInt(), 20.dp) }) { projectId = p.id }
                                 },
                         ),
                     ),

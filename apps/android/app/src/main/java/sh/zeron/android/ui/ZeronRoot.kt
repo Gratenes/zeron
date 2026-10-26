@@ -2,6 +2,8 @@ package sh.zeron.android.ui
 
 import android.net.Uri
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
@@ -140,8 +142,6 @@ private fun MainNav(model: AppModel) {
     val openHistory: () -> Unit = { scope.launch { history.open() } }
     // The drawer's "New session" while New session is already open.
     val newSessionProject = remember { MutableSharedFlow<String?>(extraBufferCapacity = 1) }
-    // Large screens show sessions beside the chat: no drawer there.
-    LaunchedEffect(wide) { if (wide) history.snapTo(0f) }
     // Folding back to a phone keeps the open chat, full screen; unfolding brings it beside the list.
     LaunchedEffect(wide) {
         if (!wide) {
@@ -240,10 +240,10 @@ private fun MainNav(model: AppModel) {
     ) {
     HistoryDrawerHost(
         history,
-        enabled = !wide && (route == Routes.HOME || route == Routes.CHAT || route == Routes.NEW),
+        enabled = historyDrawerOn(route, wide),
         home = homeSwipe,
         page = entry?.id,
-        onSwipeHome = if (!wide && (route == Routes.CHAT || route == Routes.NEW)) ({ nav.popBackStack(Routes.HOME, inclusive = false) }) else null,
+        onSwipeHome = if (swipesHome(route, wide)) ({ nav.popBackStack(Routes.HOME, inclusive = false) }) else null,
         drawer = {
             HistoryDrawerContent(
                 model,
@@ -275,7 +275,14 @@ private fun MainNav(model: AppModel) {
             )
         },
     ) {
-    NavHost(nav, startDestination = Routes.HOME) {
+    NavHost(
+        nav,
+        startDestination = Routes.HOME,
+        // A page swiped home is popped part way off: it finishes its slide over Home, which is
+        // simply there. Other pops keep NavHost's default fades.
+        popEnterTransition = { if (homeSwipe.leaving(initialState.id)) EnterTransition.None else fadeIn(tween(700)) },
+        popExitTransition = { if (homeSwipe.leaving(initialState.id)) homeSwipe.exit() else fadeOut(tween(700)) },
+    ) {
         composable(Routes.HOME) {
             if (!wide) {
                 Home(
@@ -424,6 +431,13 @@ private fun MainNav(model: AppModel) {
     }
     }
 }
+
+/** Phones: the pages chat history opens over (large screens list sessions beside the chat instead). */
+internal fun historyDrawerOn(route: String?, wide: Boolean): Boolean =
+    !wide && (route == Routes.HOME || route == Routes.CHAT || route == Routes.NEW)
+
+/** Phones: the pages a swipe left takes home. */
+internal fun swipesHome(route: String?, wide: Boolean): Boolean = !wide && (route == Routes.CHAT || route == Routes.NEW)
 
 private val TERMINAL_DEMO = listOf("git log --oneline -5", "cargo test -p zeron-veil")
 
