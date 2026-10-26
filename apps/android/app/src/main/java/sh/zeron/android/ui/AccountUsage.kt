@@ -80,6 +80,13 @@ object DeviceAccountsCache {
         lists[deviceId] = list
     }
 
+    /** Sign-out: forget every list, throttle and the client (which is shut down). */
+    fun reset() {
+        lists.clear()
+        forcedAt.clear()
+        owner = null
+    }
+
     /** Whether a forced probe of `deviceId` may go out now (and note that it does). */
     fun takeForce(deviceId: String, explicit: Boolean): Boolean {
         val now = System.currentTimeMillis()

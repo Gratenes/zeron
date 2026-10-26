@@ -4,6 +4,7 @@ import androidx.compose.runtime.snapshots.Snapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import uniffi.zeron_core.ContextUsage
 import uniffi.zeron_core.CoreClient
@@ -37,6 +38,9 @@ private fun login(
 )
 
 class AccountUsageTest {
+    // The cache is app-wide: each test starts signed out.
+    @Before fun signedOut() = DeviceAccountsCache.reset()
+
     @Test fun noLoginInUseWhenNoneIsActive() {
         assertNull(loginInUse(emptyList()))
         assertNull(loginInUse(listOf(login("a"), login("b"))))
@@ -139,5 +143,15 @@ class AccountUsageTest {
         assertEquals("a", DeviceAccountsCache.get(core, "dev")?.single()?.id)
         // Another sign-in: nothing of the last one carries over.
         assertNull(DeviceAccountsCache.get(CoreClient(NoHandle), "dev"))
+    }
+
+    @Test fun signOutForgetsTheListsTheThrottleAndTheClient() {
+        val core = CoreClient(NoHandle)
+        DeviceAccountsCache.put(core, "dev", listOf(login("a", active = true)))
+        assertTrue(DeviceAccountsCache.takeForce("dev", explicit = false))
+        DeviceAccountsCache.reset()
+        // Even for the very same client: nothing of the signed-out account answers.
+        assertNull(DeviceAccountsCache.get(core, "dev"))
+        assertTrue(DeviceAccountsCache.takeForce("dev", explicit = false))
     }
 }
