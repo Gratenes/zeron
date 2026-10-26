@@ -103,15 +103,49 @@ object DeviceAccountsCache {
 val DeviceAccountInfo.peakUsage: Float?
     get() = usage.maxOfOrNull { it.usedFraction.coerceIn(0f, 1f) }
 
-/** How full a window reads: the accent, amber past 70 %, red past 90 %. */
+/** How full a usage window is: worth a warning past 70 %, near its limit past 90 %. */
+enum class UsageLevel { Normal, High, Critical }
+
+fun usageLevel(fraction: Float): UsageLevel = when {
+    fraction >= 0.9f -> UsageLevel.Critical
+    fraction >= 0.7f -> UsageLevel.High
+    else -> UsageLevel.Normal
+}
+
+/** How full a window reads: the accent, amber when high, red when critical. */
 @Composable
-fun usageTone(fraction: Float): Color = when {
-    fraction >= 0.9f -> MaterialTheme.colorScheme.error
-    fraction >= 0.7f -> Color(0xFFD97706)
-    else -> MaterialTheme.colorScheme.primary
+fun usageTone(fraction: Float): Color = when (usageLevel(fraction)) {
+    UsageLevel.Critical -> MaterialTheme.colorScheme.error
+    UsageLevel.High -> Color(0xFFD97706)
+    UsageLevel.Normal -> MaterialTheme.colorScheme.primary
 }
 
 private fun percent(fraction: Float) = "${(fraction.coerceIn(0f, 1f) * 100).roundToInt()}%"
+
+/** What the usage pill reads: the busiest window's share, else the plan's name. */
+fun pillLabel(login: DeviceAccountInfo): String = login.peakUsage?.let(::percent) ?: (login.planLabel ?: "Plan")
+
+/**
+ * The login an agent runs on, among its `logins`. An agent with a login per
+ * model provider (OpenCode) has one in use per provider: the one reporting
+ * usage leads.
+ */
+fun loginInUse(logins: List<DeviceAccountInfo>): DeviceAccountInfo? =
+    logins.filter { it.active }.let { live -> live.firstOrNull { it.usage.isNotEmpty() } ?: live.firstOrNull() }
+
+/**
+ * The quick switcher's rows: the logins `inUse` can be swapped for (same
+ * model provider), or none when the agent can't switch or there's no choice.
+ */
+fun switchChoices(logins: List<DeviceAccountInfo>, inUse: DeviceAccountInfo, switches: Boolean): List<DeviceAccountInfo> {
+    if (!switches) return emptyList()
+    val group = logins.filter { it.provider == inUse.provider }
+    return if (group.size > 1) group else emptyList()
+}
+
+/** `list` with `account` in use across its group (its agent, or that agent's model provider). */
+fun withActive(list: List<DeviceAccountInfo>, account: DeviceAccountInfo): List<DeviceAccountInfo> =
+    list.map { if (it.harness == account.harness && it.provider == account.provider) it.copy(active = it.id == account.id) else it }
 
 /**
  * The CLI logins one chat's agent runs on, on its computer: loaded cached
@@ -132,12 +166,9 @@ class AccountUsageState(private val core: CoreClient, val deviceId: String, val 
     val logins: List<DeviceAccountInfo>?
         get() = DeviceAccountsCache.get(core, deviceId)?.filter { it.harness == harness }
 
-    /**
-     * The login the agent runs on. An agent with a login per model provider
-     * (OpenCode) has one in use per provider: the one reporting usage leads.
-     */
+    /** The login the agent runs on ([loginInUse]). */
     val active: DeviceAccountInfo?
-        get() = logins.orEmpty().filter { it.active }.let { live -> live.firstOrNull { it.usage.isNotEmpty() } ?: live.firstOrNull() }
+        get() = loginInUse(logins.orEmpty())
 
     suspend fun load(force: Boolean) {
         val gen = ++generation
@@ -165,11 +196,8 @@ class AccountUsageState(private val core: CoreClient, val deviceId: String, val 
     fun activate(account: DeviceAccountInfo, onError: (String) -> Unit) {
         if (account.active || !account.switchable || busy != null) return
         val before = DeviceAccountsCache.get(core, deviceId) ?: return
-        // Optimistic: the tapped login takes over its group (its agent, or that agent's model provider).
-        DeviceAccountsCache.put(
-            core, deviceId,
-            before.map { if (it.harness == account.harness && it.provider == account.provider) it.copy(active = it.id == account.id) else it },
-        )
+        // Optimistic: shown in use before the computer answers.
+        DeviceAccountsCache.put(core, deviceId, withActive(before, account))
         busy = account.id
         generation++
         scope.launch {
@@ -226,13 +254,13 @@ fun PlanUsageChip(state: AccountUsageState?, context: ContextUsage?, onError: (S
     val fraction = active.peakUsage
     var open by remember { mutableStateOf(false) }
     ContextChip(
-        fraction?.let(::percent) ?: (active.planLabel ?: "Plan"),
+        pillLabel(active),
         leading = { UsageRing(fraction ?: 0f, Modifier.size(15.dp)) },
         onClick = {
             open = true
             state.refresh()
         },
-        tint = if ((fraction ?: 0f) >= 0.9f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        tint = if (usageLevel(fraction ?: 0f) == UsageLevel.Critical) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
     ) {
         DropdownMenuPopup(expanded = open, onDismissRequest = { open = false }) {
             DropdownMenuGroup(shapes = MenuDefaults.groupShape(0, 1)) {
@@ -260,8 +288,8 @@ fun PlanUsageChip(state: AccountUsageState?, context: ContextUsage?, onError: (S
                             CompactMeter("Context", f, contextDetail(context))
                         }
                     }
-                    val logins = state.logins.orEmpty().filter { it.provider == active.provider }
-                    if (state.rules.switches && logins.size > 1) {
+                    val logins = switchChoices(state.logins.orEmpty(), active, state.rules.switches)
+                    if (logins.isNotEmpty()) {
                         HorizontalDivider(Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant)
                         Text("Switch account", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 2.dp))
                         logins.forEach { a -> QuickAccountRow(a, busy = state.busy == a.id) { state.activate(a, onError) } }
@@ -288,6 +316,13 @@ fun contextFraction(context: ContextUsage?): Float? {
     if (window == 0uL) return null
     return (tokens.toDouble() / window.toDouble()).toFloat().coerceIn(0f, 1f)
 }
+
+/**
+ * The separate context chip's share: shown from half full, and folded into
+ * the usage pill (its switcher) when that shows.
+ */
+fun contextChipFraction(context: ContextUsage?, pillShown: Boolean): Float? =
+    if (pillShown) null else contextFraction(context)?.takeIf { it >= 0.5f }
 
 private fun contextDetail(context: ContextUsage?): String? {
     val tokens = context?.tokens ?: return null
@@ -326,7 +361,7 @@ private fun CompactMeter(label: String, fraction: Float, detail: String?) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, modifier = Modifier.width(64.dp))
             UsageLine(f, Modifier.weight(1f))
-            Text(percent(f), style = MaterialTheme.typography.labelMedium, color = if (f >= 0.7f) usageTone(f) else MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.End, modifier = Modifier.width(44.dp))
+            Text(percent(f), style = MaterialTheme.typography.labelMedium, color = if (usageLevel(f) != UsageLevel.Normal) usageTone(f) else MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.End, modifier = Modifier.width(44.dp))
         }
         detail?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(start = 64.dp)) }
     }
@@ -377,7 +412,7 @@ private fun QuickAccountRow(a: DeviceAccountInfo, busy: Boolean, onSwitch: () ->
         if (f != null) {
             Spacer(Modifier.width(8.dp))
             UsageLine(f, Modifier.width(44.dp))
-            Text(percent(f), style = MaterialTheme.typography.labelMedium, color = if (f >= 0.7f) usageTone(f) else MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.End, modifier = Modifier.width(44.dp))
+            Text(percent(f), style = MaterialTheme.typography.labelMedium, color = if (usageLevel(f) != UsageLevel.Normal) usageTone(f) else MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.End, modifier = Modifier.width(44.dp))
         }
     }
 }

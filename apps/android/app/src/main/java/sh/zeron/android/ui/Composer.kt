@@ -383,9 +383,8 @@ private fun SessionChips(
             ContextChip(it, leading = { ZIcon(ZIcons.Branch, null, Modifier.size(16.dp)) }, onClick = {})
         }
     }
-    // Folded into the usage pill when that shows.
-    val fraction = if (planUsageShown(accounts)) null else contextFraction(c.contextUsage)
-    if (fraction != null && fraction >= 0.5f) {
+    val fraction = contextChipFraction(c.contextUsage, planUsageShown(accounts))
+    if (fraction != null) {
         ContextChip(
             "${(fraction * 100).toInt()}% context",
             leading = { ZIcon(if (fraction >= 0.85f) ZIcons.Warning else ZIcons.Context, null, Modifier.size(16.dp)) },
