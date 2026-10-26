@@ -81,7 +81,7 @@ fun NewSessionScreen(
     onOpenBilling: () -> Unit = {},
     /** Focus the prompt at once (a large screen's page at launch waits: the keyboard would cover the column). */
     focusOnAppear: Boolean = true,
-    /** The history drawer's "New chat" while this page is open, with its project filter if any. */
+    /** The history drawer's "New session" while this page is open, with its project filter if any. */
     projectPicks: Flow<String?> = emptyFlow(),
 ) {
     val workspace by model.workspace.collectAsState()
@@ -110,7 +110,7 @@ fun NewSessionScreen(
     }
     var newProject by remember { mutableStateOf(false) }
     val focus = remember { FocusRequester() }
-    // "New chat" from the drawer: its project, then straight back to typing.
+    // "New session" from the drawer: its project, then straight back to typing.
     LaunchedEffect(projectPicks) {
         projectPicks.collect { id ->
             if (id != null) draft = draft.inProject(id, workspace?.projects)

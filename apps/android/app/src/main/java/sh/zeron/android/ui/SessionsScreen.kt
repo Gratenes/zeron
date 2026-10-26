@@ -148,10 +148,7 @@ private fun SessionsSearchBar(
     }
 }
 
-/** [share] is each segment's slice of the history drawer's filter track, sized to its label. */
-internal enum class Filter(val label: String, val share: Float) {
-    All("All", 52f), NeedsYou("Needs you", 84f), Working("Working", 74f), Pinned("Pinned", 66f),
-}
+internal enum class Filter(val label: String) { All("All"), NeedsYou("Needs you"), Working("Working"), Pinned("Pinned") }
 
 /** "2 working · 1 needs you" — the live summary beside New session. */
 fun liveSummary(ws: WorkspaceSnapshot): String? {

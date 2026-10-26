@@ -1,17 +1,12 @@
 package sh.zeron.android.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.MutatorMutex
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -19,9 +14,9 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -32,14 +27,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
@@ -65,7 +59,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -75,11 +68,9 @@ import androidx.compose.ui.input.pointer.util.addPointerInputChange
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.abs
@@ -94,7 +85,6 @@ import uniffi.zeron_core.SessionRow
 private val DrawerWidth = 312.dp
 /** How far the page behind slides while the drawer opens (parallax). */
 private val ContentShift = 96.dp
-private val NeedsYou = Color(0xFFF5B963)
 /** Critically damped: carries the release velocity, never overshoots. */
 private val DrawerSpring = spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 520f)
 /** A fling faster than this (px/s) decides the swipe whatever the distance. */
@@ -362,70 +352,8 @@ internal fun sameNameHosts(projects: List<ProjectRef>, hostOf: (String) -> Strin
     return projects.filter { counts.getValue(it.name) > 1 }.mapNotNull { p -> hostOf(p.id)?.let { p.id to it } }.toMap()
 }
 
-/** One track, one pill: the selection slides between the four filters. */
-@Composable
-internal fun FilterSegments(
-    selected: Filter,
-    onSelect: (Filter) -> Unit,
-    modifier: Modifier = Modifier,
-    count: (Filter) -> Int = { 0 },
-) {
-    val colors = MaterialTheme.colorScheme
-    val segments = Filter.entries
-    // A live count widens its segment so the number fits beside the label.
-    fun share(f: Filter) = f.share + if (count(f) > 0) 18f else 0f
-    val total = segments.sumOf { share(it).toDouble() }.toFloat()
-    BoxWithConstraints(
-        modifier
-            .fillMaxWidth()
-            .height(40.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .background(colors.surfaceContainerHigh)
-            .border(1.dp, colors.outlineVariant.copy(alpha = 0.5f), RoundedCornerShape(20.dp))
-            .padding(4.dp),
-    ) {
-        val unit = maxWidth / total
-        val before = segments.takeWhile { it != selected }.sumOf { share(it).toDouble() }.toFloat()
-        val motion = tween<Dp>(280, easing = CubicBezierEasing(.2f, .8f, .2f, 1f))
-        val left by animateDpAsState(unit * before, motion, label = "filter-left")
-        val width by animateDpAsState(unit * share(selected), motion, label = "filter-width")
-        Box(
-            Modifier
-                .offset(x = left)
-                .width(width)
-                .fillMaxHeight()
-                .shadow(4.dp, RoundedCornerShape(16.dp), ambientColor = colors.primary, spotColor = colors.primary)
-                .clip(RoundedCornerShape(16.dp))
-                .background(colors.primary),
-        )
-        Row(Modifier.fillMaxSize()) {
-            segments.forEach { f ->
-                val on = f == selected
-                val text by animateColorAsState(if (on) colors.onPrimary else colors.onSurfaceVariant, tween(200), label = "filter-text")
-                Box(
-                    Modifier
-                        .weight(share(f))
-                        .fillMaxHeight()
-                        .clip(RoundedCornerShape(16.dp))
-                        .selectable(selected = on, role = Role.Tab, onClick = { onSelect(f) }),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(f.label, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = text, maxLines = 1, softWrap = false)
-                        val n = count(f)
-                        if (n > 0) {
-                            Spacer(Modifier.width(5.dp))
-                            Text("$n", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = text.copy(alpha = 0.75f), maxLines = 1)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 /**
- * The drawer itself: new chat, project + status filters, recent chats. Side
+ * The drawer itself: New session, project + status filters, recent chats. Side
  * chats live with their parent: [activeId] in one marks the parent.
  */
 @Composable
@@ -434,7 +362,7 @@ fun HistoryDrawerContent(
     state: HistoryDrawerState,
     activeId: String?,
     /** Called with the project the drawer is filtered to, if any. */
-    onNewChat: (projectId: String?) -> Unit,
+    onNewSession: (projectId: String?) -> Unit,
     onPick: (String) -> Unit,
     onSearch: () -> Unit,
     onSettings: () -> Unit,
@@ -465,17 +393,17 @@ fun HistoryDrawerContent(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Chats", Modifier.weight(1f), fontSize = 22.sp, fontWeight = FontWeight.Bold, color = colors.onSurface)
-                IconButton(onClick = onSearch) { ZIcon(ZIcons.Search, "Search chats", Modifier.size(20.dp), tint = colors.onSurfaceVariant) }
+                Text("Sessions", Modifier.weight(1f), fontSize = 22.sp, fontWeight = FontWeight.Bold, color = colors.onSurface)
+                IconButton(onClick = onSearch) { ZIcon(ZIcons.Search, "Search sessions", Modifier.size(20.dp), tint = colors.onSurfaceVariant) }
             }
             Button(
-                onClick = { onNewChat(projectId) },
+                onClick = { onNewSession(projectId) },
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = colors.primaryContainer, contentColor = colors.onPrimaryContainer),
             ) {
                 ZIcon(ZIcons.NewSession, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("New chat", fontWeight = FontWeight.SemiBold)
+                Text("New session", fontWeight = FontWeight.SemiBold)
             }
             Box {
                 Row(
@@ -514,7 +442,10 @@ fun HistoryDrawerContent(
                     ),
                 )
             }
-            FilterSegments(filter, onSelect = { filter = it })
+            // Home's filter pills; they scroll sideways when they don't fit (large text).
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (f in Filter.entries) Pill(f.label, filter == f, onClick = { filter = f })
+            }
             LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(bottom = 8.dp)) {
                 if (shown.isEmpty()) {
                     item {
@@ -575,7 +506,7 @@ private fun HistoryRow(row: SessionRow, active: Boolean, onClick: () -> Unit) {
     ) {
         val dot = when (row.indicator) {
             ChatIndicator.WORKING -> colors.primary
-            ChatIndicator.AWAITING_INPUT -> NeedsYou
+            ChatIndicator.AWAITING_INPUT -> colors.primary
             ChatIndicator.ERRORED -> colors.error
             else -> colors.outlineVariant
         }

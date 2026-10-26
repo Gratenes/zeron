@@ -138,7 +138,7 @@ private fun MainNav(model: AppModel) {
     val route = entry?.destination?.route
     val activeChat = if (route == Routes.CHAT) entry?.arguments?.getString("id") else null
     val openHistory: () -> Unit = { scope.launch { history.open() } }
-    // The drawer's "New chat" while New session is already open.
+    // The drawer's "New session" while New session is already open.
     val newSessionProject = remember { MutableSharedFlow<String?>(extraBufferCapacity = 1) }
     // Large screens show sessions beside the chat: no drawer there.
     LaunchedEffect(wide) { if (wide) history.snapTo(0f) }
@@ -249,7 +249,7 @@ private fun MainNav(model: AppModel) {
                 model,
                 history,
                 activeId = activeChat,
-                onNewChat = { projectId ->
+                onNewSession = { projectId ->
                     scope.launch { history.close() }
                     if (route == Routes.NEW) {
                         // Already there: keep what's typed, switch to the drawer's project.
