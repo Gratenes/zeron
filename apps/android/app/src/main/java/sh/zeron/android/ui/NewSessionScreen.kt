@@ -113,7 +113,7 @@ fun NewSessionScreen(
     // "New chat" from the drawer: its project, then straight back to typing.
     LaunchedEffect(projectPicks) {
         projectPicks.collect { id ->
-            if (id != null) draft = draft.inProject(id, workspace)
+            if (id != null) draft = draft.inProject(id, workspace?.projects)
             runCatching { focus.requestFocus() }
         }
     }

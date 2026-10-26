@@ -88,6 +88,7 @@ import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.ZIcon
 import sh.zeron.android.design.ZIcons
 import uniffi.zeron_core.ChatIndicator
+import uniffi.zeron_core.ProjectRef
 import uniffi.zeron_core.SessionRow
 
 private val DrawerWidth = 312.dp
@@ -177,12 +178,7 @@ fun HistoryDrawerHost(
     val density = LocalDensity.current
     val widthPx = with(density) { DrawerWidth.toPx() }
     val settle: (Float) -> Unit = { velocity ->
-        val target = when {
-            velocity > FlingVelocity -> 1f
-            velocity < -FlingVelocity -> 0f
-            state.progress > 0.5f -> 1f
-            else -> 0f
-        }
+        val target = if (drawerSettlesOpen(state.progress, velocity)) 1f else 0f
         scope.launch { state.animateTo(target, velocity / widthPx) }
     }
     val drag = rememberDraggableState { dx -> state.dragBy(dx / widthPx) }
@@ -212,11 +208,7 @@ fun HistoryDrawerHost(
         onHomeRelease = { pageWidth, velocity ->
             // Leftward is negative: progress grows as the page leaves.
             val v = -velocity
-            val gone = when {
-                v > FlingVelocity -> true
-                v < -FlingVelocity -> false
-                else -> home.progress > 0.4f
-            }
+            val gone = homeSwipeLeaves(home.progress, velocity)
             scope.launch {
                 home.animateTo(if (gone) 1f else 0f, v / pageWidth)
                 if (gone) onSwipeHome?.invoke()
@@ -289,13 +281,12 @@ private fun Modifier.pageSwipes(targets: State<SwipeTargets>): Modifier =
                 val delta = change.positionChange()
                 dx += delta.x
                 dy += delta.y
-                if (abs(dy) > slop && abs(dy) >= abs(dx)) return@awaitEachGesture
-                if (abs(dx) > slop && abs(dx) > abs(dy) * 1.2f) {
-                    if (dx > 0 && t.drawer == null || dx < 0 && t.home == null) return@awaitEachGesture
-                    toDrawer = dx > 0
-                    change.consume()
-                    break
-                }
+                val claim = claimSwipe(dx, dy, slop, drawer = t.drawer != null, home = t.home != null)
+                if (claim == SwipeClaim.Undecided) continue
+                if (claim == SwipeClaim.Yield) return@awaitEachGesture
+                toDrawer = claim == SwipeClaim.Drawer
+                change.consume()
+                break
             }
             val pageWidth = size.width.toFloat().coerceAtLeast(1f)
             val drawer = t.drawer
@@ -323,6 +314,53 @@ private fun Modifier.pageSwipes(targets: State<SwipeTargets>): Modifier =
             if (toDrawer) t.onDrawerRelease(vx) else t.onHomeRelease(pageWidth, vx)
         }
     }
+
+internal enum class SwipeClaim { Undecided, Yield, Drawer, Home }
+
+/**
+ * A drag of ([dx], [dy]) px so far: still inside the touch slop, someone
+ * else's (mostly vertical, or toward a side with nothing to open), or ours.
+ * Horizontal has to win clearly, so a diagonal stays undecided a little longer.
+ */
+internal fun claimSwipe(dx: Float, dy: Float, slop: Float, drawer: Boolean, home: Boolean): SwipeClaim = when {
+    abs(dy) > slop && abs(dy) >= abs(dx) -> SwipeClaim.Yield
+    abs(dx) > slop && abs(dx) > abs(dy) * 1.2f -> when {
+        dx > 0 -> if (drawer) SwipeClaim.Drawer else SwipeClaim.Yield
+        else -> if (home) SwipeClaim.Home else SwipeClaim.Yield
+    }
+    else -> SwipeClaim.Undecided
+}
+
+/** A released drawer opens on a rightward fling, closes on a leftward one, else goes to the nearer side. */
+internal fun drawerSettlesOpen(progress: Float, velocityX: Float): Boolean = settlesForward(progress, velocityX, past = 0.5f)
+
+/** A released page goes home on a leftward fling or once it's 40% gone; otherwise it springs back. */
+internal fun homeSwipeLeaves(progress: Float, velocityX: Float): Boolean = settlesForward(progress, -velocityX, past = 0.4f)
+
+/** [velocity] is px/s toward the end: a fling decides, whatever the distance. */
+private fun settlesForward(progress: Float, velocity: Float, past: Float): Boolean = when {
+    velocity > FlingVelocity -> true
+    velocity < -FlingVelocity -> false
+    else -> progress > past
+}
+
+/** Whether a chat passes the drawer's project and status filters ([projectId] null: any project). */
+internal fun drawerShows(projectId: String?, filter: Filter, rowProjectId: String?, indicator: ChatIndicator, pinned: Boolean): Boolean =
+    (projectId == null || rowProjectId == projectId) && when (filter) {
+        Filter.All -> true
+        Filter.NeedsYou -> indicator == ChatIndicator.AWAITING_INPUT
+        Filter.Working -> indicator == ChatIndicator.WORKING
+        Filter.Pinned -> pinned
+    }
+
+/**
+ * Checkouts of one repository on several hosts share a name: the host tells
+ * them apart. Project id to host, for same-named projects only.
+ */
+internal fun sameNameHosts(projects: List<ProjectRef>, hostOf: (String) -> String?): Map<String, String> {
+    val counts = projects.groupingBy { it.name }.eachCount()
+    return projects.filter { counts.getValue(it.name) > 1 }.mapNotNull { p -> hostOf(p.id)?.let { p.id to it } }.toMap()
+}
 
 /** One track, one pill: the selection slides between the four filters. */
 @Composable
@@ -407,17 +445,12 @@ fun HistoryDrawerContent(
     var projectMenu by remember { mutableStateOf(false) }
     val all = remember(workspace) { workspace?.let { frontRows(it) }.orEmpty().sortedByDescending { it.lastActivityMs } }
     val projects = remember(all) { all.mapNotNull { it.project }.distinctBy { it.id } }
-    // Checkouts of one repository on several hosts share a name: the host tells them apart.
-    val hosts = remember(workspace) { workspace?.projects.orEmpty().associate { it.id to it.deviceName } }
-    fun host(project: uniffi.zeron_core.ProjectRef) = hosts[project.id]?.takeIf { projects.count { it.name == project.name } > 1 }
-    val shown = all.filter { row ->
-        (projectId == null || row.project?.id == projectId) && when (filter) {
-            Filter.All -> true
-            Filter.NeedsYou -> row.indicator == ChatIndicator.AWAITING_INPUT
-            Filter.Working -> row.indicator == ChatIndicator.WORKING
-            Filter.Pinned -> row.pinned
-        }
+    val hosts = remember(workspace, projects) {
+        val devices = workspace?.projects.orEmpty().associate { it.id to it.deviceName }
+        sameNameHosts(projects) { devices[it] }
     }
+    fun host(project: ProjectRef) = hosts[project.id]
+    val shown = all.filter { row -> drawerShows(projectId, filter, row.project?.id, row.indicator, row.pinned) }
     val active = remember(activeId, workspace) { activeId?.let { id -> model.row(id)?.parentChatId ?: id } }
     val colors = MaterialTheme.colorScheme
 

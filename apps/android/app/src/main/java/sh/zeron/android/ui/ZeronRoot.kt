@@ -256,7 +256,7 @@ private fun MainNav(model: AppModel) {
                         newSessionProject.tryEmit(projectId)
                     } else {
                         // A drawer filtered to one project starts the chat there.
-                        if (projectId != null) model.lastDraft = model.lastDraft.inProject(projectId, model.workspace.value)
+                        if (projectId != null) model.lastDraft = model.lastDraft.inProject(projectId, model.workspace.value?.projects)
                         nav.navigate(Routes.NEW) { popUpTo(Routes.HOME) }
                     }
                 },

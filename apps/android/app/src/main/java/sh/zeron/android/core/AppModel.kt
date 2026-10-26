@@ -743,6 +743,6 @@ data class NewSessionDraft(
 )
 
 /** Moved to project [id] as picking it on New session does: its own host and branch, Cloud if it only runs there. */
-fun NewSessionDraft.inProject(id: String, workspace: WorkspaceSnapshot?): NewSessionDraft =
+fun NewSessionDraft.inProject(id: String, projects: List<ProjectView>?): NewSessionDraft =
     if (id == projectId) this
-    else copy(projectId = id, hostId = null, branch = null, cloud = workspace?.projects?.firstOrNull { it.id == id }?.isCloud == true)
+    else copy(projectId = id, hostId = null, branch = null, cloud = projects?.firstOrNull { it.id == id }?.isCloud == true)
