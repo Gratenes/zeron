@@ -67,7 +67,8 @@ object DeviceAccountsCache {
     private val forcedAt = HashMap<String, Long>()
     private var owner: CoreClient? = null
 
-    fun get(core: CoreClient, deviceId: String): List<DeviceAccountInfo>? = if (owner === core) lists[deviceId] else null
+    // Reads the map first, even for another owner: a screen that found nothing still hears the first put.
+    fun get(core: CoreClient, deviceId: String): List<DeviceAccountInfo>? = lists[deviceId]?.takeIf { owner === core }
 
     fun put(core: CoreClient, deviceId: String, list: List<DeviceAccountInfo>) {
         if (owner !== core) {

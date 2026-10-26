@@ -1,10 +1,14 @@
 package sh.zeron.android.ui
 
+import androidx.compose.runtime.snapshots.Snapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.zeron_core.ContextUsage
+import uniffi.zeron_core.CoreClient
 import uniffi.zeron_core.DeviceAccountInfo
+import uniffi.zeron_core.NoHandle
 import uniffi.zeron_core.UsageWindowInfo
 
 private fun w(label: String, used: Float) = UsageWindowInfo(label, used, null)
@@ -122,5 +126,18 @@ class AccountUsageTest {
         assertNull(contextChipFraction(ContextUsage(90_000uL, 200_000uL), pillShown = false))
         assertNull(contextChipFraction(ContextUsage(null, 200_000uL), pillShown = false))
         assertNull(contextChipFraction(ContextUsage(10uL, 0uL), pillShown = false))
+    }
+
+    @Test fun aReaderThatFoundNothingIsToldWhenTheListLands() {
+        // A page opened before any list (a cold start on the accounts page) must still recompose when one lands.
+        val core = CoreClient(NoHandle)
+        val reads = mutableListOf<Any>()
+        val before = Snapshot.observe(readObserver = { reads += it }) { DeviceAccountsCache.get(core, "dev") }
+        assertNull(before)
+        assertTrue(reads.isNotEmpty())
+        DeviceAccountsCache.put(core, "dev", listOf(login("a", active = true)))
+        assertEquals("a", DeviceAccountsCache.get(core, "dev")?.single()?.id)
+        // Another sign-in: nothing of the last one carries over.
+        assertNull(DeviceAccountsCache.get(CoreClient(NoHandle), "dev"))
     }
 }
