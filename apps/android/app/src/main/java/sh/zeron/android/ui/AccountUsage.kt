@@ -37,6 +37,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -233,13 +236,17 @@ fun rememberAccountUsage(core: CoreClient, deviceId: String, harness: String, en
     val scope = rememberCoroutineScope()
     val state = remember(core, deviceId, harness) { AccountUsageState(core, deviceId, harness, scope) }
     val shown = enabled && deviceId.isNotEmpty() && state.rules.signsIn && state.rules.reportsUsage
-    LaunchedEffect(state, shown) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(state, shown, lifecycle) {
         if (!shown) return@LaunchedEffect
-        // Paint what the computer has, then ask for fresh figures.
-        if (state.logins == null) state.load(force = false)
-        while (isActive) {
-            state.load(force = true)
-            delay(POLL_INTERVAL_MS)
+        // Only while the app is on screen: a phone in a pocket doesn't probe the provider.
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            // Paint what the computer has, then ask for fresh figures.
+            if (state.logins == null) state.load(force = false)
+            while (isActive) {
+                state.load(force = true)
+                delay(POLL_INTERVAL_MS)
+            }
         }
     }
     return state.takeIf { shown }
