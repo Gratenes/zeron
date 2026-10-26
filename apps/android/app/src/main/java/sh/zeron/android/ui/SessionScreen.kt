@@ -206,7 +206,8 @@ fun SessionScreen(
     LaunchedEffect(isCloud) { if (isCloud && model.cloud.info == null) model.cloud.refresh() }
     // The agent's logins on the chat's computer: the composer's usage pill and quick switcher.
     val harness = row?.harness ?: "claude-code"
-    val accounts = rememberAccountUsage(core, composer.host.deviceId, harness, enabled = !isCloud)
+    // Not until the row says which agent and computer: no pill for a guessed agent or a Cloud chat.
+    val accounts = rememberAccountUsage(core, composer.host.deviceId, harness, enabled = row != null && !row.isCloud)
     val signsIn = remember(harness) { uniffi.zeron_core.agentLoginRules(harness).signsIn }
     fun openAccounts() {
         signInTarget(model, chatId)?.let { onOpenAccounts(it, false) }
