@@ -109,13 +109,15 @@ object PickerSearch {
 
     /**
      * A long menu section's rows: fixed choices hold their place at either
-     * end, the rest take [sort]; then [query] filters (and ranks) them all.
+     * end, the rest take [sort]; [query] filters (and ranks) each part on its
+     * own, so a matching fixed row stays at its end.
      */
     fun arrange(choices: List<MenuChoice>, query: String, sort: PickerSort): List<MenuChoice> {
         val head = choices.takeWhile { it.fixed }
         val tail = choices.drop(head.size).takeLastWhile { it.fixed }
         val middle = choices.subList(head.size, choices.size - tail.size)
-        return filter(head + sorted(middle, sort, { it.label }) + tail, query, { it.label }, { listOf(it.supporting) })
+        fun match(rows: List<MenuChoice>) = filter(rows, query, { it.label }, { listOf(it.supporting) })
+        return match(head) + match(sorted(middle, sort, { it.label })) + match(tail)
     }
 
     /** The sort after [current] in [options], wrapping around. */

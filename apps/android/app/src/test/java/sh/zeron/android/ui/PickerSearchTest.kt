@@ -65,7 +65,18 @@ class PickerSearchTest {
             listOf("All projects", "api", "zeron", "New…"),
             PickerSearch.arrange(choices, "", PickerSort.Name).map { it.label },
         )
+        assertEquals(choices, PickerSearch.arrange(choices, "", PickerSort.Default))
         assertEquals(listOf("zeron"), PickerSearch.arrange(choices, "zer", PickerSort.Name).map { it.label })
         assertEquals(listOf("api"), PickerSearch.arrange(listOf(choice("api", supporting = "Online"), choice("web")), "online", PickerSort.Default).map { it.label })
+    }
+
+    @Test fun matchingFixedChoicesStayAtTheirEndsWhenSearched() {
+        val choices = listOf(choice("All sections", fixed = true), choice("Backlog"), choice("Sections archive"), choice("No section", fixed = true), choice("New section…", fixed = true))
+        // "Sections archive" is the best match, but the fixed rows keep their ends.
+        assertEquals(
+            listOf("All sections", "Sections archive", "No section", "New section…"),
+            PickerSearch.arrange(choices, "section", PickerSort.Name).map { it.label },
+        )
+        assertEquals(listOf("All sections", "Sections archive"), PickerSearch.arrange(choices, "sections", PickerSort.Default).map { it.label })
     }
 }
