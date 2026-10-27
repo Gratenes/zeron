@@ -1,9 +1,13 @@
 package sh.zeron.android.ui
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
+
+private fun m(id: String, label: String = id, detail: String? = null) = ModelPickerRow(id, label, detail)
 
 private fun choice(label: String, fixed: Boolean = false, supporting: String? = null) =
     MenuChoice(label, supporting = supporting, fixed = fixed) {}
@@ -78,5 +82,32 @@ class PickerSearchTest {
             PickerSearch.arrange(choices, "section", PickerSort.Name).map { it.label },
         )
         assertEquals(listOf("All sections", "Sections archive"), PickerSearch.arrange(choices, "sections", PickerSort.Default).map { it.label })
+    }
+
+    @Test fun modelSearchRanksNameThenIdDescriptionAndProvider() {
+        val rows = listOf(m("gpt-5"), m("gpt-5-codex", "GPT-5 Codex", "Tuned for opus-like work"), m("opus"))
+        // The description match ranks after the name match.
+        assertEquals(listOf("opus", "gpt-5-codex"), ModelPickerSearch.rows(rows, "opus", PickerSort.Default).map { it.id })
+        // Words can match the name or the provider; name matches rank higher.
+        assertEquals(listOf("gpt-5-codex", "gpt-5"), ModelPickerSearch.rows(rows, "codex gpt", PickerSort.Default, label = "Codex").map { it.id })
+        // An id that differs from the label still matches.
+        assertEquals(listOf("opus"), ModelPickerSearch.rows(listOf(m("opus", "Claude Opus 4.5"), m("sonnet")), "opus", PickerSort.Default).map { it.id })
+    }
+
+    @Test fun modelsSortByLabel() {
+        val rows = listOf(m("b", "beta"), m("a", "Alpha"))
+        assertEquals(listOf("Alpha", "beta"), ModelPickerSearch.rows(rows, "", PickerSort.Name).map { it.label })
+        assertTrue(ModelPickerSearch.rows(rows, "", PickerSort.Default) == rows)
+    }
+
+    @Test fun modelSearchShowsOnlyForALongList() {
+        assertFalse(ModelPickerSearch.offered(listOf(List(PickerSearch.SEARCH_AT - 1) { m("$it") }, null)))
+        assertTrue(ModelPickerSearch.offered(listOf(listOf(m("a")), List(PickerSearch.SEARCH_AT) { m("$it") })))
+    }
+
+    @Test fun modelSearchTurnsToAProviderWithMatches() {
+        assertEquals(1, ModelPickerSearch.page(1, listOf(3, 2, 0)))
+        assertEquals(0, ModelPickerSearch.page(2, listOf(3, 2, 0)))
+        assertEquals(2, ModelPickerSearch.page(2, listOf(0, 0, 0)))
     }
 }
