@@ -242,6 +242,9 @@ class CarSession : Session() {
 
     val callLive: Boolean get() = model.voice.live
 
+    /** Conversation mode is offered only where Codex voice runs (or a call is on). */
+    val callAvailable: Boolean get() = model.voice.live || model.voice.available
+
     private suspend fun say(text: String) = voice.speak(text)
 
     private fun toast(text: String) = CarToast.makeText(carContext, text, CarToast.LENGTH_LONG).show()

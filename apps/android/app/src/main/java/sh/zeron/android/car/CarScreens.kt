@@ -26,19 +26,38 @@ import uniffi.zeron_core.InputRequest
 
 private fun CarContext.icon(res: Int) = CarIcon.Builder(IconCompat.createWithResource(this, res)).build()
 
-/** The agents, most urgent first, with Talk (the orchestrator) and Call. */
+/** One chat's row: its title, then its status or what it last said. */
+private fun agentRow(screen: Screen, session: CarSession, agent: CarAgent): Row {
+    val row = Row.Builder()
+        .setTitle(agent.title)
+        .addText(agent.detail)
+        .setOnClickListener { screen.screenManager.push(AgentScreen(screen.carContext, session, agent.id)) }
+    when (agent.state) {
+        AgentState.NeedsInput -> row.setImage(CarIcon.ALERT)
+        AgentState.Failed -> row.setImage(CarIcon.ERROR)
+        else -> Unit
+    }
+    return row.build()
+}
+
+/** Follows the car's chat list while the screen is up. */
+private fun Screen.watchAgents(session: CarSession, onChange: (List<CarAgent>) -> Unit) {
+    lifecycleScope.launch {
+        repeatOnLifecycle(Lifecycle.State.STARTED) {
+            session.agentList.collect {
+                onChange(it)
+                invalidate()
+            }
+        }
+    }
+}
+
+/** Chats newest first (the drawer's order), with Projects as a folder on top; Talk and Call. */
 class HomeScreen(context: CarContext, private val session: CarSession) : Screen(context) {
     private var agents: List<CarAgent>? = null
 
     init {
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                session.agentList.collect {
-                    agents = it
-                    invalidate()
-                }
-            }
-        }
+        watchAgents(session) { agents = it }
     }
 
     override fun onGetTemplate(): Template {
@@ -47,34 +66,94 @@ class HomeScreen(context: CarContext, private val session: CarSession) : Screen(
             .setIcon(carContext.icon(R.drawable.ic_car_mic))
             .setOnClickListener { session.talk(null) }
             .build()
-        // The header takes one titled action: Call is its icon alone.
-        val call = Action.Builder()
-            .setIcon(carContext.icon(if (session.callLive) R.drawable.ic_car_call_end else R.drawable.ic_car_call))
-            .setOnClickListener {
-                session.call()
-                invalidate()
-            }
-            .build()
+        val strip = ActionStrip.Builder().addAction(talk)
+        // The header takes one titled action: Call is its icon alone, and only where Codex voice runs.
+        if (session.callAvailable) {
+            strip.addAction(
+                Action.Builder()
+                    .setIcon(carContext.icon(if (session.callLive) R.drawable.ic_car_call_end else R.drawable.ic_car_call))
+                    .setOnClickListener {
+                        session.call()
+                        invalidate()
+                    }
+                    .build(),
+            )
+        }
         val builder = ListTemplate.Builder()
             .setTitle("Zeron")
             .setHeaderAction(Action.APP_ICON)
-            .setActionStrip(ActionStrip.Builder().addAction(talk).addAction(call).build())
+            .setActionStrip(strip.build())
         val agents = agents
         if (agents == null) return builder.setLoading(true).build()
-        val list = ItemList.Builder().setNoItemsMessage("No agents yet. Tap Talk and say what to work on.")
-        for (agent in agents) {
-            val row = Row.Builder()
-                .setTitle(agent.title)
-                .addText(agent.detail)
-                .setOnClickListener { screenManager.push(AgentScreen(carContext, session, agent.id)) }
-            when (agent.state) {
-                AgentState.NeedsInput -> row.setImage(CarIcon.ALERT)
-                AgentState.Failed -> row.setImage(CarIcon.ERROR)
-                else -> Unit
-            }
-            list.addItem(row.build())
+        val list = ItemList.Builder().setNoItemsMessage("No chats yet. Tap Talk and say what to work on.")
+        val folders = agents.map { it.folder }.distinct()
+        if (folders.isNotEmpty()) {
+            list.addItem(
+                Row.Builder()
+                    .setTitle("Projects")
+                    .addText(if (folders.size == 1) folders[0].name else "${folders.size} folders")
+                    .setImage(carContext.icon(R.drawable.ic_car_folder))
+                    .setBrowsable(true)
+                    .setOnClickListener { screenManager.push(FoldersScreen(carContext, session)) }
+                    .build(),
+            )
         }
+        for (agent in agents) list.addItem(agentRow(this, session, agent))
         return builder.setSingleList(list.build()).build()
+    }
+}
+
+/** Projects (and computers' homes), the most recently active first. */
+class FoldersScreen(context: CarContext, private val session: CarSession) : Screen(context) {
+    private var agents: List<CarAgent> = session.agentList.value
+
+    init {
+        watchAgents(session) { agents = it }
+    }
+
+    override fun onGetTemplate(): Template {
+        val list = ItemList.Builder().setNoItemsMessage("No projects yet.")
+        // The chat list is newest first, so each folder's first chat is its latest.
+        for ((folder, chats) in agents.groupBy { it.folder }) {
+            val waiting = chats.count { it.state == AgentState.NeedsInput }
+            val summary = listOfNotNull(
+                if (chats.size == 1) "1 chat" else "${chats.size} chats",
+                if (waiting > 0) "$waiting waiting" else null,
+                chats.first().status.substringAfter(" · ", "").ifEmpty { null },
+            ).joinToString(" · ")
+            list.addItem(
+                Row.Builder()
+                    .setTitle(folder.name)
+                    .addText(summary)
+                    .setBrowsable(true)
+                    .setOnClickListener { screenManager.push(FolderScreen(carContext, session, folder)) }
+                    .build(),
+            )
+        }
+        return ListTemplate.Builder()
+            .setTitle("Projects")
+            .setHeaderAction(Action.BACK)
+            .setSingleList(list.build())
+            .build()
+    }
+}
+
+/** One project's chats, newest first. */
+class FolderScreen(context: CarContext, private val session: CarSession, private val folder: Folder) : Screen(context) {
+    private var agents: List<CarAgent> = session.agentList.value
+
+    init {
+        watchAgents(session) { agents = it }
+    }
+
+    override fun onGetTemplate(): Template {
+        val list = ItemList.Builder().setNoItemsMessage("No chats in ${folder.name}.")
+        for (agent in agents.filter { it.folder == folder }) list.addItem(agentRow(this, session, agent))
+        return ListTemplate.Builder()
+            .setTitle(folder.name)
+            .setHeaderAction(Action.BACK)
+            .setSingleList(list.build())
+            .build()
     }
 }
 
