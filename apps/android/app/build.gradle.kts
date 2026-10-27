@@ -97,6 +97,9 @@ android {
     // Pure-Kotlin unit tests only: Android stubs return defaults instead of throwing.
     testOptions { unitTests.isReturnDefaultValues = true }
 
+    // Pure-Kotlin unit tests only: Android stubs return defaults instead of throwing.
+    testOptions { unitTests.isReturnDefaultValues = true }
+
     sourceSets["main"].apply {
         kotlin.directories.add(coreOut.resolve("kotlin").path)
         jniLibs.directories.add(coreOut.resolve("jniLibs").path)
