@@ -47,9 +47,27 @@ chat.
 An agent's report is its last reply, cleaned for speech (markdown, code and
 links dropped) and cut to a couple of sentences; the agent screen shows more
 and Read reads the whole first paragraph. Orchestrator-created chats report
-like any other. A question is read with its options and the microphone
-opens for the answer; a spoken answer picks the option it names ("the
-second one", "staging"), otherwise it's sent as free text.
+like any other.
+
+## Questions
+
+A request's questions are asked one at a time (`QuestionFlow`), and all
+the answers go in one `respondInput` at the end. That covers a report, Answer
+on the agent screen, and Choices. By voice, each question is read with its
+options ("Question 1 of 2. …") and the microphone opens. A spoken answer
+picks the option it names ("the second one", "staging"); otherwise it's
+sent as free text. A multi-select question takes several options ("staging
+and production", "the first and the third", "all of them"). With more
+than one question, the answers are read back ("Sending: …") before they
+go. Silence or Cancel part-way sends nothing, and the question stays
+open.
+
+Choices shows one question at a time. A tap picks a single option.
+Toggles plus Next pick several. The microphone icon answers the current
+question by voice. Each next question replaces the screen rather than
+being pushed on top of it, because the host allows only about five
+template steps per task, and an in-place update with new rows counts as
+a step too.
 
 ## Distribution
 
@@ -92,5 +110,4 @@ and run the DHU with that `.asoundrc`; `ffmpeg -f lavfi -i
 ## Next
 
 - Messaging notifications (reports on the phone and in cars without the app).
-- Several questions in one request: ask them one at a time.
 - Conversation mode (Codex realtime call) from the car is wired but untested.

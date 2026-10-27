@@ -75,6 +75,10 @@ class CarAgents(app: Application, private val model: AppModel) {
         get() = prefs.getString("orchestrator", null)
         private set(value) = prefs.edit().putString("orchestrator", value).apply()
 
+    /** [orchestratorId] while its chat is still around. */
+    val liveOrchestrator: String?
+        get() = orchestratorId?.takeIf { id -> model.row(id)?.archived == false }
+
     /** Watch the workspace while a car is connected. */
     fun start() {
         if (watching != null) return
@@ -176,23 +180,12 @@ class CarAgents(app: Application, private val model: AppModel) {
                 if (orchestrator) Spoken.summary(reply, 400).ifEmpty { "Done." }
                 else "$title is done. " + Spoken.summary(reply)
             ReportKind.NeedsInput -> {
-                val ask = question?.let(::ask) ?: Spoken.summary(reply)
+                val ask = (question?.let { QuestionFlow(it).step() } as? QuestionFlow.Step.Ask)?.prompt ?: Spoken.summary(reply)
                 if (orchestrator) ask else "$title needs you. $ask"
             }
             ReportKind.Failed -> "$title ran into an error."
         }.trim()
         return Report(row.id, title, kind, text, spoken, orchestrator, question)
-    }
-
-    /** A question read aloud, with its choices. */
-    private fun ask(input: InputRequest): String = input.questions.joinToString(" ") { q ->
-        val options = q.options.take(4)
-        val choices = when (options.size) {
-            0 -> ""
-            1 -> " Option: ${options[0]}."
-            else -> " Options: " + options.dropLast(1).joinToString(", ") + ", or " + options.last() + "."
-        }
-        Spoken.clean(q.question) + choices
     }
 
     // ── speaking to agents ──────────────────────────────────────────────────
@@ -205,35 +198,44 @@ class CarAgents(app: Application, private val model: AppModel) {
     }
 
     /**
-     * Words for one agent: the answer to its open question when it has one,
-     * otherwise a message (queued behind a running turn).
+     * Words for one agent: the answer to its open question when it asks just
+     * one, otherwise a message (queued behind a running turn). Several
+     * questions go through a [QuestionFlow] and [respond].
      */
     suspend fun reply(chatId: String, text: String): Outcome {
         if (model.client.value == null) return Outcome.SignedOut
         val handle = loaded(chatId) ?: return Outcome.Failed("That chat isn't available.")
-        return try {
-            val input = handle.composer().openInput
-            if (input != null) {
-                val answers = input.questions.map { q ->
-                    UserInputAnswer(q.id, listOf(Spoken.matchOption(text, q.options) ?: text))
-                }
-                handle.respondInput(input.requestId, answers)
-            } else {
-                handle.send(SendRequest(text, emptyList(), null, BusyPolicy.QUEUE))
-            }
-            model.noteDeliveryActivity()
-            model.refreshWorkspace()
-            Outcome.Sent(chatId)
-        } catch (e: Exception) {
-            Log.w(TAG, "reply failed", e)
-            Outcome.Failed("Couldn't send that.")
+        val input = handle.composer().openInput
+        if (input != null) {
+            val step = QuestionFlow(input).hear(text) as? QuestionFlow.Step.Submit
+                ?: return Outcome.Failed("It asked several questions. Tap Answer to go through them.")
+            return respond(chatId, input.requestId, step.answers)
         }
+        return deliver(chatId, "reply") { handle.send(SendRequest(text, emptyList(), null, BusyPolicy.QUEUE)) }
+    }
+
+    /** Every answer to the open request [requestId], sent together. */
+    suspend fun respond(chatId: String, requestId: String, answers: List<UserInputAnswer>): Outcome {
+        if (model.client.value == null) return Outcome.SignedOut
+        val handle = loaded(chatId) ?: return Outcome.Failed("That chat isn't available.")
+        if (handle.composer().openInput?.requestId != requestId) return Outcome.Failed("That question was already answered.")
+        return deliver(chatId, "answer") { handle.respondInput(requestId, answers) }
+    }
+
+    private fun deliver(chatId: String, what: String, send: () -> Unit): Outcome = try {
+        send()
+        model.noteDeliveryActivity()
+        model.refreshWorkspace()
+        Outcome.Sent(chatId)
+    } catch (e: Exception) {
+        Log.w(TAG, "$what failed", e)
+        Outcome.Failed("Couldn't send that.")
     }
 
     /** A spoken command for the orchestrator (made on the host the first time). */
     suspend fun command(text: String): Outcome {
         val client = model.client.value ?: return Outcome.SignedOut
-        val existing = orchestratorId?.takeIf { id -> model.row(id)?.archived == false }
+        val existing = liveOrchestrator
         if (existing != null) return reply(existing, text)
         val host = orchestratorHost() ?: return Outcome.NoHost
         val draft = model.lastDraft

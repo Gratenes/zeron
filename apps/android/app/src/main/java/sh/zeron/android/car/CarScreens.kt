@@ -1,6 +1,7 @@
 package sh.zeron.android.car
 
 import androidx.car.app.CarContext
+import androidx.car.app.CarToast
 import androidx.car.app.Screen
 import androidx.car.app.model.Action
 import androidx.car.app.model.ActionStrip
@@ -12,7 +13,9 @@ import androidx.car.app.model.MessageTemplate
 import androidx.car.app.model.Pane
 import androidx.car.app.model.PaneTemplate
 import androidx.car.app.model.Row
+import androidx.car.app.model.SectionedItemList
 import androidx.car.app.model.Template
+import androidx.car.app.model.Toggle
 import androidx.core.graphics.drawable.IconCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -20,7 +23,6 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
 import sh.zeron.android.R
 import uniffi.zeron_core.InputRequest
-import uniffi.zeron_core.UserInputQuestion
 
 private fun CarContext.icon(res: Int) = CarIcon.Builder(IconCompat.createWithResource(this, res)).build()
 
@@ -118,11 +120,16 @@ class AgentScreen(context: CarContext, private val session: CarSession, private 
             pane.setLoading(true)
         } else {
             pane.addRow(Row.Builder().setTitle(agent?.status ?: "").build())
-            val asked = question?.questions?.firstOrNull()
-            if (asked != null) {
+            val asked = question?.questions.orEmpty()
+            if (asked.size == 1) {
                 // The question, not the reply around it: that's what needs an answer.
-                pane.addRow(Row.Builder().setTitle(Spoken.summary(asked.question, 200)).build())
-                if (asked.options.isNotEmpty()) pane.addRow(Row.Builder().setTitle(asked.options.joinToString(" · ")).build())
+                pane.addRow(Row.Builder().setTitle(Spoken.summary(asked[0].question, 200)).build())
+                if (asked[0].options.isNotEmpty()) pane.addRow(Row.Builder().setTitle(asked[0].options.joinToString(" · ")).build())
+            } else if (asked.isNotEmpty()) {
+                // A pane takes four rows: the status and up to three questions.
+                asked.take(3).forEachIndexed { i, q ->
+                    pane.addRow(Row.Builder().setTitle("${i + 1} of ${asked.size} · " + Spoken.summary(q.question, 120)).build())
+                }
             } else {
                 val sentences = Spoken.summary(reply, 600).ifEmpty { "No reply yet." }
                 // Short rows: the host shows only a couple of lines of each.
@@ -137,11 +144,11 @@ class AgentScreen(context: CarContext, private val session: CarSession, private 
                     .setOnClickListener { session.talk(chatId) }
                     .build(),
             )
-            val choices = question?.takeIf { q -> q.questions.size == 1 && q.questions[0].options.isNotEmpty() }
+            val choices = question?.takeIf { input -> input.questions.any { it.options.isNotEmpty() } }
             if (choices != null) {
                 pane.addAction(
                     Action.Builder().setTitle("Choices").setOnClickListener {
-                        screenManager.push(ChoicesScreen(carContext, session, chatId, choices.questions[0]))
+                        screenManager.push(ChoicesScreen(carContext, session, chatId, QuestionFlow(choices)))
                     }.build(),
                 )
             } else {
@@ -181,37 +188,91 @@ class AgentScreen(context: CarContext, private val session: CarSession, private 
     }
 }
 
-/** A question's options, one tap each (the voice answer is on the agent screen). */
+/**
+ * An agent's questions by touch, one at a time: a tap picks a single
+ * option, toggles and Next pick several, the microphone answers by voice.
+ * Each next question replaces this screen rather than stacking on it (the
+ * host allows few template steps per task); the answers go together at
+ * the end, and Back sends nothing.
+ */
 class ChoicesScreen(
     context: CarContext,
     private val session: CarSession,
     private val chatId: String,
-    private val question: UserInputQuestion,
+    private val flow: QuestionFlow,
 ) : Screen(context) {
+    private val picked = LinkedHashSet<String>()
+
     override fun onGetTemplate(): Template {
+        val ask = flow.step() as? QuestionFlow.Step.Ask
+            ?: return MessageTemplate.Builder("Answered.").setHeaderAction(Action.BACK).build()
+        val q = ask.question
+        val last = ask.index == flow.questions.size - 1
         val list = ItemList.Builder()
-        for (option in question.options) {
-            list.addItem(
-                Row.Builder().setTitle(option).setOnClickListener {
-                    session.answer(chatId, option)
-                    screenManager.pop()
+        when {
+            q.options.isEmpty() -> list.addItem(
+                Row.Builder().setTitle("Say your answer").setImage(carContext.icon(R.drawable.ic_car_mic))
+                    .setOnClickListener { session.hear(chatId, flow, ::next) }.build(),
+            )
+            q.multiSelect -> for (option in q.options) {
+                list.addItem(
+                    Row.Builder().setTitle(option).setToggle(
+                        Toggle.Builder { on -> if (on) picked += option else picked -= option }.setChecked(option in picked).build(),
+                    ).build(),
+                )
+            }
+            else -> for (option in q.options) {
+                list.addItem(Row.Builder().setTitle(option).setOnClickListener { next(flow.answer(listOf(option))) }.build())
+            }
+        }
+        // The header takes one titled action: the microphone is its icon alone.
+        val strip = ActionStrip.Builder().addAction(
+            Action.Builder().setIcon(carContext.icon(R.drawable.ic_car_mic)).setOnClickListener { session.hear(chatId, flow, ::next) }.build(),
+        )
+        if (q.multiSelect && q.options.isNotEmpty()) {
+            strip.addAction(
+                Action.Builder().setTitle(if (last) "Send" else "Next").setOnClickListener {
+                    if (picked.isEmpty()) {
+                        CarToast.makeText(carContext, "Pick at least one", CarToast.LENGTH_SHORT).show()
+                    } else {
+                        next(flow.answer(q.options.filter { it in picked }))
+                    }
                 }.build(),
             )
         }
+        val title = listOf(q.header.ifEmpty { "Question" }, flow.progress).filter { it.isNotEmpty() }.joinToString(" · ")
         return ListTemplate.Builder()
-            .setTitle(Spoken.summary(question.question, 60))
+            .setTitle(title)
             .setHeaderAction(Action.BACK)
-            .setSingleList(list.build())
+            .setActionStrip(strip.build())
+            .addSectionedList(SectionedItemList.create(list.build(), Spoken.summary(q.question, 200)))
             .build()
+    }
+
+    /** The next question in this screen's place, or every answer sent and back to the agent. */
+    private fun next(step: QuestionFlow.Step) {
+        if (!lifecycle.currentState.isAtLeast(Lifecycle.State.CREATED)) return
+        val manager = screenManager
+        if (manager.top === this) manager.pop() else manager.remove(this)
+        when (step) {
+            is QuestionFlow.Step.Ask -> manager.push(ChoicesScreen(carContext, session, chatId, flow))
+            is QuestionFlow.Step.Submit -> session.submit(chatId, flow, step.answers)
+        }
     }
 }
 
 /** Shown while the microphone is open; Cancel stops listening. */
-class ListeningScreen(context: CarContext, private val session: CarSession, private val to: String) : Screen(context) {
+class ListeningScreen(
+    context: CarContext,
+    private val session: CarSession,
+    private val to: String,
+    /** What's being answered ("1 of 2 · Which harnesses…"), shown instead of "Listening…" (the host shows few lines). */
+    private val detail: String? = null,
+) : Screen(context) {
     private var done = false
 
     override fun onGetTemplate(): Template =
-        MessageTemplate.Builder("Listening…")
+        MessageTemplate.Builder(if (detail.isNullOrEmpty()) "Listening…" else detail)
             .setTitle("To $to")
             .setIcon(carContext.icon(R.drawable.ic_car_mic))
             .setHeaderAction(Action.BACK)

@@ -102,8 +102,14 @@ object Spoken {
         // An option named inside the answer ("go with the staging deploy").
         val named = options.filter { words(it).isNotEmpty() && " $said ".contains(" ${words(it)} ") }
         if (named.size == 1) return named[0]
-        // Most of one option's words, and clearly more than any other's.
         val saidWords = said.split(' ').toSet()
+        // Words only one option has ("staging" for "Deploy to staging").
+        val key = saidWords.filter { it.length > 2 }
+        if (key.isNotEmpty()) {
+            val having = options.filter { o -> words(o).split(' ').toSet().containsAll(key) }
+            if (having.size == 1) return having[0]
+        }
+        // Most of one option's words, and clearly more than any other's.
         val scored = options.map { o ->
             val w = words(o).split(' ').filter { it.length > 2 }
             o to if (w.isEmpty()) 0.0 else w.count { it in saidWords }.toDouble() / w.size
@@ -111,5 +117,25 @@ object Spoken {
         val best = scored.first()
         val runnerUp = scored.getOrNull(1)?.second ?: 0.0
         return if (best.second >= 0.6 && best.second > runnerUp) best.first else null
+    }
+
+    private val all = setOf("all", "all of them", "all of those", "all of the above", "everything", "every one")
+    private val joiners = Regex(",|;|&|\\b(and|plus|or)\\b", RegexOption.IGNORE_CASE)
+
+    /**
+     * The options a spoken answer picks when several may be ("staging and
+     * production", "the first and the third", "all of them"), in the
+     * options' order; empty when it picks none.
+     */
+    fun matchOptions(spoken: String, options: List<String>): List<String> {
+        if (options.isEmpty()) return emptyList()
+        val said = words(spoken).removePrefix("the ")
+        if (said in all || said.startsWith("both") && options.size == 2) return options
+        val parts = spoken.split(joiners).map { it.trim() }.filter { it.isNotEmpty() }
+        val each = parts.mapNotNull { matchOption(it, options) }.toSet()
+        if (each.size >= 2) return options.filter { it in each }
+        // One option whose own name has an "and" in it ("Search and replace").
+        matchOption(spoken, options)?.let { return listOf(it) }
+        return options.filter { it in each }
     }
 }

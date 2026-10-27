@@ -44,6 +44,8 @@ class SpokenTest {
         assertEquals("Deploy to production", Spoken.matchOption("the second one", options))
         assertEquals("Deploy to staging", Spoken.matchOption("go with deploy to staging please", options))
         assertEquals("Deploy to production", Spoken.matchOption("production deploy", options))
+        assertEquals("Deploy to staging", Spoken.matchOption("staging", options))
+        assertNull(Spoken.matchOption("deploy", options))
         assertNull(Spoken.matchOption("wait until tomorrow", options))
     }
 }
