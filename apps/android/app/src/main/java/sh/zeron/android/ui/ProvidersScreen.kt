@@ -28,6 +28,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -98,6 +99,12 @@ fun ProvidersScreen(model: AppModel, target: String?, onBack: () -> Unit, onOpen
         }
     }
 
+    // The computer's automatic account switching; Cloud has none.
+    val currentName by rememberUpdatedState(name)
+    val autoSwitch = remember(client, selected) {
+        client?.takeIf { selected != CLOUD }?.let { AccountAutoSwitchState(it, selected, scope) { currentName } }
+    }
+
     suspend fun load(id: String) {
         if (id == CLOUD) {
             if (cloud.info == null) cloud.refresh()
@@ -107,6 +114,7 @@ fun ProvidersScreen(model: AppModel, target: String?, onBack: () -> Unit, onOpen
         val c = client ?: return
         runCatching { c.listHarnesses(id) }.onSuccess { harnesses[id] = it }
         loadAccounts(id)
+        if (computers.firstOrNull { it.id == id }?.online == true) autoSwitch?.takeIf { it.deviceId == id }?.load()
     }
 
     // Each device on first show; back from an agent's accounts re-reads them.
@@ -229,6 +237,11 @@ fun ProvidersScreen(model: AppModel, target: String?, onBack: () -> Unit, onOpen
                         }
                         if (sorted.isEmpty()) CloudRow(0, 1, "No agents", if (online) "$name hasn't reported any agents." else "$name is offline.")
                     }
+                }
+            }
+            if (autoSwitch != null) {
+                cloudSection("Accounts", key = "auto-switch-$selected") {
+                    AccountAutoSwitchRows(autoSwitch, name, online, onError = { model.toast(it) })
                 }
             }
         }
