@@ -1435,6 +1435,68 @@ pub struct AgentUsageWindow {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
+/// Per-device automatic account switching: once the live login of an agent
+/// has used `threshold_percent` of any usage window, the engine switches it
+/// to the saved account with the most left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AccountAutoSwitch {
+    pub enabled: bool,
+    /// Clamped to [`Self::MIN_THRESHOLD`]..=[`Self::MAX_THRESHOLD`].
+    pub threshold_percent: u8,
+}
+
+impl AccountAutoSwitch {
+    pub const DEFAULT_THRESHOLD: u8 = 90;
+    pub const MIN_THRESHOLD: u8 = 50;
+    pub const MAX_THRESHOLD: u8 = 99;
+
+    /// The threshold as a used fraction, clamped into range.
+    pub fn threshold_fraction(&self) -> f32 {
+        f32::from(
+            self.threshold_percent
+                .clamp(Self::MIN_THRESHOLD, Self::MAX_THRESHOLD),
+        ) / 100.0
+    }
+}
+
+/// Off by default: switching rewrites the agents' logins.
+impl Default for AccountAutoSwitch {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold_percent: Self::DEFAULT_THRESHOLD,
+        }
+    }
+}
+
+/// `GetAccountAutoSwitch` / `SetAccountAutoSwitch` reply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountAutoSwitchStatus {
+    pub settings: AccountAutoSwitch,
+    /// The most recent automatic switch since the engine started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_switch: Option<AccountSwitchEvent>,
+}
+
+/// One automatic switch: `from` reached `used_fraction` of a usage window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSwitchEvent {
+    pub harness: HarnessId,
+    /// [`AgentAccount::provider`] of both rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    pub from_id: String,
+    pub from_email: Option<String>,
+    pub to_id: String,
+    pub to_email: Option<String>,
+    pub used_fraction: f32,
+    /// Epoch millis.
+    pub at: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProjectActionIcon {

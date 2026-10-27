@@ -248,6 +248,9 @@ pub struct HarnessesPage {
     /// The device switcher moved on and its rows are on the way: the old
     /// rows stay, dimmed and inert, so the block never blanks out.
     switching: bool,
+    /// The device's automatic account switching, under the rows (Settings
+    /// only, made on first paint).
+    auto_switch: Option<Entity<super::auto_switch::AutoSwitchCard>>,
 }
 
 impl HarnessesPage {
@@ -276,6 +279,7 @@ impl HarnessesPage {
             checking_updates: false,
             embedded: false,
             switching: false,
+            auto_switch: None,
         };
         page.load(cx);
         page
@@ -583,6 +587,11 @@ impl HarnessesPage {
         if let Some(accounts) = &self.accounts_page {
             accounts.update(cx, |page, cx| {
                 page.set_target_device(self.target_device.clone(), cx)
+            });
+        }
+        if let Some(auto_switch) = &self.auto_switch {
+            auto_switch.update(cx, |card, cx| {
+                card.set_target(self.target_device.clone(), cx)
             });
         }
         self.error = None;
@@ -1516,6 +1525,13 @@ impl Render for HarnessesPage {
             _ => None,
         };
         let toolbar = self.render_toolbar(&theme, true, cx);
+        let auto_switch = self
+            .auto_switch
+            .get_or_insert_with(|| {
+                let (state, target) = (self.state.clone(), self.target_device.clone());
+                cx.new(|cx| super::auto_switch::AutoSwitchCard::new(state, target, cx))
+            })
+            .clone();
 
         let scrollbar = popover::rail(self, "harnesses-page-scrollbar", &theme, cx);
 
@@ -1546,7 +1562,8 @@ impl Render for HarnessesPage {
                                         .child(toolbar),
                                 )
                                 .children(update_error)
-                                .child(body),
+                                .child(body)
+                                .child(auto_switch),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),

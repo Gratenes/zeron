@@ -104,11 +104,13 @@ pub struct RelayedCallback {
     pub location: Option<String>,
 }
 
+mod auto_switch;
 mod muse;
 mod oauth;
 #[cfg(test)]
 mod provider_tests;
-pub use muse::MuseRunEnvironment;
+pub use auto_switch::AutoSwitch;
+pub use muse::AccountRunEnvironment;
 mod stores;
 mod usage;
 
@@ -778,6 +780,11 @@ struct Inner {
     identities: Mutex<HashMap<String, IdentityLookup>>,
     /// Test seam: fixed CLI binaries per agent instead of PATH resolution.
     cli_overrides: Mutex<HashMap<HarnessId, PathBuf>>,
+    /// How many times zeron replaced each agent's live login (a switch, a
+    /// re-sign-in, a sign-out): the run credential [`AccountRunEnvironment`]
+    /// reports, so a session parked on the old login is replaced before its
+    /// next turn.
+    login_changes: Mutex<HashMap<HarnessId, u64>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -869,6 +876,7 @@ impl AgentAccounts {
                 callback_routes,
                 identities: Mutex::new(HashMap::new()),
                 cli_overrides: Mutex::new(HashMap::new()),
+                login_changes: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -1176,7 +1184,22 @@ impl AgentAccounts {
             }
         }
         *lock(&self.inner.claude_credentials) = None;
+        self.note_login_change(harness);
         self.list_locked(false).await
+    }
+
+    /// The live login of `harness` was replaced: sessions parked on the old
+    /// one are replaced before their next turn (see [`Self::login_change`]).
+    fn note_login_change(&self, harness: HarnessId) {
+        *lock(&self.inner.login_changes).entry(harness).or_default() += 1;
+    }
+
+    /// How many times zeron replaced `harness`'s live login since start.
+    pub(crate) fn login_change(&self, harness: HarnessId) -> u64 {
+        lock(&self.inner.login_changes)
+            .get(&harness)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Claude Code's own refresh lock (see
@@ -1370,6 +1393,7 @@ impl AgentAccounts {
             _ => {}
         }
         *lock(&self.inner.claude_credentials) = None;
+        self.note_login_change(slot.harness);
         Ok(())
     }
 
@@ -1444,6 +1468,7 @@ impl AgentAccounts {
                 ));
             }
         }
+        self.note_login_change(harness);
         Ok(())
     }
 

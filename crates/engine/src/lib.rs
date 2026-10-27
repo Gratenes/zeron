@@ -159,6 +159,8 @@ pub struct EngineCore {
     pub spaces_sync: SpacesSync,
     pub uploads: Uploads,
     pub agent_accounts: AgentAccounts,
+    /// Switches an agent's login once its usage reaches the device's threshold.
+    pub account_auto_switch: agent_accounts::AutoSwitch,
     pub harness_updates: harness_updates::HarnessUpdateCoordinator,
     pub device_id: String,
     /// Which app windows are focused (desktop banners hold back while one is).
@@ -343,9 +345,18 @@ impl EngineCore {
         // the P2P service, which serves it to that device alone.
         let agent_accounts =
             AgentAccounts::with_callback_routes(agent_accounts_config, previews.callback_routes());
-        registry.set_account_environment(Arc::new(agent_accounts::MuseRunEnvironment(
+        registry.set_account_environment(Arc::new(agent_accounts::AccountRunEnvironment(
             agent_accounts.clone(),
         )));
+        let account_auto_switch = agent_accounts::AutoSwitch::open(
+            agent_accounts.clone(),
+            data_dir,
+            runner::is_cloud_platform(),
+        );
+        // An automatic switch retires voice, as a manual one does.
+        let voice = sessions.voice_manager();
+        account_auto_switch.set_on_switch(Arc::new(move |_| voice.retire()));
+        account_auto_switch.start();
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
         harness_updates.start();
@@ -355,10 +366,13 @@ impl EngineCore {
             repos.clone(),
         ));
         let diff_sync = CheckoutDiffSync::start(repos.clone(), workspace.clone(), &device_id, edge);
-        // Turn starts snapshot the checkout tree — the "Latest turn" diff base.
+        // Turn starts snapshot the checkout tree — the "Latest turn" diff base
+        // — and move usage, so auto-switch checks soon.
         let turn_diff = diff_sync.clone();
+        let turn_auto_switch = account_auto_switch.clone();
         sessions.set_turn_listener(Arc::new(move |chat_id, cwd| {
             turn_diff.note_turn_start(chat_id, cwd);
+            turn_auto_switch.nudge();
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         Ok(Self {
@@ -377,6 +391,7 @@ impl EngineCore {
             spaces_sync,
             uploads,
             agent_accounts,
+            account_auto_switch,
             harness_updates,
             device_id,
             local_import,
@@ -522,6 +537,7 @@ impl EngineCore {
         .with_previews(self.previews.clone())
         .with_remote_terminals(self.remote_terminals.clone())
         .with_harness_updates(self.harness_updates.clone())
+        .with_account_auto_switch(self.account_auto_switch.clone())
         .with_viewport_focus(self.viewport_focus.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
@@ -588,6 +604,7 @@ impl EngineCore {
             .take();
         self.previews.shutdown().await;
         self.harness_updates.shutdown().await;
+        self.account_auto_switch.shutdown().await;
         // A run interruption transitions its chat to Idle, and Idle normally
         // releases the next queued row. Freeze first so quitting never starts
         // recovered work while the engine is being torn down.

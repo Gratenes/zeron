@@ -730,6 +730,7 @@ pub struct EngineRpc {
     links: Option<std::sync::Arc<LinkCache>>,
     updater: Option<zeron_update::Updater>,
     harness_updates: Option<crate::harness_updates::HarnessUpdateCoordinator>,
+    account_auto_switch: Option<crate::agent_accounts::AutoSwitch>,
     local_import: Option<crate::local_import::LocalImporter>,
     /// Cloud runner only: vault grants (ListGithubRepos, credentialed CloneRepo).
     credentials: Option<crate::credentials::CredentialBroker>,
@@ -791,6 +792,7 @@ impl EngineRpc {
             links: None,
             updater: None,
             harness_updates: None,
+            account_auto_switch: None,
             local_import: None,
             credentials: None,
             viewport_focus: Default::default(),
@@ -841,6 +843,14 @@ impl EngineRpc {
         coordinator: crate::harness_updates::HarnessUpdateCoordinator,
     ) -> Self {
         self.harness_updates = Some(coordinator);
+        self
+    }
+
+    pub fn with_account_auto_switch(
+        mut self,
+        auto_switch: crate::agent_accounts::AutoSwitch,
+    ) -> Self {
+        self.account_auto_switch = Some(auto_switch);
         self
     }
 
@@ -1182,6 +1192,12 @@ impl EngineRpc {
         self.harness_updates
             .as_ref()
             .ok_or_else(|| RpcError::Failed("agent updates unavailable".into()))
+    }
+
+    fn account_auto_switch(&self) -> Result<&crate::agent_accounts::AutoSwitch, RpcError> {
+        self.account_auto_switch.as_ref().ok_or_else(|| {
+            RpcError::Failed("Automatic account switching isn't available on this engine.".into())
+        })
     }
 
     fn local_importer(&self) -> Result<&crate::local_import::LocalImporter, RpcError> {
@@ -2114,6 +2130,8 @@ fn forwardable(method: &str) -> bool {
             | methods::LIST_AGENT_ACCOUNTS
             | methods::ACTIVATE_AGENT_ACCOUNT
             | methods::FORGET_AGENT_ACCOUNT
+            | methods::GET_ACCOUNT_AUTO_SWITCH
+            | methods::SET_ACCOUNT_AUTO_SWITCH
             | methods::START_AGENT_LOGIN
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
@@ -4440,6 +4458,17 @@ impl RpcService for EngineRpc {
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&snapshot)
+            }
+            methods::GET_ACCOUNT_AUTO_SWITCH => {
+                RpcReply::value(&self.account_auto_switch()?.status())
+            }
+            methods::SET_ACCOUNT_AUTO_SWITCH => {
+                let p: zeron_proto::AccountAutoSwitch = parse_params(params)?;
+                let status = self
+                    .account_auto_switch()?
+                    .set(p)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&status)
             }
             methods::START_AGENT_LOGIN => {
                 let p: StartAgentLoginParams = parse_params(params)?;

@@ -1906,3 +1906,97 @@ async fn a_failed_sign_ins_output_is_redacted_before_the_ui_sees_it() {
         "failed at https://auth.x.ai/device?… with code [code] token=[redacted]"
     );
 }
+
+/// Seed `harness`'s saved login `account_key` with a fresh usage reading, as
+/// a probe a moment ago would have left it (so a forced list won't re-probe).
+fn seed_usage(accounts: &AgentAccounts, harness: HarnessId, account_key: &str, used: f32) {
+    let now = now_ms();
+    lock(&accounts.inner.usage).insert(
+        usage_key(harness, account_key),
+        UsageEntry {
+            usage: Some(UsageSnapshot {
+                windows: vec![AgentUsageWindow {
+                    label: "Period".into(),
+                    used_fraction: used,
+                    resets_at: Some(Utc::now() + chrono::Duration::hours(3)),
+                }],
+                plan_label: None,
+            }),
+            fetched_at: Some(now),
+            checked_at: now,
+            ..Default::default()
+        },
+    );
+}
+
+#[tokio::test]
+async fn auto_switch_moves_a_spent_login_to_the_saved_account_with_the_most_left() {
+    use crate::registry::RunEnvironment as _;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (accounts, config) = accounts_with(tmp.path(), ProbeEndpoints::default());
+    let live = config.grok_home.join("auth.json");
+    write(&live, &grok_auth("user-a", "a@x.ai", "key-a").to_string());
+    accounts.list(false).await.unwrap();
+    write(&live, &grok_auth("user-b", "b@x.ai", "key-b").to_string());
+    let grok = rows(&accounts.list(false).await.unwrap(), HarnessId::Grok);
+    let id = |email: &str| {
+        grok.iter()
+            .find(|a| a.email.as_deref() == Some(email))
+            .unwrap()
+            .id
+            .clone()
+    };
+    let (a_id, b_id) = (id("a@x.ai"), id("b@x.ai"));
+    seed_usage(&accounts, HarnessId::Grok, "user-a", 0.10);
+    seed_usage(&accounts, HarnessId::Grok, "user-b", 0.93);
+
+    let environment = AccountRunEnvironment(accounts.clone());
+    let parked_on = environment.credential(HarnessId::Grok).await;
+    assert!(
+        parked_on.is_some(),
+        "a switched agent's runs know their login"
+    );
+
+    let auto = AutoSwitch::open(accounts.clone(), tmp.path(), false);
+    assert!(auto.check().await.unwrap().is_empty(), "off: nothing moves");
+    auto.set(zeron_proto::AccountAutoSwitch {
+        enabled: true,
+        threshold_percent: 95,
+    })
+    .unwrap();
+    assert!(auto.check().await.unwrap().is_empty(), "93% < 95%: stay");
+
+    auto.set(zeron_proto::AccountAutoSwitch {
+        enabled: true,
+        threshold_percent: 90,
+    })
+    .unwrap();
+    let mut banner = auto.watch();
+    let made = auto.check().await.unwrap();
+    assert_eq!(made.len(), 1);
+    let event = &made[0];
+    assert_eq!(
+        (event.from_id.as_str(), event.to_id.as_str()),
+        (b_id.as_str(), a_id.as_str())
+    );
+    assert_eq!(event.to_email.as_deref(), Some("a@x.ai"));
+    assert!((event.used_fraction - 0.93).abs() < 1e-6);
+    assert!(banner.has_changed().unwrap(), "the switch is announced");
+    assert_eq!(auto.status().last_switch.as_ref(), Some(event));
+
+    // The live store holds A's login, and a session parked on B's is
+    // replaced before its next turn.
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&live).unwrap()).unwrap();
+    assert_eq!(written["https://auth.x.ai::client-1"]["key"], "key-a");
+    assert_ne!(environment.credential(HarnessId::Grok).await, parked_on);
+    assert_eq!(
+        environment.credential(HarnessId::Codex).await,
+        Some("login-change:0".into()),
+        "other agents' sessions are left alone"
+    );
+
+    // A is far below the threshold: the next check stays put.
+    assert!(auto.check().await.unwrap().is_empty());
+}

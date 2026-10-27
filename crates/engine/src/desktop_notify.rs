@@ -1,6 +1,7 @@
 //! Desktop banners, posted by the engine so they keep coming with the app's
 //! window closed: a run finished, an agent is waiting on you, a run failed,
-//! the connection went away, agent updates are ready.
+//! the connection went away, agent updates are ready, an agent's account was
+//! switched automatically.
 //!
 //! Only desktop engines post (the app's background engine and its
 //! in-process fallback call [`enable`]); a server or Cloud machine never
@@ -14,7 +15,8 @@
 //!   `notificationsBackgroundOnly`, `agentUpdateNotifications`;
 //! - "background only" holds banners while any app window is focused, as
 //!   viewports report through `SetViewportFocus` (the app's chime covers
-//!   the foreground case).
+//!   the foreground case) — except an automatic account switch, which
+//!   nothing in the app announces.
 //!
 //! The app keeps the chimes; it uses [`SessionNotificationState`] and
 //! [`ConnectivityNotificationState`] for them, so sound and banner always
@@ -27,7 +29,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use zeron_proto::view::{Indicator, effective_indicator};
-use zeron_proto::{Chat, ConnectivityState, HarnessUpdatePhase, HarnessUpdateStatus, Session};
+use zeron_proto::{
+    AccountSwitchEvent, Chat, ConnectivityState, HarnessUpdatePhase, HarnessUpdateStatus, Session,
+};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -340,6 +344,27 @@ impl Notifier {
             .collect()
     }
 
+    /// An agent's login was switched automatically (see
+    /// [`crate::agent_accounts::AutoSwitch`]).
+    fn account_switch(&mut self, event: &AccountSwitchEvent) {
+        if !Prefs::read(&self.data_dir).enabled {
+            return;
+        }
+        let name = zeron_proto::providers::provider_name(event.harness);
+        let account = |email: &Option<String>| {
+            email
+                .clone()
+                .unwrap_or_else(|| "the saved account".to_string())
+        };
+        let body = format!(
+            "{} reached {:.0}% of its usage limit — now using {}",
+            account(&event.from_email),
+            event.used_fraction * 100.0,
+            account(&event.to_email),
+        );
+        (self.post)(&format!("Switched {name} account"), &body, None);
+    }
+
     /// Release discoveries finish independently, so the caller debounces and
     /// this delivers one aggregate banner for everything new.
     fn updates(&mut self, statuses: &[HarnessUpdateStatus]) {
@@ -377,6 +402,7 @@ pub(crate) fn spawn(core: &crate::EngineCore, data_dir: PathBuf) -> tokio::task:
     let mut chats = core.workspace.watch_chats();
     let mut connectivity = core.doc_host.watch_connectivity();
     let mut updates = core.harness_updates.watch();
+    let mut switches = core.account_auto_switch.watch();
     let mut notifier = Notifier::new(
         data_dir,
         core.device_id.clone(),
@@ -392,6 +418,7 @@ pub(crate) fn spawn(core: &crate::EngineCore, data_dir: PathBuf) -> tokio::task:
             chrono::Utc::now(),
         );
         notifier.connectivity(connectivity.borrow_and_update().state, Instant::now());
+        switches.borrow_and_update();
         let mut updates_due: Option<tokio::time::Instant> =
             Some(tokio::time::Instant::now() + UPDATE_DEBOUNCE);
         loop {
@@ -410,6 +437,13 @@ pub(crate) fn spawn(core: &crate::EngineCore, data_dir: PathBuf) -> tokio::task:
                     if changed.is_err() { break; }
                     let state = connectivity.borrow_and_update().state;
                     notifier.connectivity(state, Instant::now());
+                }
+                changed = switches.changed() => {
+                    if changed.is_err() { break; }
+                    let event = switches.borrow_and_update().clone();
+                    if let Some(event) = event {
+                        notifier.account_switch(&event);
+                    }
                 }
                 changed = updates.changed() => {
                     if changed.is_err() { break; }
@@ -617,6 +651,39 @@ mod tests {
     }
 
     type Posted = Arc<Mutex<Vec<(String, String, Option<String>)>>>;
+
+    #[test]
+    fn automatic_account_switches_banner_even_while_focused_unless_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut notifier, posted, focus) = notifier(dir.path());
+        focus.set("main", true);
+        let event = AccountSwitchEvent {
+            harness: zeron_proto::HarnessId::ClaudeCode,
+            provider: None,
+            from_id: "a".into(),
+            from_email: Some("a@example.com".into()),
+            to_id: "b".into(),
+            to_email: Some("b@example.com".into()),
+            used_fraction: 0.914,
+            at: 0,
+        };
+        notifier.account_switch(&event);
+        assert_eq!(
+            *posted.lock().unwrap(),
+            vec![(
+                "Switched Claude Code account".into(),
+                "a@example.com reached 91% of its usage limit — now using b@example.com".into(),
+                None
+            )]
+        );
+        std::fs::write(
+            dir.path().join("ui-settings.json"),
+            r#"{"notificationsEnabled":false}"#,
+        )
+        .unwrap();
+        notifier.account_switch(&event);
+        assert_eq!(posted.lock().unwrap().len(), 1, "banners off");
+    }
 
     fn notifier(dir: &Path) -> (Notifier, Posted, ViewportFocus) {
         let posted: Posted = Arc::default();
