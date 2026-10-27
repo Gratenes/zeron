@@ -2334,7 +2334,7 @@ impl Render for AccountsPage {
                                     .line_height(px(19.0))
                                     .text_color(theme.text_muted)
                                     .child(SharedString::from(
-                                        "Account changes affect new sessions. On macOS, Claude Code may take about 30 seconds to pick up a switched account.",
+                                        "Account changes apply from each chat's next turn. On macOS, Claude Code may take about 30 seconds to pick up a switched account.",
                                     )),
                             ),
                     )).fade_overflow_y(&self.scroll.scroll),

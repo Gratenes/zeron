@@ -239,6 +239,10 @@ pub mod methods {
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
     pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
+    /// The device's automatic account switching (`AccountAutoSwitchStatus`;
+    /// set with `AccountAutoSwitch`, `{enabled, thresholdPercent}`).
+    pub const GET_ACCOUNT_AUTO_SWITCH: &str = "GetAccountAutoSwitch";
+    pub const SET_ACCOUNT_AUTO_SWITCH: &str = "SetAccountAutoSwitch";
     pub const START_AGENT_LOGIN: &str = "StartAgentLogin";
     /// `{loginId, requesterDeviceId, path}`: replay a sign-in's browser
     /// callback the requesting device caught on its own loopback (a phone

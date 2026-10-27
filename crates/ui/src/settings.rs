@@ -19,6 +19,7 @@ use zeron_proto::{AuthState, WorkspaceScope};
 pub mod accounts;
 pub mod appearance;
 pub mod archived;
+mod auto_switch;
 pub mod billing;
 pub mod cloud;
 pub mod composer;

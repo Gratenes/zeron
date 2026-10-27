@@ -269,7 +269,10 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
   capture (patch + numstat + untracked, 3MiB cap, sha256) → workspace registry summary + DO diff
   sidecar.
 - **Agent accounts**: credential-slot swap (macOS Keychain via `security-framework`, files
-  elsewhere), plan labels, usage probes, paste-code/browser-poll OAuth flows.
+  elsewhere), plan labels, usage probes, paste-code/browser-poll OAuth flows; opt-in
+  per-device auto-switch to the saved account with the most left once the live one reaches a
+  usage threshold (`agent_accounts/auto_switch.rs`), applied to parked sessions on their next
+  turn.
 - **Auth**: WorkOS through edge routes (`/auth/exchange`, `/auth/refresh`, orgs); loopback
   callback server headed, paste-code headless; dev mode (no key ⇒ bearer = configured user id).
 
