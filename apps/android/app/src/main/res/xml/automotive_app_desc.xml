@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android Auto: Zeron's car screens (ZeronCarAppService) and its messaging notifications. -->
+<automotiveApp>
+    <uses name="template" />
+    <uses name="notification" />
+</automotiveApp>

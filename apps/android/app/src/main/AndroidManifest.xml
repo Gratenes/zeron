@@ -67,5 +67,31 @@
             android:name=".voice.VoiceCallService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- Android Auto (sh.zeron.android.car): agents, talk and reports on the car screen. -->
+        <service
+            android:name=".car.ZeronCarAppService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="androidx.car.app.category.MESSAGING" />
+            </intent-filter>
+        </service>
+        <meta-data
+            android:name="androidx.car.app.minCarApiLevel"
+            android:value="1" />
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
     </application>
+
+    <!-- The phone's speech recognizer and text-to-speech engine (package visibility). -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
 </manifest>
