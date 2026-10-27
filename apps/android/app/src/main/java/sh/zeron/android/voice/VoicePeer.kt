@@ -102,8 +102,10 @@ internal class VoicePeer(
                 .also { factory = it }
         }
 
+        /** The app is on screen, or on the car's (Android Auto's conversation mode). */
         private fun foreground(): Boolean =
-            ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+            ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) ||
+                sh.zeron.android.car.CarLink.connected
     }
 
     private val context = context.applicationContext

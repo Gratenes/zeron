@@ -514,6 +514,34 @@ impl SessionHandle {
         })
     }
 
+    /// The agent's reply to the latest user message (the car reads it
+    /// aloud): the newest assistant entry with text, or None when the user
+    /// spoke last or the agent only ran tools.
+    pub fn last_reply(&self) -> Option<String> {
+        let snap = self.inner.snapshot();
+        for entry in snap.entries.iter().rev() {
+            match entry.message.role {
+                zc::MessageRole::User => return None,
+                zc::MessageRole::Assistant => {
+                    let texts: Vec<&str> = entry
+                        .message
+                        .parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            zc::MessagePart::Text { text, .. } if !text.trim().is_empty() => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    if !texts.is_empty() {
+                        return Some(texts.join("\n\n"));
+                    }
+                }
+                zc::MessageRole::System => {}
+            }
+        }
+        None
+    }
+
     /// A transcript view is on/off screen (marks seen on attach).
     pub fn set_view_attached(&self, attached: bool) {
         self.inner.set_view_attached(attached);

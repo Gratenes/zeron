@@ -103,6 +103,9 @@ class AppModel(private val app: Application) {
         sh.zeron.android.voice.VoiceController(app, client, workspace)
     }
 
+    /** Agents as Android Auto sees them (watching only while a car is connected). */
+    val car: sh.zeron.android.car.CarAgents by lazy { sh.zeron.android.car.CarAgents(app, this) }
+
     private val _client = MutableStateFlow<CoreClient?>(null)
     val client: StateFlow<CoreClient?> = _client.asStateFlow()
 
@@ -489,7 +492,22 @@ class AppModel(private val app: Application) {
                 .any { it.sendState == SendState.SENDING || it.sendState == SendState.QUEUED }
         } == true
         if (_client.value != null && !isDemo && (recent || pending)) DeliveryService.hold(app, 25_000)
-        _client.value?.onBackground()
+        // A car screen keeps the workspace live with the app behind it.
+        if (!carConnected) _client.value?.onBackground()
+    }
+
+    private var carConnected = false
+
+    /** Android Auto connected or left: it counts as the app being in use. */
+    fun onCarConnected(connected: Boolean) {
+        if (carConnected == connected) return
+        carConnected = connected
+        if (connected) {
+            _client.value?.onForeground()
+            refreshWorkspace()
+        } else if (!androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+            _client.value?.onBackground()
+        }
     }
 
     private fun endDeliveryHold() = DeliveryService.release(app)

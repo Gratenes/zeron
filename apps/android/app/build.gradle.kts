@@ -137,6 +137,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation("${libs.jna.get()}@aar")
     implementation(libs.webrtc)
+    implementation(libs.androidx.car.app)
+    implementation(libs.androidx.car.app.projected)
     debugImplementation(libs.compose.ui.tooling)
     testImplementation(libs.junit)
 }
