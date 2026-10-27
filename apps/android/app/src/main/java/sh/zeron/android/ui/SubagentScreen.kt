@@ -1,7 +1,6 @@
 package sh.zeron.android.ui
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -16,7 +15,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
@@ -127,12 +125,6 @@ fun SubagentScreen(
     }
     val clipboard = LocalClipboardManager.current
 
-    val scrolled by remember { derivedStateOf { transcript.offset > 1f } }
-    val headerColor by animateColorAsState(
-        if (scrolled) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.background,
-        MaterialTheme.motionScheme.defaultEffectsSpec(),
-        label = "header",
-    )
     val actions = remember(docId) {
         TranscriptActions(
             openUrl = {},
@@ -142,22 +134,21 @@ fun SubagentScreen(
         )
     }
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Surface(color = headerColor) {
-            Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                TonalCircleButton(ZIcons.Back, "Back", onClick = onBack, container = MaterialTheme.colorScheme.surfaceContainerHighest)
-                Column(Modifier.weight(1f).padding(horizontal = 12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMediumEmphasized)
-                    Text(listOf("Subagent", detail).filter { it.isNotEmpty() }.joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                TonalCircleButton(ZIcons.Copy, "Copy transcript", onClick = {
-                    transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) }
-                    model.toast("Transcript copied")
-                }, container = MaterialTheme.colorScheme.surfaceContainerHighest)
-            }
+        // On the page like the chat's header; the transcript fades out under it once scrolled.
+        PageTopBar(
+            title = title,
+            subtitle = listOf("Subagent", detail).filter { it.isNotEmpty() }.joinToString(" · "),
+            leading = { TonalCircleButton(ZIcons.Back, "Back", onClick = onBack, size = PageTopBarButton) },
+        ) {
+            TonalCircleButton(ZIcons.Copy, "Copy transcript", onClick = {
+                transcript.frame?.let { clipboard.setText(AnnotatedString(it.plainText())) }
+                model.toast("Transcript copied")
+            }, size = PageTopBarButton)
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             val shown by animateFloatAsState(if (seenRows) 1f else 0f, MaterialTheme.motionScheme.defaultEffectsSpec(), label = "reveal")
             Transcript(transcript, actions, Modifier.fillMaxSize().alpha(shown))
+            TopEdgeFade { transcript.offset }
             androidx.compose.animation.AnimatedVisibility(!seenRows && !unavailable, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.Center)) {
                 LoadingIndicator(Modifier.size(48.dp))
             }
