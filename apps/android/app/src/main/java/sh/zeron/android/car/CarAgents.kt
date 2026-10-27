@@ -37,7 +37,13 @@ data class CarAgent(
     /** The list's second line: the status, or for finished work what it said. */
     val detail: String,
     val unseen: Boolean,
+    /** Its folder: the project, or its computer's home for a chat without one. */
+    val folder: Folder,
+    val lastActivityMs: Long,
 )
+
+/** A project (or a computer's home) the car groups chats under, like the drawer's project picker. */
+data class Folder(val id: String, val name: String)
 
 /** An agent finished, wants an answer, or failed — what the car says about it. */
 data class Report(
@@ -101,10 +107,12 @@ class CarAgents(app: Application, private val model: AppModel) {
     private fun onWorkspace(ws: WorkspaceSnapshot) {
         val rows = rows(ws)
         val orchestrator = orchestratorId
+        // Checkouts of one repository on several computers share a name: those folders say where.
+        val clashing = rows.mapNotNull { it.project }.distinctBy { it.id }.groupBy { it.name }.filterValues { it.size > 1 }.keys
         _agents.value = rows.filter { it.id != orchestrator }
-            .sortedWith(compareBy<SessionRow> { rank(it.indicator.agentState(), it.unseen) }.thenByDescending { it.lastActivityMs })
-            .take(MAX_AGENTS)
-            .map(::agent)
+            // Newest activity first, like the drawer.
+            .sortedByDescending { it.lastActivityMs }
+            .map { agent(it, clashing) }
         // An offline host's chat reads Idle once stale: that isn't finishing.
         val reports = states.update(rows.filter { it.deviceOnline }.associate { it.id to it.indicator.agentState() })
         for ((id, kind) in reports) {
@@ -113,15 +121,7 @@ class CarAgents(app: Application, private val model: AppModel) {
         }
     }
 
-    private fun rank(state: AgentState, unseen: Boolean) = when (state) {
-        AgentState.NeedsInput -> 0
-        AgentState.Failed -> if (unseen) 1 else 4
-        AgentState.Done -> 2
-        AgentState.Working -> 3
-        AgentState.Idle -> 5
-    }
-
-    private fun agent(row: SessionRow): CarAgent {
+    private fun agent(row: SessionRow, clashing: Set<String>): CarAgent {
         val state = row.indicator.agentState()
         val preview = row.preview?.let { Spoken.summary(it, 80) }.orEmpty()
         val ago = if (row.timeLabel == "now") "just now" else "${row.timeLabel} ago"
@@ -135,7 +135,12 @@ class CarAgents(app: Application, private val model: AppModel) {
             AgentState.Done, AgentState.Idle -> listOf(if (state == AgentState.Done) "Done" else row.timeLabel, preview).filter { it.isNotEmpty() }.joinToString(" · ")
             else -> status
         }
-        return CarAgent(row.id, row.title, state, status, detail, row.unseen)
+        val project = row.project
+        val folder = if (project != null) {
+            Folder("project:${project.id}", project.name + (row.deviceName?.takeIf { project.name in clashing }?.let { " · $it" } ?: ""))
+        }
+        else Folder("home:${row.deviceId}", "No project" + (row.deviceName?.let { " · $it" } ?: ""))
+        return CarAgent(row.id, row.title, state, status, detail, row.unseen, folder, row.lastActivityMs)
     }
 
     private fun elapsed(sinceMs: Long): String {
@@ -274,7 +279,6 @@ class CarAgents(app: Application, private val model: AppModel) {
 
     companion object {
         private const val TAG = "ZeronCar"
-        private const val MAX_AGENTS = 12
         private const val HYDRATE_TIMEOUT = 6_000L
         const val ORCHESTRATOR_TITLE = "Car"
 
