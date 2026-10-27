@@ -25,7 +25,8 @@ fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBuf {
                     .map(|home| PathBuf::from(home).join("AppData").join("Local"))
             })
             .expect("LOCALAPPDATA and USERPROFILE not set; set ZERON_DATA_DIR");
-        local.join("Zeron")
+        // `ZERON_DATA_DIR_NAME` at build time keeps dev builds off the real install.
+        local.join(option_env!("ZERON_DATA_DIR_NAME").unwrap_or("Zeron"))
     }
     #[cfg(not(windows))]
     {
