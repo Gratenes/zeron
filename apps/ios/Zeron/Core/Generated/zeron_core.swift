@@ -1386,6 +1386,11 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func forkSideChat(sourceId: String) async throws  -> String
     
     /**
+     * Whether `device_id` switches accounts by itself, and its last switch.
+     */
+    func deviceAccountAutoSwitch(deviceId: String) async throws  -> AccountAutoSwitchInfo
+    
+    /**
      * Run `harness` on `account_id` from now on.
      */
     func deviceActivateAccount(deviceId: String, harness: String, accountId: String) async throws  -> [DeviceAccountInfo]
@@ -1421,6 +1426,12 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      * option's, `None` for the default).
      */
     func deviceLoginStart(deviceId: String, harness: String, provider: String?, doneUrl: String) async throws  -> DeviceLoginInfo
+    
+    /**
+     * Turn `device_id`'s automatic switching on or off, at
+     * `threshold_percent`; what the computer kept.
+     */
+    func deviceSetAccountAutoSwitch(deviceId: String, enabled: Bool, thresholdPercent: UInt32) async throws  -> AccountAutoSwitchInfo
     
     /**
      * Offer `harness` on `device_id` or not; the device's fresh catalog.
@@ -2750,6 +2761,25 @@ open func forkSideChat(sourceId: String)async throws  -> String  {
 }
     
     /**
+     * Whether `device_id` switches accounts by itself, and its last switch.
+     */
+open func deviceAccountAutoSwitch(deviceId: String)async throws  -> AccountAutoSwitchInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_device_account_auto_switch(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAccountAutoSwitchInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
      * Run `harness` on `account_id` from now on.
      */
 open func deviceActivateAccount(deviceId: String, harness: String, accountId: String)async throws  -> [DeviceAccountInfo]  {
@@ -2888,6 +2918,26 @@ open func deviceLoginStart(deviceId: String, harness: String, provider: String?,
             completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
             freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
             liftFunc: FfiConverterTypeDeviceLoginInfo_lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
+    /**
+     * Turn `device_id`'s automatic switching on or off, at
+     * `threshold_percent`; what the computer kept.
+     */
+open func deviceSetAccountAutoSwitch(deviceId: String, enabled: Bool, thresholdPercent: UInt32)async throws  -> AccountAutoSwitchInfo  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_device_set_account_auto_switch(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterBool.lower(enabled),FfiConverterUInt32.lower(thresholdPercent)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeAccountAutoSwitchInfo_lift,
             errorHandler: FfiConverterTypeCoreError_lift
         )
 }
@@ -6833,6 +6883,159 @@ public func FfiConverterTypeVoiceSessionListener_lower(_ value: VoiceSessionList
 }
 
 
+
+
+/**
+ * A computer's automatic account switching: once an agent's live login has
+ * used `threshold_percent` of a usage window, it moves to the saved account
+ * with the most left.
+ */
+public struct AccountAutoSwitchInfo: Equatable, Hashable {
+    public var enabled: Bool
+    /**
+     * 50…99 (the computer clamps it).
+     */
+    public var thresholdPercent: UInt32
+    /**
+     * The most recent automatic switch since the computer's engine started.
+     */
+    public var lastSwitch: AccountSwitchInfo?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(enabled: Bool, 
+        /**
+         * 50…99 (the computer clamps it).
+         */thresholdPercent: UInt32, 
+        /**
+         * The most recent automatic switch since the computer's engine started.
+         */lastSwitch: AccountSwitchInfo?) {
+        self.enabled = enabled
+        self.thresholdPercent = thresholdPercent
+        self.lastSwitch = lastSwitch
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AccountAutoSwitchInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAccountAutoSwitchInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AccountAutoSwitchInfo {
+        return
+            try AccountAutoSwitchInfo(
+                enabled: FfiConverterBool.read(from: &buf), 
+                thresholdPercent: FfiConverterUInt32.read(from: &buf), 
+                lastSwitch: FfiConverterOptionTypeAccountSwitchInfo.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AccountAutoSwitchInfo, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.enabled, into: &buf)
+        FfiConverterUInt32.write(value.thresholdPercent, into: &buf)
+        FfiConverterOptionTypeAccountSwitchInfo.write(value.lastSwitch, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountAutoSwitchInfo_lift(_ buf: RustBuffer) throws -> AccountAutoSwitchInfo {
+    return try FfiConverterTypeAccountAutoSwitchInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountAutoSwitchInfo_lower(_ value: AccountAutoSwitchInfo) -> RustBuffer {
+    return FfiConverterTypeAccountAutoSwitchInfo.lower(value)
+}
+
+
+public struct AccountSwitchInfo: Equatable, Hashable {
+    /**
+     * `claude-code` · `codex` · …
+     */
+    public var harness: String
+    public var fromEmail: String?
+    public var toEmail: String?
+    /**
+     * 0.0…1.0 of the window `from` had used.
+     */
+    public var usedFraction: Float
+    public var atMs: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * `claude-code` · `codex` · …
+         */harness: String, fromEmail: String?, toEmail: String?, 
+        /**
+         * 0.0…1.0 of the window `from` had used.
+         */usedFraction: Float, atMs: Int64) {
+        self.harness = harness
+        self.fromEmail = fromEmail
+        self.toEmail = toEmail
+        self.usedFraction = usedFraction
+        self.atMs = atMs
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension AccountSwitchInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAccountSwitchInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AccountSwitchInfo {
+        return
+            try AccountSwitchInfo(
+                harness: FfiConverterString.read(from: &buf), 
+                fromEmail: FfiConverterOptionString.read(from: &buf), 
+                toEmail: FfiConverterOptionString.read(from: &buf), 
+                usedFraction: FfiConverterFloat.read(from: &buf), 
+                atMs: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AccountSwitchInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.harness, into: &buf)
+        FfiConverterOptionString.write(value.fromEmail, into: &buf)
+        FfiConverterOptionString.write(value.toEmail, into: &buf)
+        FfiConverterFloat.write(value.usedFraction, into: &buf)
+        FfiConverterInt64.write(value.atMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountSwitchInfo_lift(_ buf: RustBuffer) throws -> AccountSwitchInfo {
+    return try FfiConverterTypeAccountSwitchInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAccountSwitchInfo_lower(_ value: AccountSwitchInfo) -> RustBuffer {
+    return FfiConverterTypeAccountSwitchInfo.lower(value)
+}
 
 
 /**
@@ -19577,6 +19780,30 @@ fileprivate struct FfiConverterOptionTypeVisualSession: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeAccountSwitchInfo: FfiConverterRustBuffer {
+    typealias SwiftType = AccountSwitchInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeAccountSwitchInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeAccountSwitchInfo.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeAppshotLabel: FfiConverterRustBuffer {
     typealias SwiftType = AppshotLabel?
 
@@ -22127,6 +22354,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_fork_side_chat() != 15467) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_account_auto_switch() != 61849) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_device_activate_account() != 7247) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -22149,6 +22379,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_device_login_start() != 47566) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_set_account_auto_switch() != 50414) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_harness_enabled() != 59215) {
