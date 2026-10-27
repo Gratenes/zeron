@@ -481,12 +481,13 @@ fun HistoryDrawerContent(
                     listOf(
                         MenuSection(
                             "Project",
-                            listOf(MenuChoice("All projects", project == null, leading = { ZIcon(ZIcons.Home, null, Modifier.size(20.dp)) }) { projectId = null }) +
+                            listOf(MenuChoice("All projects", project == null, leading = { ZIcon(ZIcons.Home, null, Modifier.size(20.dp)) }, fixed = true) { projectId = null }) +
                                 projects.map { p ->
                                     MenuChoice(p.name, project == p.id, supporting = host(p), leading = { ProjectTile(p.name, p.colorIndex.toInt(), 20.dp) }) { projectId = p.id }
                                 },
                         ),
                     ),
+                    searchable = true,
                 )
             }
             // Home's filter pills; they scroll sideways when they don't fit (large text).
