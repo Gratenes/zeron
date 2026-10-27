@@ -17,8 +17,8 @@ use std::sync::{LazyLock, Mutex};
 
 use tokio::io::AsyncWriteExt as _;
 use zeron_proto::{
-    AgentAccount, AgentAccountsSnapshot, AgentAuthKind, AgentLoginMode, AgentLoginPoll,
-    AgentLoginStart, AgentLoginStatus, HarnessId,
+    AccountAutoSwitch, AccountAutoSwitchStatus, AgentAccount, AgentAccountsSnapshot, AgentAuthKind,
+    AgentLoginMode, AgentLoginPoll, AgentLoginStart, AgentLoginStatus, HarnessId,
 };
 
 use crate::Client;
@@ -336,6 +336,49 @@ impl Client {
         .await
     }
 
+    /// `GetAccountAutoSwitch` on `device_id`: whether it switches an agent's
+    /// login by itself once usage reaches the threshold. An older engine
+    /// answers [`ClientError::Unsupported`].
+    pub async fn device_account_auto_switch(
+        &self,
+        device_id: &str,
+    ) -> Result<AccountAutoSwitchStatus> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Ok(demo_auto_switch(None)),
+            Backend::Live(live) => decode_auto_switch(
+                live.relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::GET_ACCOUNT_AUTO_SWITCH,
+                        serde_json::json!({}),
+                    )
+                    .await?,
+            ),
+        }
+    }
+
+    /// `SetAccountAutoSwitch`: the computer clamps the threshold and replies
+    /// with what it kept.
+    pub async fn device_set_account_auto_switch(
+        &self,
+        device_id: &str,
+        settings: AccountAutoSwitch,
+    ) -> Result<AccountAutoSwitchStatus> {
+        match self.inner.backend() {
+            Backend::Demo(_) => Ok(demo_auto_switch(Some(settings))),
+            Backend::Live(live) => decode_auto_switch(
+                live.relay
+                    .call(
+                        device_id,
+                        zeron_rpc::methods::SET_ACCOUNT_AUTO_SWITCH,
+                        serde_json::to_value(settings)
+                            .map_err(|e| ClientError::Internal(e.to_string()))?,
+                    )
+                    .await?,
+            ),
+        }
+    }
+
     async fn accounts_call(
         &self,
         device_id: &str,
@@ -377,6 +420,25 @@ fn decode_snapshot(reply: serde_json::Value) -> Result<AgentAccountsSnapshot> {
     })
 }
 
+/// A computer's switching setting; a last switch for an agent this build
+/// doesn't know is dropped rather than failing the setting.
+fn decode_auto_switch(mut reply: serde_json::Value) -> Result<AccountAutoSwitchStatus> {
+    let last_switch = reply
+        .get_mut("lastSwitch")
+        .map(serde_json::Value::take)
+        .and_then(|event| serde_json::from_value(event).ok());
+    let settings = reply
+        .get("settings")
+        .cloned()
+        .ok_or_else(|| ClientError::HostError("AccountAutoSwitch: bad reply".into()))?;
+    let settings: AccountAutoSwitch =
+        serde_json::from_value(settings).map_err(|e| ClientError::HostError(e.to_string()))?;
+    Ok(AccountAutoSwitchStatus {
+        settings,
+        last_switch,
+    })
+}
+
 fn stop_relay(login_id: &str) {
     if let Some(task) = lock(&RELAYS).remove(login_id) {
         task.abort();
@@ -387,6 +449,25 @@ fn stop_relay(login_id: &str) {
 static DEMO_DISABLED: LazyLock<Mutex<HashMap<String, bool>>> = LazyLock::new(Default::default);
 static DEMO_ACTIVE: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Default::default);
 static DEMO_FORGOTTEN: LazyLock<Mutex<Vec<String>>> = LazyLock::new(Default::default);
+static DEMO_AUTO_SWITCH: LazyLock<Mutex<AccountAutoSwitch>> = LazyLock::new(Default::default);
+
+/// The demo's switching setting, `save` applied (clamped like the engine).
+fn demo_auto_switch(save: Option<AccountAutoSwitch>) -> AccountAutoSwitchStatus {
+    let mut settings = lock(&DEMO_AUTO_SWITCH);
+    if let Some(save) = save {
+        *settings = AccountAutoSwitch {
+            threshold_percent: save.threshold_percent.clamp(
+                AccountAutoSwitch::MIN_THRESHOLD,
+                AccountAutoSwitch::MAX_THRESHOLD,
+            ),
+            ..save
+        };
+    }
+    AccountAutoSwitchStatus {
+        settings: *settings,
+        last_switch: None,
+    }
+}
 
 /// The demo catalog with the toggles applied.
 pub(crate) fn with_demo_toggles(demo: bool, mut list: Vec<HarnessInfo>) -> Vec<HarnessInfo> {
@@ -495,5 +576,30 @@ mod tests {
         );
         assert_eq!(snapshot.warnings.len(), 1);
         assert!(decode_snapshot(serde_json::json!([])).is_err());
+    }
+
+    #[test]
+    fn auto_switch_keeps_the_setting_past_an_unknown_agent() {
+        let event = |harness: &str| {
+            serde_json::json!({
+                "settings": { "enabled": true, "thresholdPercent": 85 },
+                "lastSwitch": {
+                    "harness": harness, "fromId": "a", "fromEmail": "a@example.com",
+                    "toId": "b", "toEmail": null, "usedFraction": 0.9, "at": 1
+                }
+            })
+        };
+        let status = decode_auto_switch(event("codex")).unwrap();
+        assert_eq!(
+            status.settings,
+            AccountAutoSwitch {
+                enabled: true,
+                threshold_percent: 85
+            }
+        );
+        assert_eq!(status.last_switch.unwrap().harness, HarnessId::Codex);
+        let status = decode_auto_switch(event("from-the-future")).unwrap();
+        assert!(status.settings.enabled && status.last_switch.is_none());
+        assert!(decode_auto_switch(serde_json::json!({})).is_err());
     }
 }

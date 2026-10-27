@@ -542,6 +542,7 @@ struct HostService {
     spaces: Mutex<Vec<String>>,
     /// `forceUsage` of each ListAgentAccounts.
     account_lists: Mutex<Vec<serde_json::Value>>,
+    auto_switch: Mutex<zeron_proto::AccountAutoSwitch>,
 }
 
 const HOST_IMAGE: &str = "/Users/dev/.zeron/uploads/host.png";
@@ -621,6 +622,14 @@ impl zeron_rpc::RpcService for HostService {
                     .unwrap()
                     .push(params["forceUsage"].clone());
                 json!({ "accounts": [], "warnings": [] })
+            }
+            m::GET_ACCOUNT_AUTO_SWITCH | m::SET_ACCOUNT_AUTO_SWITCH => {
+                let mut settings = self.auto_switch.lock().unwrap();
+                if method == m::SET_ACCOUNT_AUTO_SWITCH {
+                    *settings = serde_json::from_value(params)
+                        .map_err(|e| zeron_rpc::RpcError::BadParams(e.to_string()))?;
+                }
+                json!({ "settings": *settings })
             }
             m::WATCH_CHECKOUT_CHANGE_REQUEST => {
                 let item = json!({
@@ -816,6 +825,26 @@ async fn host_rpcs_ride_the_device_relay() {
         *service.account_lists.lock().unwrap(),
         [serde_json::json!(false), serde_json::json!(true)]
     );
+
+    // Automatic account switching: read, then set, on the host.
+    let c = client.clone();
+    let status =
+        zeron_client::runtime::run(async move { c.device_account_auto_switch(HOST).await })
+            .await
+            .unwrap();
+    assert!(!status.settings.enabled && status.last_switch.is_none());
+    let c = client.clone();
+    let settings = zeron_proto::AccountAutoSwitch {
+        enabled: true,
+        threshold_percent: 85,
+    };
+    let status = zeron_client::runtime::run(async move {
+        c.device_set_account_auto_switch(HOST, settings).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(status.settings, settings);
+    assert_eq!(*service.auto_switch.lock().unwrap(), settings);
     client.shutdown();
 }
 

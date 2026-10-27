@@ -39,10 +39,7 @@ impl From<zeron_proto::AgentAccount> for DeviceAccountInfo {
     fn from(a: zeron_proto::AgentAccount) -> Self {
         Self {
             id: a.id,
-            harness: serde_json::to_value(a.harness)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .unwrap_or_default(),
+            harness: harness_name(a.harness),
             email: a.email,
             display_name: a.display_name,
             plan_label: a.plan_label,
@@ -61,6 +58,45 @@ impl From<zeron_proto::AgentAccount> for DeviceAccountInfo {
                 })
                 .collect(),
             usage_error: a.usage_error,
+        }
+    }
+}
+
+/// A computer's automatic account switching: once an agent's live login has
+/// used `threshold_percent` of a usage window, it moves to the saved account
+/// with the most left.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AccountAutoSwitchInfo {
+    pub enabled: bool,
+    /// 50…99 (the computer clamps it).
+    pub threshold_percent: u32,
+    /// The most recent automatic switch since the computer's engine started.
+    pub last_switch: Option<AccountSwitchInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AccountSwitchInfo {
+    /// `claude-code` · `codex` · …
+    pub harness: String,
+    pub from_email: Option<String>,
+    pub to_email: Option<String>,
+    /// 0.0…1.0 of the window `from` had used.
+    pub used_fraction: f32,
+    pub at_ms: i64,
+}
+
+impl From<zeron_proto::AccountAutoSwitchStatus> for AccountAutoSwitchInfo {
+    fn from(status: zeron_proto::AccountAutoSwitchStatus) -> Self {
+        Self {
+            enabled: status.settings.enabled,
+            threshold_percent: status.settings.threshold_percent.into(),
+            last_switch: status.last_switch.map(|e| AccountSwitchInfo {
+                harness: harness_name(e.harness),
+                from_email: e.from_email,
+                to_email: e.to_email,
+                used_fraction: e.used_fraction,
+                at_ms: e.at,
+            }),
         }
     }
 }
@@ -155,6 +191,14 @@ pub fn agent_login_rules(harness: String) -> AgentLoginRules {
             Vec::new()
         },
     }
+}
+
+/// `claude-code` for [`zeron_proto::HarnessId::ClaudeCode`].
+fn harness_name(harness: zeron_proto::HarnessId) -> String {
+    serde_json::to_value(harness)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 fn accounts(snapshot: zeron_proto::AgentAccountsSnapshot) -> Vec<DeviceAccountInfo> {
@@ -305,5 +349,77 @@ impl CoreClient {
         })
         .await
         .map(accounts)
+    }
+
+    /// Whether `device_id` switches accounts by itself, and its last switch.
+    pub async fn device_account_auto_switch(
+        &self,
+        device_id: String,
+    ) -> CoreResult<AccountAutoSwitchInfo> {
+        let client = self.client.clone();
+        on_runtime(async move { client.device_account_auto_switch(&device_id).await })
+            .await
+            .map(Into::into)
+    }
+
+    /// Turn `device_id`'s automatic switching on or off, at
+    /// `threshold_percent`; what the computer kept.
+    pub async fn device_set_account_auto_switch(
+        &self,
+        device_id: String,
+        enabled: bool,
+        threshold_percent: u32,
+    ) -> CoreResult<AccountAutoSwitchInfo> {
+        let client = self.client.clone();
+        let settings = zeron_proto::AccountAutoSwitch {
+            enabled,
+            threshold_percent: u8::try_from(threshold_percent).unwrap_or(u8::MAX),
+        };
+        on_runtime(async move {
+            client
+                .device_set_account_auto_switch(&device_id, settings)
+                .await
+        })
+        .await
+        .map(Into::into)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_switch_carries_the_last_switch() {
+        let info = AccountAutoSwitchInfo::from(zeron_proto::AccountAutoSwitchStatus {
+            settings: zeron_proto::AccountAutoSwitch {
+                enabled: true,
+                threshold_percent: 85,
+            },
+            last_switch: Some(zeron_proto::AccountSwitchEvent {
+                harness: zeron_proto::HarnessId::ClaudeCode,
+                provider: None,
+                from_id: "a".into(),
+                from_email: Some("a@example.com".into()),
+                to_id: "b".into(),
+                to_email: None,
+                used_fraction: 0.92,
+                at: 1_700_000_000_000,
+            }),
+        });
+        assert_eq!(
+            info,
+            AccountAutoSwitchInfo {
+                enabled: true,
+                threshold_percent: 85,
+                last_switch: Some(AccountSwitchInfo {
+                    harness: "claude-code".into(),
+                    from_email: Some("a@example.com".into()),
+                    to_email: None,
+                    used_fraction: 0.92,
+                    at_ms: 1_700_000_000_000,
+                }),
+            }
+        );
     }
 }
