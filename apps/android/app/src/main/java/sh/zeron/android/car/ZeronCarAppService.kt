@@ -26,6 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import sh.zeron.android.ZeronApplication
 import sh.zeron.android.core.LaunchOptions
+import uniffi.zeron_core.UserInputAnswer
 import kotlin.coroutines.resume
 
 /** Android Auto's entry point: one [CarSession] per connected car screen. */
@@ -95,34 +96,98 @@ class CarSession : Session() {
 
     suspend fun openQuestion(chatId: String) = agents.openQuestion(chatId)
 
-    /** A tapped choice: the same path as a spoken one. */
-    fun answer(chatId: String, text: String) {
-        lifecycleScope.launch { send(chatId, text) }
-    }
-
     // ── talking ─────────────────────────────────────────────────────────────
 
-    /** Listen and send the words to [chatId], or to the orchestrator when null. */
-    fun talk(chatId: String?) {
+    /**
+     * Listen and send the words to [chatId], or to the orchestrator when null.
+     * An open question is asked instead, one question at a time.
+     */
+    fun talk(chatId: String?) = turn {
+        val target = chatId ?: agents.liveOrchestrator
+        val input = target?.let { agents.openQuestion(it) }
+        if (target != null && input != null && input.questions.isNotEmpty()) {
+            ask(target, QuestionFlow(input), prompted = false)
+        } else {
+            val heard = listen(chatId)
+            if (heard != null) send(chatId, heard)
+        }
+    }
+
+    /** One talk turn at a time; speech in progress stops. */
+    private fun turn(block: suspend () -> Unit) {
         if (talking) return
         talking = true
         voice.stopSpeaking()
-        val screen = ListeningScreen(carContext, this, agentTitle(chatId))
-        carContext.getCarService(androidx.car.app.ScreenManager::class.java).push(screen)
         lifecycleScope.launch {
             try {
-                val heard = voice.listen(microphone(), hints())
-                screen.close()
-                when (heard) {
-                    is Heard.Words -> send(chatId, heard.text)
-                    Heard.NoRecognizer -> say("Speech recognition isn't available on this phone.")
-                    Heard.Silence -> Unit
-                }
+                block()
             } finally {
-                screen.close()
                 talking = false
             }
         }
+    }
+
+    /** What the driver said, or null for silence, a cancel or no recognizer. */
+    private suspend fun listen(chatId: String?, detail: String? = null): String? {
+        val screen = ListeningScreen(carContext, this, agentTitle(chatId), detail)
+        carContext.getCarService(androidx.car.app.ScreenManager::class.java).push(screen)
+        val heard = try {
+            voice.listen(microphone(), hints())
+        } finally {
+            screen.close()
+        }
+        return when (heard) {
+            is Heard.Words -> heard.text
+            Heard.NoRecognizer -> null.also { say("Speech recognition isn't available on this phone.") }
+            Heard.Silence -> null
+        }
+    }
+
+    /**
+     * [flow]'s questions by voice, one at a time ([prompted]: the first was
+     * already read aloud), then every answer sent together. Silence or a
+     * cancel sends nothing and leaves the question open.
+     */
+    private suspend fun ask(chatId: String, flow: QuestionFlow, prompted: Boolean) {
+        var step = flow.step()
+        var first = true
+        while (step is QuestionFlow.Step.Ask) {
+            if (!first || !prompted) say(step.prompt)
+            first = false
+            val heard = listen(chatId, detail(flow, step))
+            if (heard == null) {
+                if (flow.index > 0) toast("Not sent: the question stays open")
+                return
+            }
+            toast("“$heard”")
+            step = flow.hear(heard)
+        }
+        respond(chatId, flow, (step as QuestionFlow.Step.Submit).answers, spoken = flow.questions.size > 1)
+    }
+
+    /** The listening screen's line: "1 of 2 · Which harnesses…". */
+    private fun detail(flow: QuestionFlow, ask: QuestionFlow.Step.Ask) =
+        listOf(flow.progress, Spoken.summary(ask.question.question, 120)).filter { it.isNotEmpty() }.joinToString(" · ")
+
+    /** The current question of [flow] answered by voice (a tap on the choices screen). */
+    fun hear(chatId: String, flow: QuestionFlow, then: (QuestionFlow.Step) -> Unit) = turn {
+        val ask = flow.step() as? QuestionFlow.Step.Ask ?: return@turn
+        val heard = listen(chatId, detail(flow, ask)) ?: return@turn
+        toast("“$heard”")
+        then(flow.hear(heard))
+    }
+
+    /** Tapped answers: every answer of [flow], sent together. */
+    fun submit(chatId: String, flow: QuestionFlow, answers: List<UserInputAnswer>) {
+        lifecycleScope.launch { respond(chatId, flow, answers, spoken = false) }
+    }
+
+    /** [answers] to [flow]'s request ([spoken]: read back first). */
+    private suspend fun respond(chatId: String, flow: QuestionFlow, answers: List<UserInputAnswer>, spoken: Boolean) {
+        if (spoken) say(flow.confirmation(answers))
+        val outcome = agents.respond(chatId, flow.input.requestId, answers)
+        Log.i(TAG, "answer $chatId: ${answers.size} answers → $outcome")
+        reportOutcome(chatId, outcome)
     }
 
     fun cancelTalk() = voice.cancel()
@@ -139,6 +204,10 @@ class CarSession : Session() {
         toast("“$text”")
         val outcome = if (chatId == null) agents.command(text) else agents.reply(chatId, text)
         Log.i(TAG, "talk to ${chatId ?: "orchestrator"}: ${text.length} chars → $outcome")
+        reportOutcome(chatId, outcome)
+    }
+
+    private suspend fun reportOutcome(chatId: String?, outcome: CarAgents.Outcome) {
         when (outcome) {
             is CarAgents.Outcome.Sent -> if (chatId != null) toast("Sent to ${agentTitle(chatId)}")
             CarAgents.Outcome.NoHost -> say("None of your computers is online.")
@@ -185,6 +254,12 @@ class CarSession : Session() {
         if (!report.orchestrator) alert(report)
         voice.speak(report.spoken)
         // Questions are answered right away; the microphone closes again if nothing is said.
+        val question = report.question
+        if (question != null && question.questions.isNotEmpty()) {
+            // The first question was part of the report.
+            turn { ask(report.chatId, QuestionFlow(question), prompted = true) }
+            return
+        }
         val asks = report.kind == ReportKind.NeedsInput || report.orchestrator && report.text.trimEnd().endsWith("?")
         if (asks && !talking) talk(report.chatId)
     }
