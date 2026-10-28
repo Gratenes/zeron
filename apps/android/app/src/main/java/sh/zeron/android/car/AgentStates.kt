@@ -45,3 +45,13 @@ class AgentStates {
         known = HashMap()
     }
 }
+
+/** How long a turn has run: "40s", "12m", "1h 5m". */
+fun elapsedLabel(sinceMs: Long, nowMs: Long = System.currentTimeMillis()): String {
+    val seconds = ((nowMs - sinceMs) / 1000).coerceAtLeast(0)
+    return when {
+        seconds < 60 -> "${seconds}s"
+        seconds < 3600 -> "${seconds / 60}m"
+        else -> "${seconds / 3600}h ${seconds % 3600 / 60}m"
+    }
+}

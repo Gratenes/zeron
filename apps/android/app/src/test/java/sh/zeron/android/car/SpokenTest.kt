@@ -102,3 +102,23 @@ class EndpointerTest {
         assertEquals(true, e.endsAfter(audio(500, 300)) != null)
     }
 }
+
+class ElapsedLabelTest {
+    @Test
+    fun readsLikeAClock() {
+        assertEquals("40s", elapsedLabel(0, 40_000))
+        assertEquals("12m", elapsedLabel(0, 12 * 60_000 + 30_000))
+        assertEquals("1h 5m", elapsedLabel(0, 65 * 60_000))
+        assertEquals("0s", elapsedLabel(10_000, 0))
+    }
+}
+
+class LatestTest {
+    @Test
+    fun keepsTheNewestSentences() {
+        assertEquals("I'll look into this.", Spoken.latest("I'll look into this."))
+        val text = "Looking at the auth flow. Found the redirect bug in **login.rs**. Writing a fix now."
+        assertEquals("…Found the redirect bug in login.rs. Writing a fix now.", Spoken.latest(text, 60))
+        assertEquals("…a fix now.", Spoken.latest("Writing a fix now.", 12))
+    }
+}
