@@ -142,6 +142,15 @@ class AppModel(private val app: Application) {
         settings.edit().putString("theme", value.mode.name).putBoolean("dynamicColor", value.dynamicColor).apply()
     }
 
+    /** Android Auto: pause the music while Zeron speaks (louder than ducking in cars with a quiet navigation voice). */
+    private val _carPausesMusic = MutableStateFlow(settings.getBoolean("car.pausesMusic", false))
+    val carPausesMusic: StateFlow<Boolean> = _carPausesMusic.asStateFlow()
+
+    fun setCarPausesMusic(on: Boolean) {
+        _carPausesMusic.value = on
+        settings.edit().putBoolean("car.pausesMusic", on).apply()
+    }
+
     /** Sessions grouped by project in place of the flat Recent list. */
     private val _groupByProject = MutableStateFlow(settings.getBoolean("groupByProject", false))
     val groupByProject: StateFlow<Boolean> = _groupByProject.asStateFlow()

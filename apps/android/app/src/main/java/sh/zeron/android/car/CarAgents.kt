@@ -45,7 +45,20 @@ data class CarAgent(
 )
 
 /** A project (or a computer's home) the car groups chats under, like the drawer's project picker. */
-data class Folder(val id: String, val name: String)
+data class Folder(val id: String, val name: String) {
+    /** Its badge: "ZE" for zeron, "EP" for embedez-platform, "~" for a computer's home. */
+    val code: String get() = folderCode(this)
+}
+
+fun folderCode(folder: Folder): String {
+    if (folder.id.startsWith("home:")) return "~"
+    val words = folder.name.substringBefore(" · ").split(Regex("[^\\p{L}\\p{N}]+")).filter { it.isNotEmpty() }
+    return when {
+        words.isEmpty() -> "?"
+        words.size == 1 -> words[0].take(2)
+        else -> words.take(2).joinToString("") { it.take(1) }
+    }.uppercase()
+}
 
 /** An agent finished, wants an answer, or failed — what the car says about it. */
 data class Report(

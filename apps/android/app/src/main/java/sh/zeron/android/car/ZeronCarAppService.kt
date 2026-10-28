@@ -68,7 +68,7 @@ class CarSession : Session() {
     val agentList: StateFlow<List<CarAgent>> get() = agents.agents
 
     override fun onCreateScreen(intent: Intent): Screen {
-        voice = CarVoice(carContext)
+        voice = CarVoice(carContext) { model.carPausesMusic.value }
         notifications = CarNotifications(carContext)
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onCreate(owner: LifecycleOwner) {
@@ -263,7 +263,7 @@ class CarSession : Session() {
         lifecycleScope.launch {
             val text = agents.latestReply(chatId)
             Log.i(TAG, "read aloud: ${text.length} chars")
-            say(if (text.isEmpty()) "${agentTitle(chatId)} hasn't replied yet." else Spoken.summary(text, 1_200))
+            say(if (text.isEmpty()) "${agentTitle(chatId)} hasn't replied yet." else Spoken.summary(text, 1_200, wholeText = true))
         }
     }
 

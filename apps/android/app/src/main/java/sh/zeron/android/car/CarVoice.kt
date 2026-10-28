@@ -53,7 +53,11 @@ sealed interface Heard {
  * One at a time: speaking waits for listening and the other way round.
  * Main thread.
  */
-class CarVoice(context: Context) {
+class CarVoice(
+    context: Context,
+    /** Pause the music while speaking, on the media stream (cars whose navigation-voice volume is low). */
+    private val pausesMusic: () -> Boolean = { false },
+) {
     private val context = context.applicationContext
     private val audio = this.context.getSystemService(AudioManager::class.java)
     private val turn = Mutex()
@@ -62,6 +66,12 @@ class CarVoice(context: Context) {
     /** The stream Android Auto mixes over media (like navigation prompts). */
     private val attributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .build()
+
+    /** The voice when it pauses the music: the media stream, at the music's volume. */
+    private val loud = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_MEDIA)
         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
         .build()
 
@@ -78,7 +88,7 @@ class CarVoice(context: Context) {
     private var cancelListening: (() -> Unit)? = null
     private var modelRequested = false
 
-    private fun focus(gain: Int, onLoss: () -> Unit): AudioFocusRequest? {
+    private fun focus(gain: Int, attributes: AudioAttributes = this.attributes, onLoss: () -> Unit): AudioFocusRequest? {
         val request = AudioFocusRequest.Builder(gain)
             .setAudioAttributes(attributes)
             .setOnAudioFocusChangeListener { change ->
@@ -145,7 +155,10 @@ class CarVoice(context: Context) {
             val done = CompletableDeferred<Unit>()
             failed = false
             speaking = done
-            val focus = focus(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK) { engine.stop(); done.complete(Unit) }
+            val pause = pausesMusic()
+            engine.setAudioAttributes(if (pause) loud else attributes)
+            val gain = if (pause) AudioManager.AUDIOFOCUS_GAIN_TRANSIENT else AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+            val focus = focus(gain, if (pause) loud else attributes) { engine.stop(); done.complete(Unit) }
             if (focus == null) Log.w(TAG, "speaking without audio focus")
             try {
                 // An engine that refuses the text never calls back: don't wait on it.
