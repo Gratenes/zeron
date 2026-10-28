@@ -3,7 +3,14 @@
 //! and written over `GetNativeSubagents` / `SetNativeSubagents`.
 
 use super::HarnessesPage;
-use crate::{popover::Loadable, settings::widgets, theme::Theme};
+use crate::{
+    popover::Loadable,
+    settings::{
+        search::{SearchAnchor, SettingId},
+        widgets,
+    },
+    theme::Theme,
+};
 use gpui::{AnyElement, Context, div, prelude::*, px};
 use zeron_engine::registry::NativeSubagentSettings;
 use zeron_proto::HarnessId;
@@ -193,7 +200,7 @@ impl HarnessesPage {
                 .flex()
                 .flex_col()
                 .child(widgets::details_label(theme, "Delegation"))
-                .child(row)
+                .child(row.search_anchor(SettingId::NativeSubagents))
                 .into_any_element(),
         )
     }

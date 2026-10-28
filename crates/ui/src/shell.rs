@@ -90,6 +90,7 @@ mod pull_request_pane;
 mod session_hover_card;
 mod session_info;
 mod session_lanes;
+mod settings_search;
 mod side_chats;
 mod sidebar_pins;
 mod sidebar_sections;
@@ -411,6 +412,8 @@ pub fn cluster_clearance(
 /// (Re-)apply the whole app keymap: clears every binding, restores the composer
 /// map, then binds the customizable shortcuts from `keymap` (feature-inventory
 /// §1.4). Invalid persisted combos fall back to that shortcut's default.
+/// Everything is written in US keys and bound where the active keyboard layout
+/// types them (see [`localize_key_bindings`]); re-run on a layout switch.
 pub fn apply_keymap(
     cx: &mut App,
     keymap: &KeymapConfig,
@@ -425,7 +428,8 @@ pub fn apply_keymap(
             platform_combo(fallback)
         }
     }
-    crate::appshots::set_shortcut(&keymap.capture_appshot);
+    let equivalents = crate::settings::key_equivalents(cx);
+    crate::appshots::set_shortcut(&keymap.capture_appshot, &equivalents);
     cx.clear_key_bindings();
     // `clear_key_bindings` also removes the contextual editing actions that
     // gpui-base installed at startup. Reinitialize the component layer before
@@ -546,6 +550,72 @@ pub fn apply_keymap(
             ),
         ]
     }));
+    localize_key_bindings(cx, &equivalents);
+    crate::settings::set_bound_key_equivalents(equivalents);
+}
+
+/// Move every binding to the key the active layout types for it. Combos are
+/// written in US keys, like the macOS menus they mirror; Apple relocates
+/// those per layout (AZERTY ⌘1 is ⌘&, ⌘/ is ⌘:, ⌘[ is ⌘^) and gpui ships
+/// the same table, but `KeyBinding::new` never applies it — to Zeron's
+/// bindings or gpui-base's editor map. Order is kept: gpui breaks ties
+/// between equally deep matches by binding order.
+fn localize_key_bindings(cx: &mut App, equivalents: &crate::settings::KeyEquivalents) {
+    if equivalents.is_empty() {
+        return;
+    }
+    let bindings: Vec<KeyBinding> = cx
+        .key_bindings()
+        .borrow()
+        .bindings()
+        .map(|binding| localize_binding(binding, equivalents))
+        .collect();
+    cx.clear_key_bindings();
+    cx.bind_keys(bindings);
+}
+
+fn localize_binding(
+    binding: &KeyBinding,
+    equivalents: &crate::settings::KeyEquivalents,
+) -> KeyBinding {
+    let mut moved = false;
+    let source = binding
+        .keystrokes()
+        .iter()
+        .map(|keystroke| {
+            let keystroke = keystroke.inner();
+            let key = crate::settings::localize_key(&keystroke.key, equivalents);
+            moved |= key != keystroke.key.as_str();
+            Keystroke {
+                key: key.into_owned(),
+                ..keystroke.clone()
+            }
+            .unparse()
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !moved {
+        return binding.clone();
+    }
+    match KeyBinding::load(
+        &source,
+        binding.action().boxed_clone(),
+        binding.predicate(),
+        false,
+        binding.action_input(),
+        &gpui::DummyKeyboardMapper,
+    ) {
+        Ok(mut localized) => {
+            if let Some(meta) = binding.meta() {
+                localized.set_meta(meta);
+            }
+            localized
+        }
+        Err(error) => {
+            tracing::warn!(%error, %source, "unbindable localized shortcut; keeping US key");
+            binding.clone()
+        }
+    }
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
@@ -689,6 +759,25 @@ impl SettingsSection {
             SettingsSection::General => "General",
             SettingsSection::Appshots => "Appshots",
             SettingsSection::Archived => "Archived sessions",
+        }
+    }
+
+    /// The section's glyph, in the nav and on its settings-search hits.
+    fn icon(self) -> &'static str {
+        match self {
+            SettingsSection::Devices => icons::MONITOR,
+            SettingsSection::Cloud => icons::CLOUD,
+            SettingsSection::Billing => icons::WALLET,
+            SettingsSection::Harnesses => icons::WIDGET,
+            SettingsSection::Agents => icons::KEY_MINIMALISTIC,
+            SettingsSection::Appearance => icons::TUNING,
+            SettingsSection::Files => icons::FOLDER,
+            SettingsSection::Notifications => icons::BELL,
+            SettingsSection::Voice => icons::MICROPHONE,
+            SettingsSection::Shortcuts => icons::KEYBOARD,
+            SettingsSection::General => icons::SETTINGS,
+            SettingsSection::Appshots => icons::MONITOR,
+            SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
         }
     }
 }
@@ -2120,6 +2209,8 @@ pub struct Shell {
     settings_focus_pending: bool,
     settings_restore_pending: bool,
     settings_return_route: Route,
+    /// The field atop the Settings sidebar, made on its first render.
+    settings_search: Option<settings_search::SettingsSearch>,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
     pull_requests_page: Option<Entity<PullRequestsPage>>,
@@ -2491,6 +2582,26 @@ impl Shell {
                     this.pending_workspace_command = Some(*command);
                     cx.notify();
                 }
+                ComposerEvent::AnnotationsChanged(numbers) => {
+                    let key = this.panel_key(cx);
+                    for surface in this.right_tabs.get(&key).into_iter().flatten() {
+                        if let RightSurface::Browser(id) = surface
+                            && let Some(browser) = this.browsers.get(id)
+                        {
+                            browser.read(cx).keep_markers(numbers);
+                        }
+                    }
+                }
+                ComposerEvent::AnnotationHovered(number) => {
+                    let key = this.panel_key(cx);
+                    for surface in this.right_tabs.get(&key).into_iter().flatten() {
+                        if let RightSurface::Browser(id) = surface
+                            && let Some(browser) = this.browsers.get(id)
+                        {
+                            browser.read(cx).focus_marker(*number);
+                        }
+                    }
+                }
                 ComposerEvent::NewThreadTransitionStarted => {
                     // Route observation drives the dock once selection commits.
                     cx.notify();
@@ -2679,6 +2790,7 @@ impl Shell {
             settings_focus_pending: matches!(route, Route::Settings(_)),
             settings_restore_pending: false,
             settings_return_route: Route::Chat,
+            settings_search: None,
             nav,
             pull_requests_page: None,
             pull_request_pane: Default::default(),
@@ -4082,6 +4194,26 @@ impl Shell {
                 crate::browser::BrowserEvent::Close => {
                     this.close_right_surface(RightSurface::Browser(id), window, cx)
                 }
+                crate::browser::BrowserEvent::Annotation {
+                    annotation,
+                    marker,
+                    last,
+                } => {
+                    // Only the session that owns this tab receives its picks.
+                    if this.panel_key(cx) == owner {
+                        let annotation = annotation.clone();
+                        let last = *last;
+                        if last && let Some(browser) = this.browsers.get(&id) {
+                            browser.read(cx).release_keyboard();
+                        }
+                        let number = this.composer.update(cx, |composer, cx| {
+                            composer.add_browser_annotation(annotation, last, window, cx)
+                        });
+                        if let (Some(number), Some(browser)) = (number, this.browsers.get(&id)) {
+                            browser.read(cx).label_marker(*marker, number);
+                        }
+                    }
+                }
             }
         });
         self.browsers.insert(id, browser.clone());
@@ -5163,6 +5295,15 @@ impl Shell {
 
     fn set_route(&mut self, route: Route, cx: &mut Context<Self>) {
         self.command_palette = None;
+        // A settings-search landing belongs to the page it was asked on, and
+        // a query to the visit: however Settings is left, the next visit
+        // starts from the sections.
+        if route != self.route {
+            settings::search::clear_reveal();
+        }
+        if matches!(self.route, Route::Settings(_)) && !matches!(route, Route::Settings(_)) {
+            self.reset_settings_search(cx);
+        }
         let was_pull_requests = matches!(self.route, Route::PullRequests);
         let will_show_pull_requests = matches!(route, Route::PullRequests);
         if was_pull_requests && !will_show_pull_requests {
@@ -5604,6 +5745,36 @@ impl Shell {
         }
     }
 
+    /// Whether a dialog or menu that Escape would close is open over Settings:
+    /// [`Self::dismiss_settings_escape_surface`] without the dismissing.
+    fn settings_escape_surface_open(&self, cx: &App) -> bool {
+        if self.sync_flow.has_visible_overlay() || self.user_menu.is_open() {
+            return true;
+        }
+        let Route::Settings(section) = self.route else {
+            return false;
+        };
+        match section.canonical() {
+            SettingsSection::Devices => self
+                .devices_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).has_escape_surface()),
+            SettingsSection::Harnesses => self
+                .harnesses_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).has_escape_surface(cx)),
+            SettingsSection::Appearance => self
+                .appearance_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).has_escape_surface()),
+            SettingsSection::Archived => self
+                .archived_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).has_escape_surface()),
+            _ => false,
+        }
+    }
+
     /// Escape bubbling out of the settings page. Focused controls — open
     /// dropdowns, the shortcut recorder, a dialog's own input — consume it
     /// before it gets here. What remains open without holding focus closes
@@ -6000,13 +6171,17 @@ impl Shell {
                     ));
                     self.shortcuts_page = Some(page);
                 }
+                let keep_focus = self.settings_search_focused(window, cx);
                 match &self.shortcuts_page {
                     Some(page) => {
                         page.update(cx, |page, _| {
                             page.show_section(
                                 section == SettingsSection::Appshots,
                                 section == SettingsSection::General,
-                            )
+                            );
+                            if keep_focus {
+                                page.keep_focus();
+                            }
                         });
                         page.clone().into_any_element()
                     }
@@ -8419,7 +8594,12 @@ impl Shell {
         let sidebar_width = self.settings.sidebar_width;
         // Dropdowns contain themselves to the page pane beside this column.
         settings::widgets::set_sidebar_width(sidebar_width, cx);
-        let nav = self.render_settings_nav(section, &theme, window, cx);
+        let search_field = self.render_settings_search_field(&theme, window, cx);
+        let nav = if self.settings_searching(cx) {
+            self.render_settings_search_results(&theme, cx)
+        } else {
+            self.render_settings_nav(section, &theme, window, cx)
+        };
         // The footer uses the chat sidebar's theme so the account and
         // settings buttons render identically in both places.
         let footer_theme = Theme::of(cx).clone();
@@ -8437,9 +8617,19 @@ impl Shell {
             .flex_row()
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let key = &event.keystroke.key;
+                let modifiers = event.keystroke.modifiers;
                 if key == "escape" {
                     if !this.dismiss_settings_escape_surface(cx) {
                         this.close_settings(cx);
+                    }
+                    cx.stop_propagation();
+                } else if key == "f"
+                    && modifiers.secondary()
+                    && modifiers.number_of_modifiers() == 1
+                {
+                    // A dialog over the page keeps the keyboard.
+                    if !this.settings_escape_surface_open(cx) {
+                        this.focus_settings_search(window, cx);
                     }
                     cx.stop_propagation();
                 } else if key == "tab" {
@@ -8488,6 +8678,13 @@ impl Shell {
                             .child("Back"),
                         ),
                     )
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(Theme::SPACE_SM))
+                            .pt(px(Theme::SPACE_SM))
+                            .child(search_field),
+                    )
                     .child(div().flex_1().min_h_0().child(nav))
                     .child(div().p(px(Theme::SPACE_SM)).flex_none().child(footer)),
             )
@@ -8523,21 +8720,6 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let cloud_offered = self.state.read(cx).cloud_offered();
-        let section_icon = |item: SettingsSection| match item {
-            SettingsSection::Devices => icons::MONITOR,
-            SettingsSection::Cloud => icons::CLOUD,
-            SettingsSection::Billing => icons::WALLET,
-            SettingsSection::Harnesses => icons::WIDGET,
-            SettingsSection::Agents => icons::KEY_MINIMALISTIC,
-            SettingsSection::Appearance => icons::TUNING,
-            SettingsSection::Files => icons::FOLDER,
-            SettingsSection::Notifications => icons::BELL,
-            SettingsSection::Voice => icons::MICROPHONE,
-            SettingsSection::Shortcuts => icons::KEYBOARD,
-            SettingsSection::General => icons::SETTINGS,
-            SettingsSection::Appshots => icons::MONITOR,
-            SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
-        };
         settings::widgets::scroll_faded(
             "settings-nav-scroll",
             div()
@@ -8629,11 +8811,7 @@ impl Shell {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.open_settings(item, cx)
                                     }))
-                                    .child(
-                                        icon(section_icon(item))
-                                            .size(px(16.0))
-                                            .text_color(tab_text),
-                                    )
+                                    .child(icon(item.icon()).size(px(16.0)).text_color(tab_text))
                                     .child(SharedString::from(item.label()))
                                 }),
                         ),
@@ -10711,12 +10889,16 @@ impl Shell {
         // Settings is a toggle: while its page is up the button keeps the
         // hover wash + full-strength glyph, and a click returns to chat.
         let settings_open = matches!(self.route, Route::Settings(_));
-        let settings_tooltip: SharedString = match (settings_open, cfg!(target_os = "macos")) {
-            (false, true) => "Settings · ⌘,".into(),
-            (false, false) => "Settings · Ctrl+,".into(),
-            (true, true) => "Close settings · ⌘,".into(),
-            (true, false) => "Close settings · Ctrl+,".into(),
-        };
+        let settings_tooltip: SharedString = format!(
+            "{} · {}",
+            if settings_open {
+                "Close settings"
+            } else {
+                "Settings"
+            },
+            crate::settings::badge_combo("mod-,")
+        )
+        .into();
         let voice_trigger = self.render_voice_trigger(theme, cx);
         div()
             .w_full()
@@ -14385,7 +14567,8 @@ impl Render for Shell {
             // element at the window edges.
             .children(Self::render_linux_resize_borders(window));
         self.render_time = None;
-        root
+        // Wheel notches anywhere in the window glide (Appearance → Motion).
+        crate::smooth_scroll::smooth_scroll(root)
     }
 }
 
@@ -16488,12 +16671,14 @@ mod exit_regressions {
                     settings.reduce_motion = crate::motion::ReduceMotion::On;
                     settings.pause_animations_in_background = true;
                 });
+                settings::set_smooth_scrolling(false, cx);
                 // Any shell-owned change (sidebar width, panels) republishes
                 // the working copy; it must not revert the motion choices.
                 shell.schedule_save(cx);
                 let saved = settings::current(cx);
                 assert_eq!(saved.reduce_motion, crate::motion::ReduceMotion::On);
                 assert!(saved.pause_animations_in_background);
+                assert!(!saved.smooth_scrolling);
             })
             .unwrap();
     }
@@ -19053,6 +19238,10 @@ impl Shell {
     pub fn fixture_fork_chat(&mut self, cx: &mut Context<Self>) {
         self.create_side_chat(cx);
     }
+    pub fn fixture_open_browser(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_surfaces_open(true, cx);
+        self.add_browser_surface(Some(url), window, cx);
+    }
 }
 
 #[cfg(test)]
@@ -19345,6 +19534,105 @@ mod settings_modal_regressions {
             (Route::Chat, Some("newer".into()))
         );
         assert_eq!(press(&keymap.new_session), (Route::Chat, None));
+    }
+
+    /// An AZERTY Mac types ⌘& on the key AppKit reads as ⌘1, and ⌘⇧& — which
+    /// gpui reports as a literal ⌘1 — is no shortcut there. Bound in US keys
+    /// only, Jump to session 1 answered the second and not the first.
+    #[gpui::test]
+    fn azerty_jumps_from_the_key_appkit_reads_as_cmd_1(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let window = cx.add_window(|_, cx| {
+            let mut shell = test_shell(dir.path(), cx);
+            shell.settings.sidebar_organization = SidebarOrganization::InOneList;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = ["older", "newer"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, id)| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "title": id, "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+                state.selected_chat = Some("older".into());
+            });
+            shell
+        });
+        // `Shell::new` bound the keymap against the test platform, which has
+        // no layout table; localize it as an AZERTY Mac's `apply_keymap` does.
+        cx.run_until_parked();
+        cx.update(|cx| localize_key_bindings(cx, &settings::azerty_key_equivalents()));
+        let mut press = |combo: &str| {
+            cx.simulate_keystrokes(window.into(), &platform_combo(combo));
+            window
+                .read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
+                .unwrap()
+        };
+        assert_eq!(press("mod-1"), Some("older".into()));
+        assert_eq!(press("mod-&"), Some("newer".into()));
+    }
+
+    /// Localizing moves exactly the bindings whose key the layout relocates —
+    /// Zeron's and gpui-base's alike — and keeps the rest, in order.
+    #[gpui::test]
+    fn azerty_keymap_moves_only_relocated_keys(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let keymap = KeymapConfig::default();
+        cx.update(|cx| apply_keymap(cx, &keymap, ComposerSendBehavior::default()));
+        let azerty = settings::azerty_key_equivalents();
+        let sources = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.key_bindings()
+                    .borrow()
+                    .bindings()
+                    .map(|binding| {
+                        let keys = binding
+                            .keystrokes()
+                            .iter()
+                            .map(|keystroke| keystroke.inner().unparse())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        (binding.action().name(), keys)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = sources(cx);
+        cx.update(|cx| localize_key_bindings(cx, &azerty));
+        let after = sources(cx);
+        assert_eq!(before.len(), after.len());
+        for ((action, us), (localized_action, localized)) in before.iter().zip(&after) {
+            assert_eq!(action, localized_action, "binding order must hold");
+            let expected = us
+                .split(' ')
+                .map(|keystroke| settings::localize_combo(keystroke, &azerty))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(localized, &expected, "{action}");
+        }
+        let bound = |action: &str| {
+            after
+                .iter()
+                .filter(|(name, _)| *name == action)
+                .map(|(_, keys)| keys.as_str())
+                .collect::<Vec<_>>()
+        };
+        let primary = platform_combo("mod");
+        // Every jump slot shares the action name: slot 1 now sits on &, and
+        // none stays on the literal 1 that AZERTY types only with Shift.
+        let jumps = bound(JumpSession(0).name());
+        assert!(jumps.contains(&format!("{primary}-&").as_str()));
+        assert!(!jumps.contains(&format!("{primary}-1").as_str()));
+        assert!(bound(OpenModelPicker.name()).contains(&format!("{primary}-:").as_str()));
+        assert!(bound(crate::browser::Back.name()).contains(&format!("{primary}-^").as_str()));
+        assert!(bound(ToggleSidebar.name()).contains(&format!("{primary}-b").as_str()));
     }
 
     #[gpui::test]
