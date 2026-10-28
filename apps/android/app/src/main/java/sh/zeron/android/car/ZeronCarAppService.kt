@@ -218,8 +218,11 @@ class CarSession : Session() {
 
     /** Read an agent's latest reply aloud. */
     fun readAloud(chatId: String) {
+        // The reply may take a few seconds to load: show that something is happening.
+        toast("Reading aloud…")
         lifecycleScope.launch {
             val text = agents.latestReply(chatId)
+            Log.i(TAG, "read aloud: ${text.length} chars")
             say(if (text.isEmpty()) "${agentTitle(chatId)} hasn't replied yet." else Spoken.summary(text, 1_200))
         }
     }
@@ -245,7 +248,10 @@ class CarSession : Session() {
     /** Conversation mode is offered only where Codex voice runs (or a call is on). */
     val callAvailable: Boolean get() = model.voice.live || model.voice.available
 
-    private suspend fun say(text: String) = voice.speak(text)
+    /** Speak, or show it when the phone's text-to-speech can't. */
+    private suspend fun say(text: String) {
+        if (!voice.speak(text)) toast("Text-to-speech isn't working on this phone")
+    }
 
     private fun toast(text: String) = CarToast.makeText(carContext, text, CarToast.LENGTH_LONG).show()
 
