@@ -15,6 +15,7 @@ object Spoken {
     private val heading = Regex("^#{1,6}\\s+")
     private val bullet = Regex("^(\\s*)([-*+]|\\d+[.)])\\s+")
     private val quote = Regex("^>\\s?")
+    private val taskBox = Regex("^\\[[ xX]]\\s+")
     private val tableRule = Regex("^\\s*\\|?\\s*:?-{3,}")
     private val space = Regex("\\s+")
     private val sentenceEnd = Regex("(?<=[.!?])\\s+")
@@ -41,6 +42,8 @@ object Spoken {
             line = quote.replace(line, "")
             val isItem = bullet.containsMatchIn(line)
             line = bullet.replace(line, "")
+            // Task lists: "[x] Create the archive" reads as "Create the archive".
+            line = taskBox.replace(line, "")
             line = image.replace(line, "$1")
             line = link.replace(line, "$1")
             line = url.replace(line, "")
@@ -60,8 +63,11 @@ object Spoken {
     /**
      * The opening of [markdown] as speech, whole sentences only, at most
      * [maxChars] (one sentence is cut with an ellipsis when it alone is longer).
+     * A spoken report stops after its first paragraph unless that is only an
+     * introduction ("Here's what I found:"); with [wholeText] it goes on to
+     * [maxChars] regardless (screens, Read aloud).
      */
-    fun summary(markdown: String, maxChars: Int = 280): String {
+    fun summary(markdown: String, maxChars: Int = 280, wholeText: Boolean = false): String {
         val prose = clean(markdown)
         if (prose.isEmpty()) return ""
         val first = prose.substringBefore("\n\n")
@@ -71,8 +77,8 @@ object Spoken {
             val next = if (out.isEmpty()) s else "$out $s"
             if (next.length > maxChars) break
             out.clear().append(next)
-            // A whole first paragraph is a natural stopping point.
-            if (out.length >= first.length) break
+            // A whole first paragraph is a natural stopping point, unless it only introduces what follows.
+            if (!wholeText && out.length >= first.length && !introduces(first)) break
         }
         if (out.isEmpty()) {
             val cut = sentences.first().take(maxChars)
@@ -80,6 +86,9 @@ object Spoken {
         }
         return out.toString()
     }
+
+    /** "Here's what I found:" — a paragraph that only introduces what follows. */
+    private fun introduces(paragraph: String) = paragraph.trimEnd().endsWith(":")
 
     /**
      * The newest whole sentences of [markdown] as prose, at most [maxChars]

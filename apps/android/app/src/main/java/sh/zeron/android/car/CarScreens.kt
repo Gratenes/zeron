@@ -1,5 +1,13 @@
 package sh.zeron.android.car
 
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.text.SpannableString
+import android.text.SpannableStringBuilder
+import android.text.Spanned
 import androidx.car.app.CarContext
 import androidx.car.app.CarToast
 import androidx.car.app.Screen
@@ -7,6 +15,7 @@ import androidx.car.app.model.Action
 import androidx.car.app.model.ActionStrip
 import androidx.car.app.model.CarColor
 import androidx.car.app.model.CarIcon
+import androidx.car.app.model.ForegroundCarColorSpan
 import androidx.car.app.model.ItemList
 import androidx.car.app.model.ListTemplate
 import androidx.car.app.model.MessageTemplate
@@ -29,17 +38,45 @@ import uniffi.zeron_core.InputRequest
 private fun CarContext.icon(res: Int) = CarIcon.Builder(IconCompat.createWithResource(this, res)).build()
 
 /** One chat's row: its title, then its status or what it last said. */
-private fun agentRow(screen: Screen, session: CarSession, agent: CarAgent): Row {
-    val row = Row.Builder()
-        .setTitle(agent.title)
-        .addText(agent.detail)
-        .setOnClickListener { screen.screenManager.push(AgentScreen(screen.carContext, session, agent.id)) }
-    when (agent.state) {
-        AgentState.NeedsInput -> row.setImage(CarIcon.ALERT)
-        AgentState.Failed -> row.setImage(CarIcon.ERROR)
-        else -> Unit
+private fun agentRow(screen: Screen, session: CarSession, agent: CarAgent, showFolder: Boolean = true): Row {
+    // Waiting and failed chats stand out in color; the project's badge says where each one is.
+    val status = SpannableString(agent.detail).apply {
+        val color = when (agent.state) {
+            AgentState.NeedsInput -> CarColor.YELLOW
+            AgentState.Failed -> CarColor.RED
+            else -> null
+        }
+        if (color != null) setSpan(ForegroundCarColorSpan.create(color), 0, length, Spanned.SPAN_INCLUSIVE_EXCLUSIVE)
     }
-    return row.build()
+    val detail = if (showFolder) SpannableStringBuilder(agent.folder.name.substringBefore(" · ")).append(" · ").append(status) else status
+    return Row.Builder()
+        .setTitle(agent.title)
+        .addText(detail)
+        .setImage(FolderBadges.icon(screen.carContext, agent.folder))
+        .setOnClickListener { screen.screenManager.push(AgentScreen(screen.carContext, session, agent.id)) }
+        .build()
+}
+
+/** Round badges with a project's letters, one stable color per project. */
+private object FolderBadges {
+    private val palette = intArrayOf(0xFF5C6BC0.toInt(), 0xFF26A69A.toInt(), 0xFFEF6C00.toInt(), 0xFFAB47BC.toInt(), 0xFF42A5F5.toInt(), 0xFF66BB6A.toInt(), 0xFFEC407A.toInt(), 0xFF8D6E63.toInt())
+    private val cache = HashMap<Folder, CarIcon>()
+
+    fun icon(context: CarContext, folder: Folder): CarIcon = cache.getOrPut(folder) {
+        val size = 96
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val fill = if (folder.id.startsWith("home:")) 0xFF757575.toInt() else palette[Math.floorMod(folder.id.hashCode(), palette.size)]
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = fill })
+        val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.DEFAULT_BOLD
+            textSize = if (folder.code.length > 1) size * 0.40f else size * 0.50f
+        }
+        canvas.drawText(folder.code, size / 2f, size / 2f - (text.descent() + text.ascent()) / 2, text)
+        CarIcon.Builder(IconCompat.createWithBitmap(bitmap)).build()
+    }
 }
 
 /** Follows the car's chat list while the screen is up. */
@@ -139,6 +176,7 @@ class FoldersScreen(context: CarContext, private val session: CarSession) : Scre
                 Row.Builder()
                     .setTitle(folder.name)
                     .addText(summary)
+                    .setImage(FolderBadges.icon(carContext, folder))
                     .setBrowsable(true)
                     .setOnClickListener { screenManager.push(FolderScreen(carContext, session, folder)) }
                     .build(),
@@ -162,7 +200,7 @@ class FolderScreen(context: CarContext, private val session: CarSession, private
 
     override fun onGetTemplate(): Template {
         val list = ItemList.Builder().setNoItemsMessage("No chats in ${folder.name}.")
-        for (agent in agents.filter { it.folder == folder }) list.addItem(agentRow(this, session, agent))
+        for (agent in agents.filter { it.folder == folder }) list.addItem(agentRow(this, session, agent, showFolder = false))
         return ListTemplate.Builder()
             .setTitle(folder.name)
             .setHeaderAction(Action.BACK)
@@ -264,7 +302,7 @@ class AgentScreen(context: CarContext, private val session: CarSession, private 
                     pane.addRow(Row.Builder().setTitle("${i + 1} of ${asked.size} · " + Spoken.summary(q.question, 120)).build())
                 }
             } else {
-                val sentences = Spoken.summary(reply, 600).ifEmpty { "No reply yet." }
+                val sentences = Spoken.summary(reply, 600, wholeText = true).ifEmpty { "No reply yet." }
                 // Short rows: the host shows only a couple of lines of each.
                 for (chunk in chunks(sentences, 3)) pane.addRow(Row.Builder().setTitle(chunk).build())
             }

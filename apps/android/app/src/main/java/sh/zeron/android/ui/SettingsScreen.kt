@@ -188,6 +188,20 @@ fun SettingsScreen(
                 ) { Text("Archived sessions") }
             }
         }
+        section("Android Auto")
+        item {
+            val pausesMusic by model.carPausesMusic.collectAsState()
+            Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+                SegmentedListItem(
+                    onClick = { model.setCarPausesMusic(!pausesMusic) },
+                    shapes = segmentedShapes(0, 1),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(ZIcons.Speaker) },
+                    supportingContent = { Text("Louder: the voice plays at music volume instead of navigation-voice volume") },
+                    trailingContent = { Switch(pausesMusic, { model.setCarPausesMusic(it) }) },
+                ) { Text("Pause music while Zeron talks") }
+            }
+        }
         item {
             // Voice: once any registered host can run it (iOS More → Voice).
             if (sh.zeron.android.voice.rememberVoiceVisible(model.voice)) {

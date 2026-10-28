@@ -122,3 +122,29 @@ class LatestTest {
         assertEquals("…a fix now.", Spoken.latest("Writing a fix now.", 12))
     }
 }
+
+class ReportTextTest {
+    @Test
+    fun anIntroDoesNotEndTheSummary() {
+        val reply = "Here's what I found:\n\n- Three calls are overdue\n- Acme asked for a quote"
+        assertEquals("Here's what I found: Three calls are overdue. Acme asked for a quote.", Spoken.summary(reply))
+        // A real first paragraph still ends a spoken report…
+        val full = "Fixed the login redirect and added a test for it.\n\nAlso tidied the imports."
+        assertEquals("Fixed the login redirect and added a test for it.", Spoken.summary(full))
+        // …but screens and Read aloud take the rest too.
+        assertEquals("Fixed the login redirect and added a test for it. Also tidied the imports.", Spoken.summary(full, 600, wholeText = true))
+    }
+
+    @Test
+    fun taskBoxesAreDropped() {
+        assertEquals("Plan: Create the archive. Move old files.", Spoken.clean("Plan:\n- [x] Create the archive\n- [ ] Move old files"))
+    }
+
+    @Test
+    fun folderCodes() {
+        assertEquals("ZE", folderCode(Folder("project:1", "zeron · MacBook Pro")))
+        assertEquals("EP", folderCode(Folder("project:2", "embedez-platform")))
+        assertEquals("CS", folderCode(Folder("project:3", "CGI Salesforce")))
+        assertEquals("~", folderCode(Folder("home:dev", "No project · MacBook Pro")))
+    }
+}
