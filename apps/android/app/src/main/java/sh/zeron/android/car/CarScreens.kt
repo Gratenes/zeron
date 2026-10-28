@@ -81,11 +81,11 @@ class HomeScreen(context: CarContext, private val session: CarSession) : Screen(
                     .build(),
             )
         }
+        val agents = agents
         val builder = ListTemplate.Builder()
-            .setTitle("Zeron")
+            .setTitle(agents?.let(::glance)?.let { "Zeron · $it" } ?: "Zeron")
             .setHeaderAction(Action.APP_ICON)
             .setActionStrip(strip.build())
-        val agents = agents
         if (agents == null) return builder.setLoading(true).build()
         val list = ItemList.Builder().setNoItemsMessage("No chats yet. Tap Talk and say what to work on.")
         val folders = agents.map { it.folder }.distinct()
@@ -103,6 +103,18 @@ class HomeScreen(context: CarContext, private val session: CarSession) : Screen(
         for (agent in agents) list.addItem(agentRow(this, session, agent))
         return builder.setSingleList(list.build()).build()
     }
+}
+
+/** The header's at-a-glance count: "2 working · 1 waiting" (unseen finished work too), or null when all is quiet. */
+internal fun glance(agents: List<CarAgent>): String? {
+    val working = agents.count { it.state == AgentState.Working }
+    val waiting = agents.count { it.state == AgentState.NeedsInput }
+    val done = agents.count { it.state == AgentState.Done }
+    return listOfNotNull(
+        if (working > 0) "$working working" else null,
+        if (waiting > 0) "$waiting waiting" else null,
+        if (done > 0) "$done done" else null,
+    ).joinToString(" · ").ifEmpty { null }
 }
 
 /** Projects (and computers' homes), the most recently active first. */

@@ -59,6 +59,7 @@ data class Report(
     /** The car orchestrator answering a spoken command. */
     val orchestrator: Boolean,
     val question: InputRequest? = null,
+    val createdAtMs: Long = 0,
 )
 
 /**
@@ -188,7 +189,7 @@ class CarAgents(app: Application, private val model: AppModel) {
             }
             ReportKind.Failed -> "$title ran into an error."
         }.trim()
-        return Report(row.id, title, kind, text, spoken, orchestrator, question)
+        return Report(row.id, title, kind, text, spoken, orchestrator, question, row.createdAtMs)
     }
 
     // ── speaking to agents ──────────────────────────────────────────────────
