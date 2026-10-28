@@ -72,6 +72,8 @@ class CarVoice(context: Context) {
     private var tts: TextToSpeech? = null
     private var ttsReady: CompletableDeferred<Boolean>? = null
     private var speaking: CompletableDeferred<Unit>? = null
+    /** The engine reported an error for the current utterance. */
+    @Volatile private var failed = false
     private var recognizer: SpeechRecognizer? = null
     private var cancelListening: (() -> Unit)? = null
     private var modelRequested = false
@@ -100,7 +102,9 @@ class CarVoice(context: Context) {
             return null
         }
         engine.setAudioAttributes(attributes)
-        engine.language = Locale.getDefault()
+        // The phone's language when the engine has its voice, else the engine's default voice.
+        val language = engine.setLanguage(Locale.getDefault())
+        if (language < TextToSpeech.LANG_AVAILABLE) Log.w(TAG, "text-to-speech has no ${Locale.getDefault()} voice ($language)")
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = Unit
             override fun onDone(utteranceId: String?) {
@@ -109,6 +113,13 @@ class CarVoice(context: Context) {
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
+                failed = true
+                speaking?.complete(Unit)
+            }
+
+            override fun onError(utteranceId: String?, errorCode: Int) {
+                Log.w(TAG, "text-to-speech error $errorCode")
+                failed = true
                 speaking?.complete(Unit)
             }
 
@@ -119,18 +130,32 @@ class CarVoice(context: Context) {
         return engine
     }
 
-    /** Say [text] over ducked media; returns once it was said (or stopped). */
-    suspend fun speak(text: String) {
-        if (text.isBlank()) return
-        turn.withLock {
-            val engine = engine() ?: return
+    /**
+     * Say [text] over ducked media; returns once it was said (or stopped):
+     * true, or false when the phone's text-to-speech couldn't say it.
+     */
+    suspend fun speak(text: String): Boolean {
+        if (text.isBlank()) return true
+        return turn.withLock {
+            val engine = engine()
+            if (engine == null) {
+                Log.w(TAG, "text-to-speech unavailable")
+                return@withLock false
+            }
             val done = CompletableDeferred<Unit>()
+            failed = false
             speaking = done
             val focus = focus(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK) { engine.stop(); done.complete(Unit) }
+            if (focus == null) Log.w(TAG, "speaking without audio focus")
             try {
-                engine.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), UUID.randomUUID().toString())
+                // An engine that refuses the text never calls back: don't wait on it.
+                val queued = engine.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), UUID.randomUUID().toString())
+                if (queued != TextToSpeech.SUCCESS) {
+                    Log.w(TAG, "text-to-speech refused ${text.length} chars ($queued)")
+                    return@withLock false
+                }
                 // Long replies are cut by the caller; this only guards a stuck engine.
-                withTimeoutOrNull(60_000) { done.await() }
+                withTimeoutOrNull(60_000) { done.await() } != null && !failed
             } finally {
                 engine.stop()
                 speaking = null
