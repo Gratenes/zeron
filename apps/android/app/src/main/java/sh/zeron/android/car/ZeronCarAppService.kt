@@ -69,6 +69,7 @@ class CarSession : Session() {
 
     override fun onCreateScreen(intent: Intent): Screen {
         voice = CarVoice(carContext)
+        notifications = CarNotifications(carContext)
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onCreate(owner: LifecycleOwner) {
                 // Android Auto may start the process with the app never opened.
@@ -86,8 +87,37 @@ class CarSession : Session() {
             }
         })
         lifecycleScope.launch { agents.reports.collect { announce(it) } }
-        return HomeScreen(carContext, this)
+        val home = HomeScreen(carContext, this)
+        // Started from a report notification: that chat, over the list.
+        val (chatId, reply) = CarNotifications.target(intent) ?: return home
+        screens.push(home)
+        if (reply) lifecycleScope.launch { talk(chatId) }
+        return AgentScreen(carContext, this, chatId)
     }
+
+    /** A report notification tapped while Zeron was already running: back to that chat. */
+    override fun onNewIntent(intent: Intent) {
+        val (chatId, reply) = CarNotifications.target(intent) ?: return
+        screens.popToRoot()
+        screens.push(AgentScreen(carContext, this, chatId))
+        if (reply) talk(chatId)
+    }
+
+    private val screens get() = carContext.getCarService(androidx.car.app.ScreenManager::class.java)
+
+    private lateinit var notifications: CarNotifications
+
+    /** When this car connected: chats made since (by the orchestrator, say) are the driver's too. */
+    private val connectedAt = System.currentTimeMillis()
+
+    /** Chats the driver talked to from the car: their reports reach them even with Zeron off screen. */
+    private val followed = HashSet<String>()
+
+    private fun follows(report: Report) =
+        report.chatId in followed || report.orchestrator || report.createdAtMs >= connectedAt
+
+    /** Zeron is what the car screen shows (not Maps or the launcher). */
+    private val onScreen get() = lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
 
     internal fun agentTitle(chatId: String?): String =
         if (chatId == null) "Zeron" else model.row(chatId)?.title ?: "Agent"
@@ -97,7 +127,10 @@ class CarSession : Session() {
     /** Something in this chat changed (new text, a tool, the turn ending). */
     fun changes(chatId: String): Flow<String> = model.sessionEvents.filter { it == chatId }
 
-    fun markSeen(chatId: String) = agents.markSeen(chatId)
+    fun markSeen(chatId: String) {
+        agents.markSeen(chatId)
+        notifications.cancel(chatId)
+    }
 
     suspend fun openQuestion(chatId: String) = agents.openQuestion(chatId)
 
@@ -191,6 +224,7 @@ class CarSession : Session() {
     private suspend fun respond(chatId: String, flow: QuestionFlow, answers: List<UserInputAnswer>, spoken: Boolean) {
         if (spoken) say(flow.confirmation(answers))
         val outcome = agents.respond(chatId, flow.input.requestId, answers)
+        if (outcome is CarAgents.Outcome.Sent) followed += outcome.chatId
         Log.i(TAG, "answer $chatId: ${answers.size} answers → $outcome")
         reportOutcome(chatId, outcome)
     }
@@ -208,6 +242,7 @@ class CarSession : Session() {
     private suspend fun send(chatId: String?, text: String) {
         toast("“$text”")
         val outcome = if (chatId == null) agents.command(text) else agents.reply(chatId, text)
+        if (outcome is CarAgents.Outcome.Sent) followed += outcome.chatId
         Log.i(TAG, "talk to ${chatId ?: "orchestrator"}: ${text.length} chars → $outcome")
         reportOutcome(chatId, outcome)
     }
@@ -265,6 +300,12 @@ class CarSession : Session() {
     private suspend fun announce(report: Report) {
         // A realtime call speaks for itself.
         if (model.voice.live) return
+        if (!onScreen) {
+            // Off Zeron's screen: a notification to come back to (and no microphone opening over Maps).
+            if (follows(report)) notifications.post(report)
+            voice.speak(report.spoken)
+            return
+        }
         if (!report.orchestrator) alert(report)
         voice.speak(report.spoken)
         // Questions are answered right away; the microphone closes again if nothing is said.
