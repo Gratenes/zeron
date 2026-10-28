@@ -21,7 +21,9 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import sh.zeron.android.ZeronApplication
@@ -91,6 +93,9 @@ class CarSession : Session() {
         if (chatId == null) "Zeron" else model.row(chatId)?.title ?: "Agent"
 
     suspend fun latestReply(chatId: String): String = agents.latestReply(chatId)
+
+    /** Something in this chat changed (new text, a tool, the turn ending). */
+    fun changes(chatId: String): Flow<String> = model.sessionEvents.filter { it == chatId }
 
     fun markSeen(chatId: String) = agents.markSeen(chatId)
 

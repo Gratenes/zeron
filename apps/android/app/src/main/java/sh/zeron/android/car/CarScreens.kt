@@ -20,6 +20,8 @@ import androidx.core.graphics.drawable.IconCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import sh.zeron.android.R
 import uniffi.zeron_core.InputRequest
@@ -157,7 +159,11 @@ class FolderScreen(context: CarContext, private val session: CarSession, private
     }
 }
 
-/** One agent: what it said last, Reply, Read aloud and Stop. */
+/**
+ * One agent: what it said last, Reply, Read aloud and Stop. While it works,
+ * the screen stays live: how long it has run, and its latest message
+ * ("I'll look into this…"; thinking stays hidden).
+ */
 class AgentScreen(context: CarContext, private val session: CarSession, private val chatId: String) : Screen(context) {
     private var reply: String? = null
     private var question: InputRequest? = null
@@ -188,6 +194,27 @@ class AgentScreen(context: CarContext, private val session: CarSession, private 
                 }
             }
         }
+        // While it works: its newest message as it writes (at most every couple of seconds) …
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                session.changes(chatId).conflate().collect {
+                    if (agent?.state == AgentState.Working) {
+                        reply = session.latestReply(chatId)
+                        invalidate()
+                    }
+                    delay(PROGRESS_INTERVAL)
+                }
+            }
+        }
+        // … and the clock.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    delay(CLOCK_INTERVAL)
+                    if (agent?.state == AgentState.Working) invalidate()
+                }
+            }
+        }
     }
 
     override fun onGetTemplate(): Template {
@@ -197,6 +224,21 @@ class AgentScreen(context: CarContext, private val session: CarSession, private 
         val reply = reply
         if (reply == null) {
             pane.setLoading(true)
+        } else if (agent?.state == AgentState.Working) {
+            // Two rows throughout, so each update is a refresh of the same screen.
+            val since = agent.workingSinceMs
+            pane.addRow(Row.Builder().setTitle("Working" + if (since != null) " · " + elapsedLabel(since) else "").build())
+            pane.addRow(Row.Builder().setTitle(Spoken.latest(reply, 200).ifEmpty { "Starting…" }).build())
+            pane.addAction(
+                Action.Builder()
+                    .setTitle("Reply")
+                    .setIcon(carContext.icon(R.drawable.ic_car_mic))
+                    .setFlags(Action.FLAG_PRIMARY)
+                    .setBackgroundColor(CarColor.BLUE)
+                    .setOnClickListener { session.talk(chatId) }
+                    .build(),
+            )
+            pane.addAction(Action.Builder().setTitle("Read aloud").setOnClickListener { session.readAloud(chatId) }.build())
         } else {
             pane.addRow(Row.Builder().setTitle(agent?.status ?: "").build())
             val asked = question?.questions.orEmpty()
@@ -245,6 +287,11 @@ class AgentScreen(context: CarContext, private val session: CarSession, private 
             )
         }
         return builder.build()
+    }
+
+    private companion object {
+        const val PROGRESS_INTERVAL = 2_000L
+        const val CLOCK_INTERVAL = 15_000L
     }
 
     /** [text] split at sentence ends into at most [count] similar-sized rows. */

@@ -81,6 +81,25 @@ object Spoken {
         return out.toString()
     }
 
+    /**
+     * The newest whole sentences of [markdown] as prose, at most [maxChars]
+     * (a running agent's latest progress, while its message is still growing).
+     */
+    fun latest(markdown: String, maxChars: Int = 200): String {
+        val prose = clean(markdown).replace("\n\n", " ")
+        if (prose.length <= maxChars) return prose
+        val sentences = sentenceEnd.split(prose)
+        val out = ArrayDeque<String>()
+        var length = 0
+        for (s in sentences.asReversed()) {
+            if (out.isNotEmpty() && length + s.length + 1 > maxChars) break
+            out.addFirst(s)
+            length += s.length + 1
+        }
+        val text = out.joinToString(" ")
+        return if (text.length <= maxChars) "…$text" else "…" + text.takeLast(maxChars).substringAfter(' ')
+    }
+
     private val ordinals = listOf(
         listOf("first", "one", "1", "option one", "option 1"),
         listOf("second", "two", "2", "option two", "option 2"),

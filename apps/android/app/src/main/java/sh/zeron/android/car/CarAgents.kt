@@ -40,6 +40,8 @@ data class CarAgent(
     /** Its folder: the project, or its computer's home for a chat without one. */
     val folder: Folder,
     val lastActivityMs: Long,
+    /** When the running turn started (Working or waiting for an answer). */
+    val workingSinceMs: Long?,
 )
 
 /** A project (or a computer's home) the car groups chats under, like the drawer's project picker. */
@@ -127,7 +129,7 @@ class CarAgents(app: Application, private val model: AppModel) {
         val ago = if (row.timeLabel == "now") "just now" else "${row.timeLabel} ago"
         val status = when (state) {
             AgentState.NeedsInput -> "Needs your answer"
-            AgentState.Working -> "Working" + (row.workingSinceMs?.let { " · " + elapsed(it) } ?: "")
+            AgentState.Working -> "Working" + (row.workingSinceMs?.let { " · " + elapsedLabel(it) } ?: "")
             AgentState.Failed -> "Failed · $ago"
             AgentState.Done, AgentState.Idle -> "Done · $ago"
         }
@@ -140,13 +142,9 @@ class CarAgents(app: Application, private val model: AppModel) {
             Folder("project:${project.id}", project.name + (row.deviceName?.takeIf { project.name in clashing }?.let { " · $it" } ?: ""))
         }
         else Folder("home:${row.deviceId}", "No project" + (row.deviceName?.let { " · $it" } ?: ""))
-        return CarAgent(row.id, row.title, state, status, detail, row.unseen, folder, row.lastActivityMs)
+        return CarAgent(row.id, row.title, state, status, detail, row.unseen, folder, row.lastActivityMs, row.workingSinceMs)
     }
 
-    private fun elapsed(sinceMs: Long): String {
-        val minutes = (System.currentTimeMillis() - sinceMs) / 60_000
-        return if (minutes < 1) "now" else if (minutes < 60) "${minutes}m" else "${minutes / 60}h ${minutes % 60}m"
-    }
 
     // ── reading a chat ──────────────────────────────────────────────────────
 
