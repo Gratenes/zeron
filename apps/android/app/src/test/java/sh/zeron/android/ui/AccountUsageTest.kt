@@ -42,6 +42,16 @@ private fun login(
     provider = provider,
     usage = usage,
     usageError = null,
+    rotationReported = false,
+    rotationEnabled = false,
+    rotationSupported = false,
+    rotationActive = false,
+    rotationNote = null,
+    inRotation = false,
+    rotationNext = false,
+    liveChats = 0u,
+    rotationSkipped = null,
+    rotationSkippedUntilMs = null,
 )
 
 /** A client whose account calls answer from the test (UniFFI's fake-object constructor). */

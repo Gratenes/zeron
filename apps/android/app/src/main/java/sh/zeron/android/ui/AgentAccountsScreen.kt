@@ -250,7 +250,7 @@ fun AgentAccountsScreen(model: AppModel, target: AccountsTarget, signIn: Boolean
         rotating = true
         scope.launch {
             try {
-                deviceAccounts = c.deviceSetAccountRotation(t.deviceId, t.harness, on)
+                keep(c.deviceSetAccountRotation(t.deviceId, t.harness, on))
                 view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
             } catch (e: CancellationException) {
                 throw e
