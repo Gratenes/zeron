@@ -210,6 +210,10 @@ pub mod methods {
     pub const UPSERT_PROJECT_ACTION: &str = "UpsertProjectAction";
     pub const DELETE_PROJECT_ACTION: &str = "DeleteProjectAction";
     pub const RUN_PROJECT_ACTION: &str = "RunProjectAction";
+    // A chat's background processes (`Session::background_tasks`) live in
+    // its host's runtime: `{chatId, taskId}`, relay-forwardable.
+    pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
+    pub const READ_BACKGROUND_TASK_OUTPUT: &str = "ReadBackgroundTaskOutput";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";
@@ -239,6 +243,10 @@ pub mod methods {
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
     pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
+    /// `{harness, enabled}`: turn account rotation (new chats spread across
+    /// the harness's saved accounts) on or off for this device. Answers the
+    /// device's `AgentAccountsSnapshot`.
+    pub const SET_AGENT_ACCOUNT_ROTATION: &str = "SetAgentAccountRotation";
     pub const START_AGENT_LOGIN: &str = "StartAgentLogin";
     /// `{loginId, requesterDeviceId, path}`: replay a sign-in's browser
     /// callback the requesting device caught on its own loopback (a phone

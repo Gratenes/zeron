@@ -478,12 +478,56 @@ impl SessionsEngine {
             .is_some_and(is_active)
     }
 
+    /// The chats with a turn in flight ([`Self::turn_in_flight`]), read
+    /// through a weak handle: the account service holding it never keeps a
+    /// retired engine alive (an empty set once it is gone).
+    pub fn running_chats_probe(
+        &self,
+    ) -> impl Fn() -> std::collections::HashSet<String> + Send + Sync + 'static {
+        let inner = Arc::downgrade(&self.inner);
+        move || {
+            inner
+                .upgrade()
+                .map(|inner| {
+                    lock(&inner.statuses)
+                        .iter()
+                        .filter(|(_, session)| is_active(session))
+                        .map(|(chat_id, _)| chat_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+
     /// Whether the chat's live runtime reports background work (subagents,
     /// background shells) still running — parked or not.
     pub fn holds_background_work(&self, chat_id: &str) -> bool {
         lock(&self.inner.runs)
             .get(chat_id)
             .is_some_and(|h| h.turn.background_live())
+    }
+
+    /// Ask the chat's runtime to stop one of its background processes. False
+    /// when no live runtime lists it (it ended meanwhile).
+    pub fn stop_background_task(&self, chat_id: &str, task_id: &str) -> bool {
+        lock(&self.inner.runs)
+            .get(chat_id)
+            .is_some_and(|h| h.turn.stop_background_process(task_id))
+    }
+
+    /// The tail of one background process's output; `None` when no live
+    /// runtime lists it.
+    pub async fn background_task_output(
+        &self,
+        chat_id: &str,
+        task_id: &str,
+    ) -> Option<zeron_proto::BackgroundTaskOutput> {
+        let turn = lock(&self.inner.runs).get(chat_id)?.turn.clone();
+        let task_id = task_id.to_owned();
+        tokio::task::spawn_blocking(move || turn.background_output(&task_id))
+            .await
+            .ok()
+            .flatten()
     }
 
     /// How many chats have a turn in flight (the Cloud runner heartbeat's
@@ -938,7 +982,11 @@ impl SessionsEngine {
                 .note_provider_switch(chat_id, harness_id, &handle);
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
-        let credential = self.inner.registry.run_credential(harness_id).await;
+        let credential = self
+            .inner
+            .registry
+            .run_credential(harness_id, Some(chat_id))
+            .await;
         let binary = {
             let harness = harness.clone();
             tokio::task::spawn_blocking(move || binary_identity(harness.as_ref()))
@@ -1163,7 +1211,12 @@ impl SessionsEngine {
         if self.turn_in_flight(chat_id) || self.holds_background_work(chat_id) {
             return false;
         }
-        match self.inner.registry.run_credential(harness_id).await {
+        match self
+            .inner
+            .registry
+            .run_credential(harness_id, Some(chat_id))
+            .await
+        {
             Some(now) if Some(now.as_str()) != started_with => {
                 tracing::info!(chat = %chat_id, harness = ?harness_id,
                     "credential changed; replacing the parked session");
@@ -2060,6 +2113,33 @@ impl Inner {
         }
     }
 
+    /// Publish the background processes `chat_id`'s runtime runs, mirrored
+    /// like [`Self::set_running_subagents`]. The live heartbeat keeps the row
+    /// fresh while they run; an engine that stops beating took them with it.
+    fn set_background_tasks(&self, chat_id: &str, tasks: Vec<zeron_proto::BackgroundTask>) {
+        let session = {
+            let mut statuses = lock(&self.statuses);
+            let Some(entry) = statuses.get_mut(chat_id) else {
+                return;
+            };
+            if entry.background_tasks == tasks {
+                return;
+            }
+            entry.background_tasks = tasks;
+            entry.updated_at = Utc::now();
+            let session = entry.clone();
+            let mut list: Vec<Session> = statuses.values().cloned().collect();
+            list.sort_by(|a, b| a.chat_id.cmp(&b.chat_id));
+            self.sessions_tx.send_replace(list);
+            session
+        };
+        if self.activity_tx.get().is_none()
+            && let Some(ws) = self.workspace()
+        {
+            ws.record_session(&session);
+        }
+    }
+
     fn has_pending_steers(&self, chat_id: &str, run_id: &str) -> bool {
         lock(&self.runs)
             .get(chat_id)
@@ -2092,6 +2172,7 @@ impl Inner {
                     last_turn_outcome: None,
                     terminal_activity: None,
                     running_subagents: 0,
+                    background_tasks: Vec::new(),
                 });
             // `started_at` is the elapsed-timer base and must only ever mean
             // "this turn". Entering Working from a settled state always
@@ -3635,7 +3716,7 @@ async fn drive_run(
                 // `RunRequest::env` is serde-skipped, never persisted.
                 match inner
                     .registry
-                    .prepare_run(harness_id, &mut wire_request)
+                    .prepare_run(harness_id, Some(&chat_id), &mut wire_request)
                     .await
                 {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
@@ -3857,6 +3938,8 @@ async fn drive_run(
     // so the gate still catches real crashes. touch_session throttles at 10s.
     let mut live_heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
     live_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The runtime's background processes, published on the session row.
+    let mut background_processes = turn.watch_background_processes();
     // PERSISTENT SESSION (zeron runsBySession): a completed turn on a
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
@@ -3993,6 +4076,11 @@ async fn drive_run(
                 },
                 _ = live_heartbeat.tick() => {
                     inner.touch_session(&chat_id);
+                    continue;
+                }
+                Ok(()) = background_processes.changed() => {
+                    let tasks = background_processes.borrow_and_update().clone();
+                    inner.set_background_tasks(&chat_id, tasks);
                     continue;
                 }
                 // A hang-up restarts the idle window, however long the call.
@@ -4953,6 +5041,8 @@ async fn drive_run(
         }
     }
     inner.set_running_subagents(&chat_id, 0);
+    // The runtime is gone, and its background processes with it.
+    inner.set_background_tasks(&chat_id, Vec::new());
 
     // Claim any accepted-but-unconfirmed steers BEFORE the handle goes away:
     // a routed send that raced this exit either finds its entry gone (we own
@@ -5127,6 +5217,30 @@ mod tests {
     }
 
     use zeron_proto::{HarnessId, RunRequest, SandboxLevel};
+
+    #[tokio::test]
+    async fn the_running_chats_probe_sees_turns_in_flight_and_never_holds_the_engine() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let probe = sessions.running_chats_probe();
+        sessions
+            .inner
+            .set_status("working", SessionStatus::Working, true);
+        sessions
+            .inner
+            .set_status("asking", SessionStatus::AwaitingInput, true);
+        sessions.inner.set_status("idle", SessionStatus::Idle, true);
+        let mut running: Vec<String> = probe().into_iter().collect();
+        running.sort();
+        assert_eq!(running, ["asking", "working"]);
+        drop(sessions);
+        assert!(probe().is_empty());
+    }
 
     #[tokio::test]
     async fn generated_image_failure_is_sanitized_even_inside_subagents() {

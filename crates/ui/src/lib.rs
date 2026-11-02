@@ -12,6 +12,7 @@
 //! - [`shell`] — sidebar + main panel + right-pane scaffold + gate;
 //! - [`loaders`] — zeron pulse loader, gradient spinner, boot splash.
 
+mod account_rotation;
 mod account_usage;
 pub mod app_menus;
 pub mod app_update;
@@ -76,6 +77,7 @@ pub mod state;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
 pub mod terminal;
+mod background_tray;
 mod todo_panel;
 pub(crate) mod tool_images;
 pub mod theme;

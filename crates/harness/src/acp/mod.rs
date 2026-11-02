@@ -3,7 +3,8 @@
 //!
 //! KEPT ONLY for agents built ground-up on ACP: Grok ([`AcpHarness::grok`],
 //! `grok agent stdio`), Devin ([`AcpHarness::devin`], `devin acp`) and Hermes
-//! ([`AcpHarness::hermes`], `hermes acp`) and Antigravity
+//! ([`AcpHarness::hermes`], `hermes acp`), fx ([`AcpHarness::fx`],
+//! `fx acp`) and Antigravity
 //! ([`AcpHarness::antigravity`], Google's `agy_acp_server`, installed from its
 //! pinned release archive). Pi, Claude, Codex and Cursor use native drivers
 //! ([`crate::ClaudeHarness`], [`crate::CodexHarness`], [`crate::CursorHarness`])
@@ -381,6 +382,43 @@ fn devin_spec() -> AcpAgentSpec {
         // asks before every command and edit is not.
         access_modes: FULL_ACCESS_ONLY,
     }
+}
+
+fn fx_spec() -> AcpAgentSpec {
+    AcpAgentSpec {
+        id: HarnessId::Fx,
+        display_name: "fx",
+        executable: "fx",
+        env_override: "FX_EXECUTABLE",
+        args: &["acp"],
+        npm_package: None,
+        archive: None,
+        extra_paths: fx_install_paths,
+        cli_executable: "fx",
+        cli_extra_paths: fx_install_paths,
+        install_hint: "Install with `curl -fsSL https://fx.sh/setup.sh | bash`, then configure a provider with `fx`. Set FX_EXECUTABLE for a custom installation.",
+        models: Vec::new,
+        steering_mode: SteeringMode::TurnBoundary,
+        reasoning_levels: &[],
+        prompt_transform: identity_transform,
+        effort_values: default_effort_values,
+        ladder_extras: &[],
+        prompt_complete_extension: false,
+        prompt_stall: None,
+        stall_hint: "Check fx's provider configuration.",
+        effort_in_model_id: false,
+        auth_method: None,
+        skill_dirs: Vec::new,
+        hidden_commands: &[],
+        drops_unstarted_cancelled_prompt: false,
+        access_modes: &[AccessMode::Supervised, AccessMode::FullAccess],
+    }
+}
+
+fn fx_install_paths() -> Vec<PathBuf> {
+    crate::executable::home_dir()
+        .map(|home| vec![home.join(".local/bin/fx")])
+        .unwrap_or_default()
 }
 
 fn hermes_install_paths() -> Vec<PathBuf> {
@@ -1342,6 +1380,11 @@ impl AcpHarness {
         Self::with_spec(grok_spec())
     }
 
+    /// fx native ACP server.
+    pub fn fx() -> Self {
+        Self::with_spec(fx_spec())
+    }
+
     /// Hermes Agent (`hermes acp`) — Nous Research's native ACP server.
     pub fn hermes() -> Self {
         Self::with_spec(hermes_spec())
@@ -1806,6 +1849,9 @@ impl AcpHarness {
             dir.apply(&mut cmd);
         }
         crate::apply_run_env(&mut cmd, run_env);
+        if let Some((key, value)) = account_proxy_env(self.spec.id, run_env) {
+            cmd.env(key, value);
+        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2088,7 +2134,10 @@ fn models_from_session(session_response: &Value, catalog: &[Model]) -> Vec<Model
 
     let model_select: Vec<&Value> = config_options
         .iter()
-        .find(|o| o.get("category").and_then(Value::as_str) == Some("model"))
+        .find(|o| {
+            o.get("category").and_then(Value::as_str) == Some("model")
+                && o.get("id").and_then(Value::as_str) != Some("provider")
+        })
         .and_then(|o| o.get("options").and_then(Value::as_array))
         .map(|opts| opts.iter().collect())
         .unwrap_or_default();
@@ -2404,6 +2453,9 @@ impl Harness for AcpHarness {
         &self,
         cwd: &std::path::Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        if self.id() == HarnessId::Fx {
+            return crate::skills::discover(self.id(), cwd).await.map(Some);
+        }
         let (mut skills, commands) = tokio::try_join!(
             crate::skills::discover(self.id(), cwd),
             self.workspace_commands
@@ -3789,9 +3841,10 @@ fn effort_variant_id(
         .get("configOptions")
         .and_then(Value::as_array)
         .and_then(|options| {
-            options
-                .iter()
-                .find(|o| o.get("category").and_then(Value::as_str) == Some("model"))
+            options.iter().find(|o| {
+                o.get("category").and_then(Value::as_str) == Some("model")
+                    && o.get("id").and_then(Value::as_str) != Some("provider")
+            })
         })
         .and_then(|o| o.get("options").and_then(Value::as_array))
         .map(|choices| {
@@ -4045,6 +4098,43 @@ async fn select_session_config(
                 .insert("speed".into(), Value::String("fast".into()));
         }
     }
+    if rules.harness == HarnessId::Fx {
+        // fx can report ask while retaining a saved automatic policy. Always
+        // write it before prompting, including after session/load.
+        control_request(
+            client,
+            incoming,
+            rules.access,
+            "session/set_config_option",
+            json!({"sessionId": session_id, "configId": "mode", "value": "ask"}),
+        )
+        .await?;
+        if let Some(model) = request.model.as_deref() {
+            control_request(
+                client,
+                incoming,
+                rules.access,
+                "session/set_config_option",
+                json!({"sessionId": session_id, "configId": "model", "value": model}),
+            )
+            .await?;
+        }
+        // Both provider and model carry category=model. Only the model
+        // selector should participate in model discovery/selection.
+        if let Some(options) = session_response
+            .get_mut("configOptions")
+            .and_then(Value::as_array_mut)
+        {
+            options.retain(|option| option.get("id").and_then(Value::as_str) != Some("mode"));
+            for option in options {
+                if option.get("category").and_then(Value::as_str) == Some("model")
+                    && option.get("id").and_then(Value::as_str) != Some("model")
+                {
+                    option["category"] = json!("other");
+                }
+            }
+        }
+    }
     // ACP has had two model-selection surfaces. Newer config-option agents
     // use category=model below; Grok Build currently advertises only the
     // first-class `models` state and requires `session/set_model`. Other
@@ -4143,8 +4233,10 @@ async fn select_session_config(
                     }
                 }
                 Err(e) => {
-                    if matches!(rules.harness, HarnessId::Antigravity | HarnessId::Devin)
-                        && requested_model.is_some()
+                    if matches!(
+                        rules.harness,
+                        HarnessId::Antigravity | HarnessId::Devin | HarnessId::Fx
+                    ) && requested_model.is_some()
                         && is_model_config_option(&options_snapshot, &config_id)
                     {
                         return Err(HarnessError::Protocol(format!(
@@ -5647,9 +5739,44 @@ async fn run_session(session: Session) {
     child.shutdown(kill_grace).await;
 }
 
+/// The CLI setting that points a rotating chat's agent at its account-proxy
+/// route ([`crate::account_proxy`]). Grok sends every API call, its
+/// auxiliary ones included, to `GROK_CLI_CHAT_PROXY_BASE_URL`; its OIDC
+/// refresh stays on its own login.
+fn account_proxy_env(
+    harness: HarnessId,
+    run_env: &std::collections::BTreeMap<String, String>,
+) -> Option<(&'static str, String)> {
+    match harness {
+        HarnessId::Grok => crate::account_proxy::grok_base_url(run_env)
+            .map(|base| ("GROK_CLI_CHAT_PROXY_BASE_URL", base)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_proxied_grok_chat_gets_its_route_as_the_chat_proxy_base() {
+        let env = std::collections::BTreeMap::from([(
+            crate::account_proxy::GROK.to_string(),
+            "http://127.0.0.1:41000/r/abc".to_string(),
+        )]);
+        assert_eq!(
+            account_proxy_env(HarnessId::Grok, &env),
+            Some((
+                "GROK_CLI_CHAT_PROXY_BASE_URL",
+                "http://127.0.0.1:41000/r/abc/v1".to_string()
+            ))
+        );
+        assert_eq!(account_proxy_env(HarnessId::Devin, &env), None);
+        assert_eq!(
+            account_proxy_env(HarnessId::Grok, &Default::default()),
+            None
+        );
+    }
 
     #[test]
     fn unix_browser_suppression_falls_back_to_zerons_noop_mode() {

@@ -125,6 +125,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::Devin => "devin",
         HarnessId::Grok => "grok",
         HarnessId::Hermes => "hermes",
+        HarnessId::Fx => "fx",
         HarnessId::Pi => "pi",
         HarnessId::Opencode => "opencode",
         HarnessId::Antigravity => "Antigravity",
@@ -1169,6 +1170,14 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
+                if installed && harness == HarnessId::Fx {
+                    meta.push(
+                        div()
+                            .text_color(theme.text_muted)
+                            .child("Configure your model provider with fx login or fx setup.")
+                            .into_any_element(),
+                    );
+                }
                 // Not installed: the hint above says all there is.
                 if let Some(status) = update.filter(|_| installed) {
                     let (text, color) = harness_update_label(status, &theme);
@@ -1819,6 +1828,7 @@ mod tests {
                         zeron_proto::AgentAccountsSnapshot {
                             accounts: vec![account],
                             warnings: Vec::new(),
+                            rotation: Vec::new(),
                         },
                     );
             })
