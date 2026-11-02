@@ -394,6 +394,7 @@ fn decode_snapshot(reply: serde_json::Value) -> Result<AgentAccountsSnapshot> {
     Ok(AgentAccountsSnapshot {
         accounts: rows(reply.get("accounts")),
         warnings: rows(reply.get("warnings")),
+        rotation: rows(reply.get("rotation")),
     })
 }
 
