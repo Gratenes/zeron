@@ -383,14 +383,11 @@ impl AgentAccounts {
     }
 }
 
-/// The agent accounts zeron keeps, as runs see them: Muse runs are pointed
-/// at the selected kept account (see module docs), and every agent whose
-/// login zeron switches reports which login a run would use now, so a
-/// session parked on a replaced login is replaced before its next turn.
-pub struct AccountRunEnvironment(pub AgentAccounts);
+/// Points Muse runs at the selected kept account (see module docs).
+pub struct MuseRunEnvironment(pub AgentAccounts);
 
 #[async_trait::async_trait]
-impl crate::registry::RunEnvironment for AccountRunEnvironment {
+impl crate::registry::RunEnvironment for MuseRunEnvironment {
     async fn prepare(
         &self,
         harness: HarnessId,
@@ -408,23 +405,14 @@ impl crate::registry::RunEnvironment for AccountRunEnvironment {
     }
 
     async fn credential(&self, harness: HarnessId) -> Option<String> {
-        match harness {
-            HarnessId::Muse => self
-                .0
-                .muse_run_env()
-                .ok()
-                .map(|(_, fingerprint)| fingerprint),
-            // The CLI reads the login zeron swapped into its store; which one
-            // is live only changes when zeron swaps it (or the user signs in
-            // outside zeron — which no running session was told about either).
-            harness
-                if zeron_proto::providers::signs_in(harness)
-                    && zeron_proto::providers::switches_accounts(harness) =>
-            {
-                Some(format!("login-change:{}", self.0.login_change(harness)))
-            }
-            _ => None,
-        }
+        (harness == HarnessId::Muse)
+            .then(|| {
+                self.0
+                    .muse_run_env()
+                    .ok()
+                    .map(|(_, fingerprint)| fingerprint)
+            })
+            .flatten()
     }
 
     async fn record_usage(
@@ -614,7 +602,7 @@ for line in sys.stdin:
         std::fs::write(config.muse_config_root.join("muse/auth.json"), "own login").unwrap();
         let accounts = AgentAccounts::new(config.clone());
         accounts.override_cli(HarnessId::Muse, &cli);
-        let env = AccountRunEnvironment(accounts.clone());
+        let env = MuseRunEnvironment(accounts.clone());
 
         // None kept yet: Muse runs on its own login.
         assert_eq!(
