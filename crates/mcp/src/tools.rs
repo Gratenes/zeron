@@ -22,6 +22,10 @@ use zeron_proto::{
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TurnOutcome, Zeron, session_for, short};
 
+mod plugins;
+pub use plugins::ListedTool;
+pub(crate) use plugins::is_plugin_tool_name;
+
 /// Default and ceiling for the blocking waits.
 const MAX_BATCH: usize = 32;
 /// Cloud runs these agents (Codex and Claude Code): a Cloud chat's harness.
@@ -42,6 +46,9 @@ pub struct Tools {
     // Remember successful sends on this MCP connection so wait_for_turn after
     // wait:false also waits for a newly created chat with no session row yet.
     pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
+    /// Which plugin tools the client was last shown ([`Self::list_all`],
+    /// [`Self::watch_plugin_tools`]).
+    plugins: plugins::PluginState,
 }
 
 fn chat_key_schema(extra: Value) -> Value {
@@ -129,8 +136,8 @@ fn catalog() -> Vec<ToolDef> {
                     "harness": { "type": "string", "description": "Harness id (see list_harnesses with the chosen device). Prefers a connected provider, claude-code first." },
                     "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
-                    "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write" },
-                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to, and can't exceed, the access of the chat you are speaking from." },
+                    "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "description": "Never wider than the sandbox of the chat you are speaking from: more is lowered to it (accessCapped)." },
+                    "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to the access of the chat you are speaking from, and never exceeds it: more is lowered to it (the reply's accessCapped says so)." },
                     "plan": { "type": "boolean", "default": false, "description": "Plan mode: explore and propose a plan before changing anything. Only for harnesses with supportsPlan." },
                     "title": { "type": "string", "description": "Sidebar title. Otherwise the engine titles it from the first exchange." },
                     "branch": { "type": "string", "description": "Branch label to record on the chat." },
@@ -261,6 +268,7 @@ fn catalog() -> Vec<ToolDef> {
             "required": ["path"]
         }),
     });
+    tools.extend(plugins::catalog());
     tools
 }
 
@@ -569,11 +577,6 @@ struct PendingTurn {
     start: TurnStart,
 }
 
-/// Least to most trusting.
-fn access_rank(mode: AccessMode) -> usize {
-    AccessMode::ALL.iter().position(|m| *m == mode).unwrap_or(0)
-}
-
 #[derive(Deserialize, Default)]
 struct CreateChatArgs {
     kind: Option<ChatKind>,
@@ -733,6 +736,7 @@ impl Tools {
         Self {
             zeron,
             pending_turns: Default::default(),
+            plugins: Default::default(),
         }
     }
 
@@ -776,6 +780,26 @@ impl Tools {
             "archive_chat" => self.archive_chat(parse(args)?).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
+            plugins::CREATE_PLUGIN => return self.create_plugin(args).await,
+            plugins::LIST_PLUGINS => return self.list_plugins().await,
+            plugins::DESCRIBE_ELEMENTS => return self.describe_elements().await,
+            plugins::PLUGIN_STATUS => return self.plugin_status(args).await,
+            plugins::INSTALL_PLUGIN => return self.install_plugin(args).await,
+            plugins::UPDATE_PLUGIN => return self.update_plugin(args).await,
+            plugins::LIST_TEMPLATES
+            | plugins::CREATE_TEMPLATE
+            | plugins::USE_TEMPLATE
+            | plugins::TEMPLATE_STATUS
+            | plugins::DELETE_TEMPLATE
+            | plugins::DESCRIBE_APP => {
+                return self.templates(name, args).await;
+            }
+            plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
+                return self.template_packages(name, args).await;
+            }
+            plugin if is_plugin_tool_name(plugin) => {
+                return self.call_plugin_tool(plugin, args).await;
+            }
             other => return Err(format!("unknown tool: {other}")),
         };
         result.map_err(|e| format!("{e:#}"))
@@ -1009,9 +1033,11 @@ impl Tools {
 
         // Delegation is one level deep: a chat that has a parent never
         // creates chats, and a new chat's parent is a top-level chat.
-        // The calling chat's access mode caps the new one's: a supervised
-        // agent must not hand its work to one that asks nothing.
+        // The calling chat's sandbox and access cap the new one's: a
+        // supervised or sandboxed agent must not hand its work to one that
+        // asks nothing (the engine caps it again: rpc/agent_gate.rs).
         let mut ceiling = AccessMode::FullAccess;
+        let mut sandbox_ceiling = SandboxLevel::DangerFullAccess;
         if let Some(origin) = self.zeron.origin().chat_id.as_deref()
             && !zeron_proto::voice::is_orchestrator_chat(origin)
         {
@@ -1020,7 +1046,10 @@ impl Tools {
                 origin.parent_chat_id.is_none(),
                 "A delegated chat can't create chats of its own. Do the work in this chat, or ask the chat that started you."
             );
-            ceiling = origin.config.map(|c| c.access).unwrap_or_default();
+            if let Some(config) = origin.config {
+                ceiling = config.access;
+                sandbox_ceiling = config.sandbox;
+            }
         }
         if let Some(parent) = parent_chat_id.as_deref() {
             let parent = self.zeron.resolve_chat(parent).await?;
@@ -1073,19 +1102,28 @@ impl Tools {
             Some(raw) => Some(parse_enum("reasoning level", raw).map_err(anyhow::Error::msg)?),
             None => None,
         };
-        let sandbox: SandboxLevel = match args.sandbox.as_deref() {
+        let asked_sandbox: SandboxLevel = match args.sandbox.as_deref() {
             Some(raw) => parse_enum("sandbox", raw).map_err(anyhow::Error::msg)?,
             None => SandboxLevel::WorkspaceWrite,
         };
-        let access: AccessMode = match args.access.as_deref() {
+        let asked_access: AccessMode = match args.access.as_deref() {
             Some(raw) => parse_enum("access", raw).map_err(anyhow::Error::msg)?,
             None => ceiling,
         };
-        anyhow::ensure!(
-            access_rank(access) <= access_rank(ceiling),
-            "This chat runs {}, so the chats it creates can't have more access than that.",
-            ceiling.label()
-        );
+        // Never more than this chat's own: lowered, and the reply says so.
+        let (sandbox, access, capped) =
+            zeron_proto::cap_access((asked_sandbox, asked_access), (sandbox_ceiling, ceiling));
+        let capped = capped.then(|| {
+            format!(
+                "This chat runs {} in a {} sandbox, so the new chat runs with no more: {}, {} sandbox (asked {}, {}).",
+                ceiling.label(),
+                sandbox_ceiling.label(),
+                access.label(),
+                sandbox.label(),
+                asked_access.label(),
+                asked_sandbox.label(),
+            )
+        });
         // A Cloud machine's catalog is checked when it runs, not here; an
         // engine predating modes lists none and runs with full access.
         if let Some(info) = harnesses.iter().find(|h| h.id == harness).filter(|_| !args.cloud) {
@@ -1201,6 +1239,9 @@ impl Tools {
             "title": args.title,
             "parentChatId": parent_chat_id,
         });
+        if let Some(capped) = &capped {
+            result["accessCapped"] = json!(capped);
+        }
         if signed_out {
             result["warning"] = json!(format!(
                 "{harness:?} does not look signed in on this device, so its first turn may fail. Pick a connected harness (list_harnesses) if it does."
@@ -1564,6 +1605,7 @@ impl Tools {
                     attachments: Vec::new(),
                     worktree: None,
                     env: Default::default(),
+                    extra_mcp: Vec::new(),
                 };
                 self.zeron
                     .queue_command(
@@ -2425,21 +2467,24 @@ mod tests {
             .call("create_chat", json!({"access": "supervised", "plan": true}))
             .await
             .unwrap();
-        let err = tools
-            .call("create_chat", json!({"access": "full-access"}))
+        // Asking for more is lowered to its own, silently, and said in the
+        // reply: no full-access child, no wider sandbox.
+        let capped = tools
+            .call("create_chat", json!({"access": "full-access", "sandbox": "danger-full-access"}))
             .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("can't have more access"), "{err}");
+            .unwrap();
+        assert!(capped["accessCapped"].as_str().unwrap().contains("no more"), "{capped}");
         let writes = world.writes.lock().unwrap();
         let created: Vec<&Value> = writes
             .iter()
             .filter(|(_, w)| w["op"] == "createChat")
             .map(|(_, w)| w)
             .collect();
-        assert_eq!(created.len(), 2);
+        assert_eq!(created.len(), 3);
         assert_eq!(created[0]["config"]["access"], "supervised", "inherited");
         assert_eq!(created[1]["config"]["plan"], true);
+        assert_eq!(created[2]["config"]["access"], "supervised", "capped");
+        assert_eq!(created[2]["config"]["sandbox"], "workspace-write", "capped");
         drop(writes);
         // A top-level chat with no mode of its own runs with full access,
         // which its chats inherit (the field is omitted on the wire).

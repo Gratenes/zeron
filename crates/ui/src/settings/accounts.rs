@@ -1361,7 +1361,6 @@ impl AccountsPage {
                     account
                         .usage_windows
                         .iter()
-                        .take(2)
                         .map(|window| render_usage_meter(window, theme)),
                 )
                 .into_any_element()
@@ -1573,7 +1572,7 @@ impl AccountsPage {
         let description = account_rotation::caption(harness, rotation.as_ref(), availability)
             .unwrap_or_else(|| account_rotation::DESCRIPTION.to_string());
         let row = div()
-            .id(("account-rotation", harness as usize))
+            .id(SharedString::from(format!("account-rotation-{}", harness.as_str())))
             .debug_selector(move || format!("account-rotation-{harness:?}"))
             .min_h(px(52.0))
             .py(px(10.0))
@@ -2721,6 +2720,7 @@ mod tests {
             switchable: true,
             saved_at: None,
             provider: provider.map(str::to_string),
+            codex_reset_credits: None,
         };
         let mut snapshot = AgentAccountsSnapshot {
             accounts: vec![
@@ -2770,6 +2770,7 @@ mod tests {
 
     fn poll(status: AgentLoginStatus, message: Option<&str>, url: Option<&str>) -> AgentLoginPoll {
         AgentLoginPoll {
+            code: None,
             status,
             message: message.map(str::to_string),
             url: url.map(str::to_string),
@@ -2874,6 +2875,7 @@ mod tests {
             switchable,
             saved_at: None,
             provider: Some("openai".into()),
+            codex_reset_credits: None,
         };
         window
             .update(cx, |page, _, cx| {
@@ -2949,6 +2951,7 @@ mod tests {
                         switchable: true,
                         saved_at: None,
                         provider: None,
+                        codex_reset_credits: None,
                     }],
                     warnings: vec![],
                     rotation: Vec::new(),
@@ -3028,6 +3031,7 @@ mod tests {
             plan_label: None,
             active,
             usage_windows: vec![],
+            codex_reset_credits: None,
             usage_fetched_at: None,
             usage_error: None,
             display_name: None,
@@ -3152,6 +3156,7 @@ mod tests {
             plan_label: None,
             active,
             usage_windows: vec![],
+            codex_reset_credits: None,
             usage_fetched_at: None,
             usage_error: None,
             display_name: None,

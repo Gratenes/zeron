@@ -550,10 +550,15 @@ impl AgentAccounts {
             .entry(usage_key(harness, &slot.account_key))
             .or_default();
         let plan_label = entry.usage.as_ref().and_then(|u| u.plan_label.clone());
+        let codex_reset_credits = entry
+            .usage
+            .as_ref()
+            .and_then(|u| u.codex_reset_credits.clone());
         entry.record(
             Ok(UsageSnapshot {
                 windows,
                 plan_label,
+                codex_reset_credits,
             }),
             credentials_fingerprint(&slot.credentials),
             now_ms(),

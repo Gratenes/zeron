@@ -442,6 +442,7 @@ fn demo_accounts() -> AgentAccountsSnapshot {
         plan_label: Some(plan.into()),
         active: false,
         usage_windows: usage(id),
+        codex_reset_credits: None,
         usage_fetched_at: None,
         usage_error: None,
         display_name: None,

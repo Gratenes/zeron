@@ -252,6 +252,7 @@ fn exhaust(accounts: &AgentAccounts, slot: &Slot) {
                     resets_at: Some(chrono::Utc::now() + chrono::Duration::hours(2)),
                 }],
                 plan_label: None,
+                codex_reset_credits: None,
             }),
             fetched_at: Some(now_ms()),
             ..Default::default()
