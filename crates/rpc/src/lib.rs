@@ -258,6 +258,10 @@ pub mod methods {
     // its host's runtime: `{chatId, taskId}`, relay-forwardable.
     pub const STOP_BACKGROUND_TASK: &str = "StopBackgroundTask";
     pub const READ_BACKGROUND_TASK_OUTPUT: &str = "ReadBackgroundTaskOutput";
+    /// `{chatId, toolId, offset}` → `ToolOutputChunk`: one command's whole
+    /// output, from the run journal of the device that ran it, redacted;
+    /// relay-forwardable (target the chat's host).
+    pub const READ_TOOL_OUTPUT: &str = "ReadToolOutput";
     // Terminals (ControlRpc, relay-forwardable; SubscribeTerminal streams).
     pub const OPEN_TERMINAL: &str = "OpenTerminal";
     pub const SUBSCRIBE_TERMINAL: &str = "SubscribeTerminal";
@@ -540,6 +544,29 @@ pub mod methods {
     /// map}`: each screen's named elements (`#id`, `.class`) from its source;
     /// `DescribeElements` is the live window's.
     pub const DESCRIBE_APP: &str = "DescribeApp";
+    /// Themes (the window's colours, apart from its template; all data,
+    /// this device's, in the data dir: `zeron_theme::catalog`): `{}` →
+    /// `{themes: [{id, name, source, editable, variants: {light?, dark?},
+    /// in_use, template?, problem?}], wearing: {light, dark}, chosen, guide}`.
+    pub const LIST_THEMES: &str = "ListThemes";
+    /// `{id}` → `{id, name, source, editable, light?, dark?, adjusted, note?}`:
+    /// a theme's palettes, in the shape `CreateTheme` takes.
+    pub const GET_THEME: &str = "GetTheme";
+    /// `{name, light?, dark?}` (palettes) or `{name?, vscode}` (a VS Code
+    /// colour theme's JSON) → `{id, name, variants, adjusted}`: a theme of
+    /// yours.
+    pub const CREATE_THEME: &str = "CreateTheme";
+    /// `{id, name?, light?, dark?}` (a palette, or null to take that scheme
+    /// away) → `{id, name, variants, adjusted}`: yours only.
+    pub const UPDATE_THEME: &str = "UpdateTheme";
+    /// `{id}` → `{deleted}`: yours only; a scheme it was worn for goes back.
+    pub const DELETE_THEME: &str = "DeleteTheme";
+    /// `{id, slot?: "light" | "dark" | "both"}` → `{theme, name, worn_for,
+    /// chosen}`: what the window wears.
+    pub const USE_THEME: &str = "UseTheme";
+    /// `{}` → stream (the app) of `{changed: true}`, after each change the
+    /// theme methods make, for the window to read the files again.
+    pub const WATCH_THEMES: &str = "WatchThemes";
     /// `{}` → `{elements: [{selector, place, about, provides, present}],
     /// everywhere, how}`: where plugins can place their nodes, as the main
     /// window running now has it (it writes the map as its template
@@ -620,6 +647,14 @@ pub fn local_only(method: &str) -> bool {
             | methods::UPDATE_TEMPLATE
             | methods::DESCRIBE_APP
             | methods::DESCRIBE_ELEMENTS
+            // Themes: this device's library and choice, never another's.
+            | methods::LIST_THEMES
+            | methods::GET_THEME
+            | methods::CREATE_THEME
+            | methods::UPDATE_THEME
+            | methods::DELETE_THEME
+            | methods::USE_THEME
+            | methods::WATCH_THEMES
             | methods::SET_BUILTIN_PLUGINS
             | methods::POST_NOTIFICATION
             | methods::EXPORT_PLUGIN
@@ -650,7 +685,8 @@ pub fn peer_refused(method: &str, params: &serde_json::Value) -> bool {
 /// `Review*`), signing (`SignPlugin`, `PluginSigningKey`), updating
 /// (`UpdatePlugin`, `UpdateTemplate`, the engine's and harnesses'),
 /// credentials (`AccessToken`, sign-in, `StepUp`, `DeleteAccount`),
-/// terminals, files, vault and agent logins.
+/// terminals, files, vault and agent logins, and a command's whole output
+/// (`ReadToolOutput`: an agent reads a chat as its doc keeps it).
 pub fn agent_allowed(method: &str) -> bool {
     matches!(
         method,
@@ -694,6 +730,15 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::DELETE_TEMPLATE
             | methods::EXPORT_TEMPLATE
             | methods::IMPORT_TEMPLATE
+            // Themes: data only (no consent: a theme can't run anything),
+            // read, made, changed, deleted (yours only) and worn. Not the
+            // window's watch.
+            | methods::LIST_THEMES
+            | methods::GET_THEME
+            | methods::CREATE_THEME
+            | methods::UPDATE_THEME
+            | methods::DELETE_THEME
+            | methods::USE_THEME
     )
 }
 
@@ -705,6 +750,11 @@ pub mod capability_errors {
     pub const PULL_REQUESTS_TIMEOUT: &str = "pull_requests.timeout";
     pub const PULL_REQUESTS_DECODE: &str = "pull_requests.decode";
     pub const PULL_REQUESTS_COMMAND_FAILED: &str = "pull_requests.command_failed";
+    /// `ReadToolOutput`: the host's journal doesn't hold that command (an
+    /// old chat, or one whose journal is gone).
+    pub const TOOL_OUTPUT_UNAVAILABLE: &str = "tool_output.unavailable";
+    /// `ReadToolOutput`: the command has no result yet.
+    pub const TOOL_OUTPUT_NOT_FINISHED: &str = "tool_output.not_finished";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -908,6 +958,13 @@ mod tests {
             methods::CHECK_TEMPLATE_UPDATES,
             methods::UPDATE_TEMPLATE,
             methods::DESCRIBE_APP,
+            methods::LIST_THEMES,
+            methods::GET_THEME,
+            methods::CREATE_THEME,
+            methods::UPDATE_THEME,
+            methods::DELETE_THEME,
+            methods::USE_THEME,
+            methods::WATCH_THEMES,
         ] {
             assert!(local_only(method), "{method}");
         }
@@ -1274,6 +1331,9 @@ mod tests {
             methods::WRITE_TERMINAL,
             methods::WRITE_WORKSPACE_FILE,
             methods::EXPORT_PLUGIN,
+            // The window's own watch of the theme files.
+            methods::WATCH_THEMES,
+            methods::READ_TOOL_OUTPUT,
         ] {
             assert!(!agent_allowed(method), "{method}");
             match agent.call(method, serde_json::json!({})).await {
@@ -1283,6 +1343,12 @@ mod tests {
         }
         let asked = agent.call(methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
+        // The theme tools' methods, exactly: data only.
+        for method in [methods::LIST_THEMES, methods::GET_THEME, methods::CREATE_THEME, methods::UPDATE_THEME, methods::DELETE_THEME, methods::USE_THEME] {
+            assert!(agent_allowed(method), "{method}");
+            let asked = agent.call(method, serde_json::json!({})).await.unwrap();
+            assert!(asked.as_str().unwrap().starts_with("Agent"), "{method}: {asked}");
+        }
 
         let app = connect_ws(&url, Some(&tokens.full)).await.unwrap();
         for method in [methods::DECIDE_PLUGIN, methods::ACCESS_TOKEN] {
