@@ -197,9 +197,19 @@ impl Config {
         let data_dir = var("ZERON_ZGX_ENGINE_DATA")
             .map(|dir| expand(&dir, home))
             .unwrap_or_else(|| home.join(STAGING_DATA));
-        if port == zeron_cli::DEFAULT_IPC_PORT {
-            return Err(format!("port {} is the production engine's", zeron_cli::DEFAULT_IPC_PORT));
+        // `ZERON_ZGX_ALLOW_DEFAULT_PORT=1` lets a development build use an
+        // engine already on the default port, for a dev desktop build whose
+        // engine (separate data dir, its own edge) listens there. It never
+        // starts one there, nor stops it to follow its session: the engine
+        // is the desktop app's.
+        let allow_default = var("ZERON_ZGX_ALLOW_DEFAULT_PORT").as_deref() == Some("1");
+        if port == zeron_cli::DEFAULT_IPC_PORT && !allow_default {
+            return Err(format!(
+                "port {} is the production engine's (ZERON_ZGX_ALLOW_DEFAULT_PORT=1 to use one already there)",
+                zeron_cli::DEFAULT_IPC_PORT
+            ));
         }
+        let borrowed = port == zeron_cli::DEFAULT_IPC_PORT;
         if let Some(dir) = PRODUCTION_DATA.iter().find(|dir| same_dir(&data_dir, &home.join(dir))) {
             return Err(format!("~/{dir} is the production engine's"));
         }
@@ -213,12 +223,18 @@ impl Config {
             data_dir,
             bin,
             home: var("ZERON_ZGX_ENGINE_HOME").map(|dir| expand(&dir, home)),
-            spawn: var("ZERON_ZGX_ENGINE_SPAWN").as_deref() != Some("0"),
+            spawn: !borrowed && var("ZERON_ZGX_ENGINE_SPAWN").as_deref() != Some("0"),
             edge: edge.into(),
             client: client.into(),
             callback_port,
             managed: false,
         })
+    }
+
+    /// Whether this app may stop the engine to start it again: only one it
+    /// could start itself.
+    pub fn may_restart(&self) -> bool {
+        self.managed || self.spawn
     }
 
     pub fn describe(&self) -> String {
@@ -402,6 +418,11 @@ mod tests {
         let home = Path::new("/Users/someone");
         let edge = "https://staging.zeron.sh";
         assert!(config_of(&[("ZERON_ZGX_ENGINE_PORT", "27654")], home, None, edge).is_err());
+        // Allowed explicitly: used as it is, never started or stopped there.
+        let borrowed = config_of(&[("ZERON_ZGX_ENGINE_PORT", "27654"), ("ZERON_ZGX_ALLOW_DEFAULT_PORT", "1")], home, None, edge).unwrap();
+        assert_eq!(borrowed.port, 27654);
+        assert!(borrowed.startable().is_none() && !borrowed.may_restart());
+        assert!(config_of(&[("ZERON_ZGX_ENGINE_PORT", "27654"), ("ZERON_ZGX_ALLOW_DEFAULT_PORT", "1"), ("ZERON_ZGX_ENGINE_DATA", "~/.zeron")], home, None, edge).is_err());
         assert!(config_of(&[("ZERON_ZGX_ENGINE_DATA", "~/.zeron")], home, None, edge).is_err());
         assert!(config_of(&[("ZERON_ZGX_ENGINE_DATA", "~/.comet-native")], home, None, edge).is_err());
         let staging = config_of(&[], home, None, edge).unwrap();

@@ -189,6 +189,10 @@ impl Engine {
         if self.restarting.get() || !manager::needs_restart(scope.as_deref(), self.signed_in.get()) {
             return;
         }
+        // (Not an engine this app can't start again: the desktop app's.)
+        if !self.config.as_ref().is_ok_and(|c| c.may_restart()) {
+            return;
+        }
         let Some(rpc) = self.rpc.borrow().clone() else {
             return;
         };
