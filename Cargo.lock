@@ -13615,7 +13615,7 @@ dependencies = [
 
 [[package]]
 name = "zeron-account-proxy"
-version = "0.2.136"
+version = "0.2.137"
 dependencies = [
  "async-trait",
  "bytes",
