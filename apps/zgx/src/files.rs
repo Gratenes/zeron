@@ -445,14 +445,6 @@ impl PictureRead {
     }
 }
 
-/// Whether `path` is absolute on the device it names a file of, whichever
-/// that is: `/x`, or Windows' `C:\x` / `C:/x` (a chat on a Windows device
-/// sends its pictures as such). The engine there says whether it may be read.
-fn host_absolute(path: &str) -> bool {
-    let b = path.as_bytes();
-    path.starts_with('/') || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\'))
-}
-
 /// `bytes` kept as a file named by their hash (one already there is the
 /// same picture), with the extension its media type says.
 fn keep_image(hash: &str, mime: &str, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
