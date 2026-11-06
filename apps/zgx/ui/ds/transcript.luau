@@ -128,6 +128,12 @@ export type Props = {
 	-- arrives: this says where they go instead of the next control's, which
 	-- may be another chat's.)
 	on_jump: (() -> ())?,
+	-- The way back's pill: its width while it shows, nil once it goes (the
+	-- composer's own pill moves aside for it).
+	on_jump_width: ((w: number?) -> ())?,
+	-- The composer's own pill beside it: its width while it shows. The two
+	-- are then a centred pair, the way back on the left.
+	beside: (() -> number?)?,
 	-- Kept outside the view (shared state), it brings a view made again
 	-- back where it was: the message at the view's top, and how far above
 	-- the top it started, written as the view goes; nil at the end.
@@ -166,6 +172,8 @@ export type Props = {
 	-- A chat as it's listed now: its title and agent's mark. Nil for one that
 	-- isn't listed, which a message from it can't open.
 	chat_of: ((id: string) -> { title: string, mark: Mark.Name? }?)?,
+	-- What pressing `Message from Chat` does: opens that chat beside this one.
+	open_sender: ((chat: string, title: string) -> ())?,
 	-- Those links' context menus where they aren't the web's (ds/markdown's
 	-- `link_menu`).
 	link_menu: ((target: string) -> { Markdown.LinkEntry }?)?,
@@ -184,7 +192,8 @@ export type TranscriptFind = {
 }
 -- The words being written: the whole reply's (`text`), and, with blocks,
 -- the text block they grow (`part`) and its words alone (`part_text`).
-export type Draft = { id: string, text: string, part: string?, part_text: string? }
+-- (`thought`, `thought_text`: the thought the reply is at, and its words so far.)
+export type Draft = { id: string, text: string, part: string?, part_text: string?, thought: string?, thought_text: string? }
 -- A block of a reply: a text, or a group of tools (its line, and whether
 -- it is open while the reply is written).
 -- In a compact transcript, a reply's work is one group ("work") holding
@@ -219,8 +228,9 @@ local WORD, ACTION, CLEAR, MARGIN, FOOT = 26, 32, 6, 8, 46
 -- How often a shown action looks whether the selection is still there.
 local WATCH = 200
 
--- The room left under the conversation's last row.
-local TAIL = 12
+-- The room left under the conversation's last row, over what floats at its
+-- foot: Zeron's (transcript.rs, the fade band and 8).
+local TAIL = 32
 -- Zeron's gaps over a message (transcript.rs `top_gap_for`): a turn's, and
 -- a prompt's under the switch seam over it.
 local TURN_GAP = 16
@@ -371,7 +381,8 @@ end
 
 -- A message another chat sent: `Message from [mark] Chat`, muted, on the right
 -- over its bubble (Zeron's `render_agent_sender`). The chat's title as it is
--- now, and a click opens it; one that isn't listed reads as it did when sent.
+-- now, and a click opens it in the panel; one that isn't listed reads as it
+-- did when sent.
 local function sender_line(m: Message, props: Props): Node
 	local from = m.sender :: { chat: string, title: string }
 	local function now(): { title: string, mark: Mark.Name? }?
@@ -423,7 +434,10 @@ local function sender_line(m: Message, props: Props): Node
 			line.hover = { color = "$text.primary" }
 			line.active = { color = "$text.primary" }
 			line.on_click = function()
-				if props.open_link then
+				if props.open_sender then
+					local live = now()
+					props.open_sender(from.chat, if live then live.title else from.title)
+				elseif props.open_link then
 					props.open_link(`zeron-chat:{from.chat}`)
 				end
 			end
@@ -545,6 +559,23 @@ type View = {
 	find: ((key: string) -> any)?,
 }
 
+-- A reply's thought being written, for its row (ds/activity's `thought`): the
+-- draft's words while it's the one the reply is at.
+local function thought_of(m: Message, now: () -> Message, draft: State<Draft>?): Activity.Writing
+	return {
+		words = function(id: string): string?
+			if not (draft and now().streaming) then
+				return nil
+			end
+			local d = draft:get()
+			return if d.id == m.id and d.thought == id then d.thought_text else nil
+		end,
+		seeded = function(): boolean
+			return ui.now() - opened_at < 300
+		end,
+	}
+end
+
 local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, draft: State<Draft>?, view: View?): Node
 	local shown = ui.computed(list)
 	return ui.each(shown, function(b: Block, _i: number, brow: State<Block>): Node
@@ -552,6 +583,7 @@ local function blocks_of(list: () -> { Block }, m: Message, now: () -> Message, 
 			return Activity {
 				key = `{m.id}:{b.id}`,
 				open_subagent = if view then view.open_subagent else nil,
+				thought = thought_of(m, now, draft),
 				tools = function()
 					return brow:get().tools or {}
 				end,
@@ -707,6 +739,7 @@ local function reply(
 			Activity {
 				key = m.id,
 				open_subagent = if view then view.open_subagent else nil,
+				thought = thought_of(m, now, draft),
 				tools = function()
 					return now().tools or {}
 				end,
@@ -1031,6 +1064,14 @@ local function Transcript(props: Props): Node
 		end)
 	end
 	local away = ui.state(`transcript_away{kept}`, false)
+	-- The way back's width, as last laid out; said while it shows.
+	local jump_w: number? = nil
+	ui.effect(function()
+		local shown = away:get()
+		if props.on_jump_width then
+			props.on_jump_width(if shown then jump_w else nil)
+		end
+	end)
 	-- Each mounted row, by id: what a place in the window is part of.
 	local rows: { [string]: { outer: Ref, inner: Ref, index: State<number>, m: Message } } = {}
 	-- A find's current match in a message that isn't laid out (the list
@@ -1044,7 +1085,7 @@ local function Transcript(props: Props): Node
 			if not c then
 				return
 			end
-			local m = messages:peek()[c.row]
+			local m = messages:at(c.row)
 			local row = if m then rows[m.id] else nil
 			if row and row.outer:peek() then
 				return
@@ -1665,7 +1706,7 @@ local function Transcript(props: Props): Node
 			key = "id",
 			row = row,
 			row_text = function(i: number): string
-				local m = messages:peek()[i]
+				local m = messages:at(i)
 				return if m then m.text else ""
 			end,
 			offset = offset,
@@ -1855,6 +1896,12 @@ local function Transcript(props: Props): Node
 			pb = ui.raw(6, "Zeron's: the pill floats six above the composer"),
 			justify = "center",
 			pointer_events = "none",
+			-- (The composer's pill beside it: half its width and the gap between
+			-- them to the left, the two centred together.)
+			x = motion.spring(ui.computed(function(): number
+				local other = if props.beside then props.beside() else nil
+				return if other and other > 0 then -(other + 8) / 2 else 0
+			end), { stiffness = 380, damping = 30 }),
 			ui.presence(function()
 				return if away:get() then "away" else nil
 			end, function()
@@ -1877,6 +1924,12 @@ local function Transcript(props: Props): Node
 				pill.shadow = "$shadow.md"
 				local pill_ref = ui.ref()
 				pill.ref = pill_ref
+				pill.on_resize = function(size: { w: number, h: number })
+					jump_w = size.w
+					if props.on_jump_width and away:peek() then
+						props.on_jump_width(size.w)
+					end
+				end
 				pill.on_click = function()
 					-- (It leaves as the view arrives: the keys go where it's
 					-- told, not on to the next control.)

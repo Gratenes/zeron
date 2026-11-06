@@ -3083,6 +3083,14 @@ use crate::{Signal, send_signal, shutdown_child};
 mod tests {
     use super::*;
 
+    /// Codex takes a steer mid-command in its own turn, so a steer must not
+    /// interrupt: a backgrounded command's call stays open for the rest of
+    /// its turn, and the stop would abort a turn that was only writing.
+    #[test]
+    fn a_steer_stays_in_the_turn() {
+        assert!(!CodexHarness::new().steer_stops_tool());
+    }
+
     #[test]
     fn a_proxied_chat_points_codex_at_its_route() {
         let mut params = serde_json::Map::new();
