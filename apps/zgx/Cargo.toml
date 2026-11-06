@@ -171,7 +171,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
-zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "88ff58c08b6318eb2e05bb2a22128fefdfca8db9", features = ["webview2"] }
+zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "24633113c6ea1a276b9522b2c664cc6d9f7752cb", features = ["webview2"] }
 
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.
