@@ -1020,6 +1020,7 @@ local function Composer(): Node
 			on_mention = completions.on_mention,
 			mention_enabled = completions.enabled,
 			mention_empty = completions.empty,
+			mention_failed = completions.failed,
 		}
 	end
 
