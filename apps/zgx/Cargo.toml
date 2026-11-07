@@ -174,10 +174,14 @@ windows-sys = { version = "0.61", features = [
   "Win32_Storage_FileSystem",
   "Win32_System_Registry",
   "Win32_System_Threading",
+  "Win32_UI_Accessibility",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
 zgx-desktop = { git = "https://github.com/zeronsh/zgx", rev = "ce91055fba63352fa126a44a5714749d94f2380e", features = ["webview2"] }
+# Background videos (src/video_wallpaper.rs): Media Foundation; the
+# window minimized (Win32_UI_Accessibility above).
+windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
 
 # zgx's own patches (its root Cargo.toml): a git dependency does not bring
 # them, so every consumer repeats them.
