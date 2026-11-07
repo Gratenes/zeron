@@ -57,12 +57,6 @@ end
 local ok, shared = pcall(ui.shared, "system.reduced_transparency", false)
 local system_solid: State<boolean>? = if ok then shared :: any else nil
 
--- Whether a popup's glass can blur what's under it (the host's word,
--- src/transparency.rs: not on Windows, where zgx's popup windows have no
--- system backdrop). Unknown, it can.
-local ok_blur, popups_blur = pcall(ui.shared, "system.popups_blur", true)
-local menus_blur: State<boolean>? = if ok_blur then popups_blur :: any else nil
-
 -- Whether glass shows what's behind it: read where a surface picks its
 -- tint and blur, in a binding (it follows the setting and the system).
 function M.see_through(): boolean
@@ -70,11 +64,10 @@ function M.see_through(): boolean
 end
 
 -- The same for the menus' glass (ds/glass `menu`: menus, popovers, tooltips,
--- hover cards, toasts), which stands in popups of its own: solid, too,
--- where a popup can't blur (translucent with nothing blurred, what's behind
--- shows through sharp).
+-- hover cards, toasts), which stands in popups of their own. Popups blur
+-- now (#1218), so they follow the window's choice.
 function M.menus_see_through(): boolean
-	return M.see_through() and not (menus_blur ~= nil and menus_blur:get() == false)
+	return M.see_through()
 end
 
 -- A fill that follows `see_through()`: `tint` frosted, `solid` opaque (`bg =

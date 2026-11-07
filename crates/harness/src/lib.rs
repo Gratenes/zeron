@@ -152,6 +152,51 @@ impl TurnControl {
     pub fn background_output(&self, id: &str) -> Option<zeron_proto::BackgroundTaskOutput> {
         self.processes.output(id)
     }
+
+    /// Driver: this runtime wakes its agent on its own when background work
+    /// ends (a wake turn), so what the agent waits on can be shown as a wait
+    /// rather than a finish. Drivers that can't say so leave it off.
+    pub fn set_wakes_on_background(&self, wakes: bool) {
+        self.processes.set_wakes(wakes);
+    }
+
+    /// Driver: the runtime's background agents now, its whole set: each
+    /// reports back, so each is waited on.
+    pub fn set_background_agents(&self, agents: Vec<zeron_proto::WaitingOn>) {
+        self.processes.set_agents(agents);
+    }
+
+    /// Driver: the runtime started a turn nobody sent (a background task
+    /// ended and woke the agent).
+    pub fn note_wake(&self) {
+        self.processes.note_wake();
+    }
+
+    /// Host: resolves once per [`Self::note_wake`].
+    pub async fn woke(&self) {
+        self.processes.woke().await;
+    }
+
+    /// Host: the agent says it waits on these background processes (or, with
+    /// `waiting` false, no longer).
+    pub fn mark_awaited(
+        &self,
+        ids: &[String],
+        waiting: bool,
+    ) -> Result<background::MarkOutcome, background::MarkRefused> {
+        self.processes.mark(ids, waiting)
+    }
+
+    /// Host: the person's Stop waiting: the processes the agent marked are no
+    /// longer waited on.
+    pub fn clear_awaited(&self) {
+        self.processes.clear_marks();
+    }
+
+    /// Host: what the agent waits on now, as it changes.
+    pub fn watch_waiting(&self) -> tokio::sync::watch::Receiver<Vec<zeron_proto::WaitingOn>> {
+        self.processes.watch_waiting()
+    }
 }
 
 /// Run-config values compared as their wire meaning, not their JSON type:
@@ -245,6 +290,14 @@ pub trait Harness: Send + Sync {
     /// Unlike deterministic_turn_end, this need not cover autonomous activity.
     fn authoritative_prompt_end(&self) -> bool {
         self.deterministic_turn_end()
+    }
+    /// Whether the runtime brings its agent back on its own when background
+    /// work ends (a new turn, unprompted), so a turn that ends on that work
+    /// isn't the agent's last: the driver declares it as the run goes
+    /// ([`TurnControl::set_wakes_on_background`]), and the host offers the
+    /// agent Zeron's `wait_on_background` only where this is true.
+    fn wakes_on_background(&self) -> bool {
+        false
     }
     /// Whether this driver honors [`TurnControl::stop_turn`]: it ends only
     /// the in-flight turn (`Done { Interrupted }`) and the runtime stays up
@@ -365,7 +418,7 @@ pub(crate) mod adapter_install;
 pub mod approval;
 pub mod archive_install;
 mod background;
-pub use background::OutputSource;
+pub use background::{MarkOutcome, MarkRefused, OutputSource};
 mod catalog;
 mod catalog_failure;
 pub(crate) mod code_signature;
@@ -406,12 +459,31 @@ pub fn compose_login_shell_path(cmd: &mut tokio::process::Command) {
 /// npm-shim CLIs are `#!/usr/bin/env node` scripts whose `node` lives beside
 /// them in the version manager's bin dir, and the CLIs themselves shell out
 /// to tools (git, rg, node) that a GUI/service launch's own PATH may lack.
-/// Also hands the child the login shell's TLS, SSH-agent and locale
-/// variables when this process has none of its own.
+/// Also hands the child the login shell's TLS, SSH-agent, locale and proxy
+/// variables when this process has none of its own; the proxy variables go
+/// in as one all-or-nothing group.
 pub fn compose_child_path(cmd: &mut process::Command, exe: &std::path::Path) {
     compose_path(
         cmd.as_std_mut(),
         exe.parent().filter(|d| !d.as_os_str().is_empty()),
+    );
+    apply_login_shell_env(cmd.as_std_mut());
+}
+
+/// [`compose_child_path`], with `ahead` before even the executable's own
+/// directory: what the program must find first (pnpm's global bin, which it
+/// refuses to install without).
+pub fn compose_child_path_ahead(
+    cmd: &mut process::Command,
+    exe: &std::path::Path,
+    ahead: &[std::path::PathBuf],
+) {
+    compose_path(
+        cmd.as_std_mut(),
+        ahead
+            .iter()
+            .map(std::path::PathBuf::as_path)
+            .chain(exe.parent().filter(|d| !d.as_os_str().is_empty())),
     );
     apply_login_shell_env(cmd.as_std_mut());
 }
@@ -501,19 +573,40 @@ fn child_path_entries(
     paths
 }
 
-/// Login-shell variables (TLS trust, SSH agent, locale) the child lacks:
-/// absent from our own environment and not set or removed by the driver.
+/// Login-shell variables (TLS trust, SSH agent, locale, proxy) the child
+/// lacks: absent from our own environment and not set or removed by the
+/// driver. Proxy variables are one group — when the driver explicitly set or
+/// removed any of them on the command, the whole group is left to it.
 fn apply_login_shell_env(cmd: &mut std::process::Command) {
     let defaults = shell_env::child_env_defaults();
     if defaults.is_empty() {
         return;
     }
     let explicit: Vec<std::ffi::OsString> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
-    for (key, value) in defaults {
-        if !explicit.contains(&key) {
-            cmd.env(key, value);
-        }
+    for (key, value) in filter_child_env_defaults(defaults, &explicit) {
+        cmd.env(key, value);
     }
+}
+
+/// Of the login-shell defaults, the ones to actually set on the child:
+/// everything the driver has not explicitly handled (`explicit` holds every
+/// key the driver set or env-removed on the command). A proxy variable in
+/// `explicit` means the driver manages the proxy itself, so the whole proxy
+/// group is dropped rather than half-overridden; non-proxy variables are
+/// unaffected.
+fn filter_child_env_defaults(
+    defaults: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    explicit: &[std::ffi::OsString],
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let driver_sets_proxy = explicit
+        .iter()
+        .any(|key| shell_env::is_proxy_var(key.as_os_str()));
+    defaults
+        .into_iter()
+        .filter(|(key, _)| {
+            !explicit.contains(key) && !(driver_sets_proxy && shell_env::is_proxy_var(key))
+        })
+        .collect()
 }
 
 /// Rolling tail of a child's stderr, shared between the reader task and the
@@ -805,7 +898,7 @@ pub fn switches_native_subagents(id: HarnessId) -> bool {
 
 #[cfg(test)]
 mod path_tests {
-    use super::child_path_entries;
+    use super::{child_path_entries, filter_child_env_defaults};
     use crate::executable::Platform;
     use std::path::PathBuf;
 
@@ -892,6 +985,43 @@ mod path_tests {
         assert_eq!(
             paths,
             [r"C:\Users\a\AppData\Roaming\npm", r"C:\nvm4w\nodejs"].map(PathBuf::from)
+        );
+    }
+
+    fn env_pairs(values: &[(&str, &str)]) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        values
+            .iter()
+            .map(|(k, v)| ((*k).into(), (*v).into()))
+            .collect()
+    }
+
+    #[test]
+    fn driver_proxy_choice_suppresses_the_whole_login_shell_proxy_group() {
+        let defaults = env_pairs(&[
+            ("SSL_CERT_FILE", "/etc/corp.pem"),
+            ("HTTPS_PROXY", "http://proxy.example:8080"),
+            ("https_proxy", "http://proxy.example:8080"),
+            ("no_proxy", "localhost"),
+        ]);
+        // Nothing explicit: every default goes in, proxy group included.
+        assert_eq!(filter_child_env_defaults(defaults.clone(), &[]), defaults);
+        // The driver set (or env_remove'd: `get_envs` reports both) one proxy
+        // variable: no login-shell proxy variable is mixed in, the rest is.
+        let mut cmd = std::process::Command::new("true");
+        cmd.env_remove("HTTPS_PROXY");
+        let explicit: Vec<_> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
+        assert_eq!(
+            filter_child_env_defaults(defaults.clone(), &explicit),
+            env_pairs(&[("SSL_CERT_FILE", "/etc/corp.pem")])
+        );
+        // A non-proxy explicit key only drops itself.
+        assert_eq!(
+            filter_child_env_defaults(defaults, &["SSL_CERT_FILE".into()]),
+            env_pairs(&[
+                ("HTTPS_PROXY", "http://proxy.example:8080"),
+                ("https_proxy", "http://proxy.example:8080"),
+                ("no_proxy", "localhost"),
+            ])
         );
     }
 }

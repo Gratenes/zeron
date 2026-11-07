@@ -52,6 +52,10 @@ reqwest.workspace = true
 zeron-plugin-guard.workspace = true
 ignore.workspace = true
 fff-search.workspace = true
+# The names-only index: fff's fuzzy matcher and a literal pattern for its
+# content search (both already in the tree through fff-search).
+neo_frizbee = "0.13.3"
+regex = "1"
 
 same-file = "1"
 tempfile.workspace = true
@@ -61,7 +65,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 
 [target.'cfg(windows)'.dependencies]
 dunce = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
