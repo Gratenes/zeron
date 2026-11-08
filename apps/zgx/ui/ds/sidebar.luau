@@ -181,6 +181,8 @@ export type Props = {
 	-- Whether a change of width now should follow at once, not ease (the
 	-- window being resized).
 	direct: (() -> boolean)?,
+	-- The sessions haven't been heard yet: none isn't "none" until they have.
+	loading: (() -> boolean)?,
 	island: boolean?,
 	-- Its width open (dragging its edge resizes it, 242 to 400).
 	width: State<number>?,
@@ -375,6 +377,7 @@ return ui.component(function(props: Props): Node
 	local edge_over = ui.use_state(false)
 	local from_x, from_w = 0, 0
 	local easing: any = nil
+	local steps = 0
 	local was_folded = collapsed:peek()
 	-- Its width is where it's going (`base`, which its edge dragged or the
 	-- window resized moves at once) and, after a step (folding, coming
@@ -410,14 +413,15 @@ return ui.component(function(props: Props): Node
 			end
 			step:set(showing - to)
 			local params = motion.column(step:peek(), 0)
-			local this: any = nil
+			-- (By number: a callback holding its own clip would keep both for good.)
+			steps += 1
+			local this = steps
 			params.onComplete = function()
-				if easing == this then
+				if steps == this then
 					easing = nil
 				end
 			end
-			this = anime.animate(step, params)
-			easing = this
+			easing = anime.animate(step, params)
 		else
 			base = to
 		end
@@ -675,13 +679,14 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local start_drag: (Drag) -> ()
 	local end_drag: () -> ()
 	-- A session's side chats nested under it (Show → Side chats, outside the
-	-- Activity view's one flat list), and whether they're unfolded; the fold
+	-- Activity view's one flat list), and whether they're unfolded (folded
+	-- until opened, kept per session); the fold
 	-- itself is played where the list's folds are (`toggle_side`, below).
 	local function nesting(): boolean
 		return details.side_chats ~= nil and details.side_chats:get() and not act_now()
 	end
 	local function side_open(id: string): boolean
-		return not folded:get()[`side:{id}`]
+		return folded:get()[`side_open:{id}`] == true
 	end
 	local toggle_side: (id: string) -> ()
 	-- The list's scroll position, and its element.
@@ -1060,13 +1065,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end
 	end
 	-- A session's agent: its mark, faint unless the session asks to be seen.
-	local function agent(s: Session, strong: () -> boolean): Node
-		return SessionRow.mark(now_of(s), strong)
+	-- (`cur`: its row's own `now_of`, where the row has one: one computed a
+	-- row, not one for each of its parts, each woken by any session's change.)
+	local function agent(s: Session, strong: () -> boolean, cur: (() -> Session)?): Node
+		return SessionRow.mark(cur or now_of(s), strong)
 	end
 	-- A session's slot: its agent; collapsed, its state (if it has one, its
 	-- corner unseen).
-	local function session_glyph(s: Session, strong: () -> boolean): Node
-		local cur = now_of(s)
+	local function session_glyph(s: Session, strong: () -> boolean, row: (() -> Session)?): Node
+		local cur = row or now_of(s)
 		-- (On the rail, its state's glyph, one of its kind.)
 		return ui.div {
 			-- (Its glyph follows its state in place: ds/status.)
@@ -1083,12 +1090,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			),
 			ui.show(function(): boolean
 				return not railed() or cur().status == nil
-			end, agent(s, strong)),
+			end, agent(s, strong, cur)),
 		}
-	end
-	-- A session's corner: its state (a glyph of its kind), else its time.
-	local function standing(s: Session): Node
-		return SessionRow.standing(now_of(s))
 	end
 	-- Whether a session asks to be seen: in a state, or the one open.
 	local function active(s: Session): boolean
@@ -1405,7 +1408,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end,
 			wide = in_flyout,
 			hovered = hovered,
-			lead = if in_flyout then agent(s, strong) else session_glyph(s, strong),
+			lead = if in_flyout then agent(s, strong, cur) else session_glyph(s, strong, cur),
 			words = ui.column {
 				w_full = true,
 				gap = "$zeron.space.hair",
@@ -1529,7 +1532,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						color = "$text.secondary",
 						agent(s, function(): boolean
 							return true
-						end),
+						end, cur),
 					},
 					line(label(cur().title)),
 				}
@@ -2399,14 +2402,14 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			folded:set(f)
 		end)
 	end
-	-- A session's side chats nested under it: unfolded unless `folded` says
-	-- (kept with the sections' folds, under `side:<id>`).
+	-- A session's side chats nested under it: folded until opened (kept with
+	-- the sections' folds, as `side_open:<id>`).
 	local function side_fold(id: string): Fold
 		return fold_of(`side:{id}`, function(): boolean
-			return not folded:peek()[`side:{id}`]
+			return folded:peek()[`side_open:{id}`] == true
 		end, function(on: boolean)
 			local f = table.clone(folded:peek())
-			f[`side:{id}`] = if on then nil else true
+			f[`side_open:{id}`] = if on then true else nil
 			folded:set(f)
 		end)
 	end
@@ -2424,6 +2427,32 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			expanded:set(e)
 		end)
 	end
+	-- The session open being a side chat nested under another: that one
+	-- unfolds, so its row shows (the one open shows past a fold anyway, but
+	-- among the rest of them).
+	ui.effect(function()
+		local id = selected:get()
+		if not id then
+			return
+		end
+		for _, s in index:peek().everything do
+			for _, c in s.side_chats or {} do
+				if c.id == id then
+					if not folded:peek()[`side_open:{s.id}`] then
+						local f = folds_by[`side:{s.id}`]
+						if f then
+							fold_set(f, true)
+						else
+							local m = table.clone(folded:peek())
+							m[`side_open:{s.id}`] = true
+							folded:set(m)
+						end
+					end
+					return
+				end
+			end
+		end
+	end)
 	-- A section folded or opened from outside (the caller's `folded`: on
 	-- another device, say), or the empty projects': its fold plays as a
 	-- click's would.
@@ -2692,16 +2721,44 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						return session_h(s, row_by) + gap_after
 					end,
 				})
-				-- Its side chats, a step in under it: all while it's unfolded,
-				-- else those in a state; not while it's being dragged.
+				-- Its side chats, a step in under it: all while it's unfolded (the
+				-- first few, then "Show N more"), else those in a state; the one
+				-- open always; not while it's being dragged.
 				local kids = if nest and not dragged then s.side_chats else nil
 				if kids and #kids > 0 then
 					local f = side_fold(s.id)
-					local shown = folding(chains[s.id], f)
+					local key = `side:{s.id}`
+					local within: { [string]: boolean } = {}
+					local past = 0
+					for i, kid in kids do
+						if i <= GROUP_FIRST or kid.id == open_id or peeks(kid) then
+							within[kid.id] = true
+						else
+							past += 1
+						end
+					end
+					local xf = if past > 0 then more_fold(key) else nil
+					local paged = past > 0 and f.present
+					local inside = table.clone(chains[s.id])
+					table.insert(inside, f)
+					local past_first = table.clone(inside)
+					if xf then
+						table.insert(past_first, xf)
+					end
 					local up: { Session } = {}
 					local kid_chains: { [string]: { Fold } } = {}
 					for _, kid in kids do
-						local kc = shown(kid)
+						local kc: { Fold }? = nil
+						if kid.id == open_id or peeks(kid) then
+							-- (Open, or in a state: it stays however it's folded.)
+							kc = chains[s.id]
+						elseif f.present then
+							if within[kid.id] then
+								kc = inside
+							elseif xf and xf.present then
+								kc = past_first
+							end
+						end
 						if kc then
 							table.insert(up, kid)
 							kid_chains[kid.id] = kc
@@ -2716,9 +2773,24 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 							s = kid,
 							by = row_by,
 							under = s.id,
-							last = k == #up,
+							last = k == #up and not paged,
 							base = function(): number
 								return session_h(kid, row_by) + gap_after
+							end,
+						})
+					end
+					if paged then
+						add({
+							kind = "pager",
+							key = `more:{key}`,
+							pkey = key,
+							place = place,
+							chain = inside,
+							n = past,
+							under = s.id,
+							last = true,
+							base = function(): number
+								return SLOT + gap_after
 							end,
 						})
 					end
@@ -4190,7 +4262,7 @@ fn layer(input:LayerInput)->vec4<f32> {
 				local says = SessionRow.pager_says(all_shown, function(): number
 					return now().n or 0
 				end)
-				local tree_now = tree_at(true)
+				local tree_now = if it.under then child_tree(it.under :: string) else tree_at(true)
 				node = on_tree(
 					row {
 						class = "group-pager",
@@ -5148,7 +5220,8 @@ fn layer(input:LayerInput)->vec4<f32> {
 		ui.show(function(): boolean
 			local ix = index:get()
 			local grouped = SessionRow.levels(organize:get())[1] == "project" and #ix.projects > 0
-			return not is_island and not grouped and #ix.everything == 0 and #ix.pinned_ids == 0
+			local loading = props.loading ~= nil and props.loading()
+			return not is_island and not loading and not grouped and #ix.everything == 0 and #ix.pinned_ids == 0
 		end, ui.text {
 			locale.t("ds.sidebar.empty"),
 			id = "sidebar-empty",
