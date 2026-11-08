@@ -11,7 +11,7 @@
 //!
 //! | harness     | mechanism | how a pinned chat reaches its account |
 //! |-------------|-----------|---------------------------------------|
-//! | Claude Code | `env`     | `CLAUDE_CODE_OAUTH_TOKEN` = the saved login's access token |
+//! | Claude Code | `login-dir` | `CLAUDE_SECURESTORAGE_CONFIG_DIR` = a folder holding only the account's `.credentials.json` (`env` on macOS: `CLAUDE_CODE_OAUTH_TOKEN`) |
 //! | Muse        | `root`    | the account's own config root (`XDG_CONFIG_HOME`) |
 //!
 //! Every other harness reports `pinnable = false` until it has a mechanism.
@@ -37,6 +37,7 @@ use sha2::{Digest, Sha256};
 use zeron_proto::{AgentAccount, AgentAuthKind, HarnessId};
 
 use super::muse::OWN_LOGIN;
+use super::logins::{claude_mechanism, login_dir_usable};
 use super::{AccountsRunEnvironment, AgentAccounts, lock, now_ms, str_field, write_file_atomic};
 
 /// The run credential of a chat that runs on the live login.
@@ -135,7 +136,7 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => self
                 .read_slot(account.harness, &account.id)
                 .is_some_and(|slot| slot.credentials.get("claudeAiOauth").is_some())
-                .then_some("env"),
+                .then_some(claude_mechanism()),
             HarnessId::Muse if account.id != OWN_LOGIN => {
                 self.read_slot(account.harness, &account.id).is_some().then_some("root")
             }
@@ -208,14 +209,22 @@ impl AgentAccounts {
         match harness {
             HarnessId::ClaudeCode => {
                 let Some(slot) = self.read_slot(harness, account) else { return Ok(None) };
+                let who = slot.profile.email.clone();
+                let signed_out = || format!("{who} needs signing in again (Settings → Accounts), or pin this chat to another account");
+                if login_dir_usable() {
+                    // The account's own folder: the CLI keeps and refreshes
+                    // its login (see `logins`). `None`: the live login.
+                    return match self.claude_login_run(&slot).await {
+                        Ok(run) => Ok(run.map(|run| PinRun { env: run.env, credential: run.credential })),
+                        Err(_) => Err(signed_out()),
+                    };
+                }
                 // The live login runs as it always did, and is never
                 // refreshed here: the CLI holds its refresh token.
                 if !self.claude_slot_is_not_live(&slot).await {
                     return Ok(None);
                 }
                 let oauth = slot.credentials.get("claudeAiOauth").cloned().unwrap_or_default();
-                let who = slot.profile.email.clone();
-                let signed_out = || format!("{who} needs signing in again (Settings → Accounts), or pin this chat to another account");
                 let mut token = str_field(&oauth, "accessToken").ok_or_else(signed_out)?;
                 let expires = oauth.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
                 if expires - now_ms() < CLAUDE_REFRESH_MARGIN.as_millis() as i64 {

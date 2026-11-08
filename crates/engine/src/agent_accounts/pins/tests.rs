@@ -11,6 +11,17 @@ use super::super::*;
 use crate::registry::RunEnvironment;
 
 const TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+const STORE_ENV: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
+
+/// The access token a Claude run was given: in its login folder (where the
+/// CLI finds it), or in its environment on macOS.
+fn run_token(request: &zeron_proto::RunRequest) -> Option<String> {
+    if let Some(dir) = request.env.get(STORE_ENV) {
+        let creds = read_json(&Path::new(dir).join(".credentials.json"))?;
+        return str_field(&creds["claudeAiOauth"], "accessToken");
+    }
+    request.env.get(TOKEN_ENV).cloned()
+}
 
 fn config(root: &Path) -> AgentAccountsConfig {
     AgentAccountsConfig {
@@ -133,7 +144,7 @@ async fn a_pinned_claude_chat_runs_on_its_saved_accounts_token_and_the_live_logi
     d.accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&d.saved));
     let live_before = std::fs::read(config(d._tmp.path()).claude_creds_file()).unwrap();
     let run = prepared(&env, "c1").await.unwrap();
-    assert_eq!(run.env.get(TOKEN_ENV).map(String::as_str), Some("at-b"));
+    assert_eq!(run_token(&run).as_deref(), Some("at-b"));
     assert_eq!(std::fs::read(config(d._tmp.path()).claude_creds_file()).unwrap(), live_before, "the live login is never touched");
     // Another chat, and a run of no chat, are as they always were.
     assert!(prepared(&env, "c2").await.unwrap().env.is_empty());
@@ -141,10 +152,11 @@ async fn a_pinned_claude_chat_runs_on_its_saved_accounts_token_and_the_live_logi
     env.prepare(HarnessId::ClaudeCode, None, &mut titles).await.unwrap();
     assert!(titles.env.is_empty());
     // Never over what another provider set.
+    let key = if cfg!(target_os = "macos") { TOKEN_ENV } else { STORE_ENV };
     let mut set = request();
-    set.env.insert(TOKEN_ENV.into(), "broker".into());
+    set.env.insert(key.into(), "broker".into());
     env.prepare(HarnessId::ClaudeCode, Some("c1"), &mut set).await.unwrap();
-    assert_eq!(set.env[TOKEN_ENV], "broker");
+    assert_eq!(set.env[key], "broker");
 }
 
 #[tokio::test]
@@ -163,24 +175,32 @@ async fn a_chat_pinned_to_the_live_login_or_a_gone_account_runs_as_without_a_pin
 async fn the_run_credential_follows_the_pin_so_a_parked_session_is_replaced() {
     let d = device();
     let env = PinRunEnvironment(d.accounts.clone());
-    // Never pinned: unknown, so nothing is replaced.
-    assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c1")).await, None);
+    // Never pinned: it runs on the live login, as it would without a pin.
+    assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c1")).await.as_deref(), Some("live"));
     d.accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&d.saved));
     let pinned = env.credential(HarnessId::ClaudeCode, Some("c1")).await.expect("a credential");
-    assert!(pinned.starts_with("claude:"), "{pinned}");
+    assert!(pinned.starts_with(if cfg!(target_os = "macos") { "claude:" } else { "login:" }), "{pinned}");
     assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c1")).await, Some(pinned.clone()), "stable");
-    // A token Zeron has since refreshed is another credential.
+    // A token refreshed since is another credential where the token is what
+    // the chat holds (macOS); in a login folder the CLI refreshes for itself,
+    // and a refresh is no change of account.
     let mut slot = d.accounts.read_slot(HarnessId::ClaudeCode, &d.saved).unwrap();
     slot.credentials["claudeAiOauth"]["accessToken"] = "at-b2".into();
+    slot.credentials["claudeAiOauth"]["expiresAt"] = (now_ms() + 7_200_000).into();
     d.accounts.write_slot(&slot).unwrap();
-    assert_ne!(env.credential(HarnessId::ClaudeCode, Some("c1")).await, Some(pinned));
+    let after = env.credential(HarnessId::ClaudeCode, Some("c1")).await;
+    if cfg!(target_os = "macos") {
+        assert_ne!(after, Some(pinned));
+    } else {
+        assert_eq!(after, Some(pinned));
+    }
     // A pin taken back moves it to the live login.
     d.accounts.set_pin(HarnessId::ClaudeCode, "c1", None);
     assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c1")).await.as_deref(), Some("live"));
     assert!(prepared(&env, "c1").await.unwrap().env.is_empty());
     assert!(d.accounts.pins().is_empty(), "a taken-back pin isn't listed");
-    // A chat never pinned stays unknown after another's pin goes.
-    assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c9")).await, None);
+    // A chat never pinned stays on the live login after another's pin goes.
+    assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c9")).await.as_deref(), Some("live"));
 }
 
 #[tokio::test]
@@ -196,12 +216,12 @@ async fn a_token_about_to_expire_is_refreshed_first_and_kept_in_its_slot() {
     accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&saved.id));
     let env = PinRunEnvironment(accounts.clone());
     let run = prepared(&env, "c1").await.unwrap();
-    assert_eq!(run.env[TOKEN_ENV], "fresh");
+    assert_eq!(run_token(&run).as_deref(), Some("fresh"));
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     let slot = accounts.read_slot(HarnessId::ClaudeCode, &saved.id).unwrap();
     assert_eq!(slot.credentials["claudeAiOauth"]["refreshToken"], "rt-new", "the slot holds the rotated pair");
     // A second run finds a token with time left: no second refresh.
-    assert_eq!(prepared(&env, "c1").await.unwrap().env[TOKEN_ENV], "fresh");
+    assert_eq!(run_token(&prepared(&env, "c1").await.unwrap()).as_deref(), Some("fresh"));
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
@@ -251,7 +271,7 @@ async fn a_chats_first_run_asks_the_hook_once_and_a_pinned_chat_isnt_asked() {
     // through the plugins' `pin`; here a stand-in that does not, so the run
     // itself still gets the account's token).
     d.accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&d.saved));
-    assert_eq!(prepared(&env, "c1").await.unwrap().env[TOKEN_ENV], "at-b");
+    assert_eq!(run_token(&prepared(&env, "c1").await.unwrap()).as_deref(), Some("at-b"));
     assert_eq!(asked.load(Ordering::SeqCst), 0, "a pinned chat isn't asked");
     // A chat with no pin is asked; an answer of nothing leaves it on the live login.
     assert!(prepared(&env, "c2").await.unwrap().env.is_empty());
@@ -275,14 +295,14 @@ async fn the_hooks_account_runs_the_chat_when_nothing_pinned_it_yet() {
         let saved = saved.clone();
         Box::pin(async move { Some(saved) })
     }));
-    assert_eq!(prepared(&env, "c1").await.unwrap().env[TOKEN_ENV], "at-b");
+    assert_eq!(run_token(&prepared(&env, "c1").await.unwrap()).as_deref(), Some("at-b"));
     assert_eq!(d.accounts.pins()[0].chat, "c1");
 }
 
 #[tokio::test]
 async fn only_oauth_logins_of_a_harness_with_a_mechanism_can_be_pinned() {
     let d = device();
-    assert_eq!(d.accounts.pin_mechanism(&row(&d.saved, AgentAuthKind::Oauth)), Some("env"));
+    assert_eq!(d.accounts.pin_mechanism(&row(&d.saved, AgentAuthKind::Oauth)), Some(if cfg!(target_os = "macos") { "env" } else { "login-dir" }));
     assert_eq!(d.accounts.pin_mechanism(&row(&d.saved, AgentAuthKind::ApiKey)), None, "an API key bills per token");
     assert_eq!(d.accounts.pin_mechanism(&row("not-saved", AgentAuthKind::Oauth)), None);
     let mut codex = row(&d.saved, AgentAuthKind::Oauth);
