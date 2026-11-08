@@ -37,7 +37,17 @@
 //!
 //! A development build never uses the production engine: port 27654 and
 //! ~/.zeron (and the pre-0.2.0 ~/.comet-native) are refused, whatever the
-//! variables say.
+//! variables say, unless `ZERON_ZGX_ALLOW_DEFAULT_PORT=1`: then it uses the
+//! engine a dev desktop build (its own data dir and edge) runs there, and
+//! never stops or restarts it. With an engine to start there
+//! (`ZERON_ZGX_ENGINE_BIN`, or the one it last found serving that port,
+//! [`remember_engine_app`]) it starts one when nothing answers, as that
+//! desktop app starts its own, detached, so the app attaches to it later.
+//!
+//! An engine binary that isn't a `zeron-engine` (a desktop app's own exe, as
+//! on Windows) runs as that app runs it: `<exe> engine`, with the app's
+//! environment (crates/launch). Variables unset here can be baked into the
+//! build (src/baked.rs).
 //!
 //! A signed-out engine opens a local workspace and keeps it; signing in
 //! takes a new one (the shipping app's sync switch). So once the engine's
@@ -59,6 +69,14 @@ const BETA: bool = cfg!(feature = "beta");
 
 /// The soonest a second engine is started after the first.
 const SPAWN_SPACING: Duration = Duration::from_secs(10);
+/// The same for a desktop app's engine: it may wait on its data dir's lock
+/// (a predecessor draining) before it answers, so a second one isn't started
+/// meanwhile.
+const APP_SPAWN_SPACING: Duration = Duration::from_secs(30);
+
+/// The file in a borrowed engine's data dir naming the desktop app whose
+/// engine last served it ([`remember_engine_app`]).
+const REMEMBERED_APP: &str = "zgx-engine-app";
 
 pub struct Config {
     pub port: u16,
@@ -74,6 +92,9 @@ pub struct Config {
     /// bundle's, started through crates/launch; it restarts into a newer
     /// bundle by itself.
     managed: bool,
+    /// On the default port (`ZERON_ZGX_ALLOW_DEFAULT_PORT`): a dev desktop
+    /// app's engine, used and perhaps started, never stopped.
+    borrowed: bool,
 }
 
 /// Why no engine can be used.
@@ -85,9 +106,23 @@ pub type Refusal = String;
 const STARTED: &str = "zgx-started-build";
 
 impl Config {
-    /// The engine this app would start now, if it may start one.
+    /// The engine this app would start now and may replace with a newer one
+    /// on disk, if any. (Not a borrowed engine nor a desktop app's exe: those
+    /// are started, never judged or replaced; nor is a desktop app's exe run
+    /// to ask its build.)
     pub fn startable(&self) -> Option<&Path> {
-        if self.spawn { self.bin.as_deref() } else { None }
+        let bin = self.bin.as_deref().filter(|bin| self.managed || !is_app_binary(bin));
+        if self.spawn && !self.borrowed { bin } else { None }
+    }
+
+    /// Whether this app starts an engine when none answers.
+    pub fn starts_engine(&self) -> bool {
+        self.spawn && self.bin.is_some()
+    }
+
+    /// Whether this is a dev desktop app's engine on the default port.
+    pub fn borrowed(&self) -> bool {
+        self.borrowed
     }
 
     /// Whether this is Zeron.app's engine, which follows its bundle by
@@ -121,8 +156,25 @@ impl Config {
     /// From the environment, for the account's edge, sign-in client and
     /// callback port.
     pub fn from_env(edge: &str, client: &str, callback_port: u16) -> Result<Self, Refusal> {
-        let var = |key: &str| std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty());
         let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
+        // The engine to start: the environment's, else the desktop app whose
+        // engine last served this data dir, else the build's baked one.
+        let data = crate::baked::env_or_baked("ZERON_ZGX_ENGINE_DATA")
+            .map(|dir| expand(&dir, &home))
+            .unwrap_or_else(|| home.join(STAGING_DATA));
+        let remembered = remembered_app(&data);
+        let var = |key: &str| {
+            let runtime = std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty());
+            if runtime.is_some() {
+                return runtime;
+            }
+            if key == "ZERON_ZGX_ENGINE_BIN"
+                && let Some(app) = &remembered
+            {
+                return Some(app.to_string_lossy().into_owned());
+            }
+            crate::baked::var(key)
+        };
         let exe = std::env::current_exe().ok();
         Self::from_vars(var, &home, exe.as_deref(), edge, client, callback_port)
     }
@@ -176,6 +228,7 @@ impl Config {
             client: client.into(),
             callback_port,
             managed: true,
+            borrowed: false,
         })
     }
 
@@ -198,10 +251,11 @@ impl Config {
             .map(|dir| expand(&dir, home))
             .unwrap_or_else(|| home.join(STAGING_DATA));
         // `ZERON_ZGX_ALLOW_DEFAULT_PORT=1` lets a development build use an
-        // engine already on the default port, for a dev desktop build whose
-        // engine (separate data dir, its own edge) listens there. It never
-        // starts one there, nor stops it to follow its session: the engine
-        // is the desktop app's.
+        // engine on the default port, for a dev desktop build whose engine
+        // (separate data dir, its own edge) listens there. It starts one there
+        // only from an engine binary it was given (or found serving there
+        // before), never the checkout's, and never stops one to follow its
+        // session: the engine is the desktop app's.
         let allow_default = var("ZERON_ZGX_ALLOW_DEFAULT_PORT").as_deref() == Some("1");
         if port == zeron_cli::DEFAULT_IPC_PORT && !allow_default {
             return Err(format!(
@@ -213,7 +267,11 @@ impl Config {
         if let Some(dir) = PRODUCTION_DATA.iter().find(|dir| same_dir(&data_dir, &home.join(dir))) {
             return Err(format!("~/{dir} is the production engine's"));
         }
-        let bin = var("ZERON_ZGX_ENGINE_BIN").map(|p| expand(&p, home)).or_else(|| {
+        let given = var("ZERON_ZGX_ENGINE_BIN").map(|p| expand(&p, home));
+        let bin = given.clone().or_else(|| {
+            if borrowed {
+                return None;
+            }
             // This checkout's: apps/zgx is two below the repository's root.
             let built = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../target/debug")
@@ -225,18 +283,19 @@ impl Config {
             data_dir,
             bin,
             home: var("ZERON_ZGX_ENGINE_HOME").map(|dir| expand(&dir, home)),
-            spawn: !borrowed && var("ZERON_ZGX_ENGINE_SPAWN").as_deref() != Some("0"),
+            spawn: (!borrowed || given.is_some()) && var("ZERON_ZGX_ENGINE_SPAWN").as_deref() != Some("0"),
             edge: edge.into(),
             client: client.into(),
             callback_port,
             managed: false,
+            borrowed,
         })
     }
 
     /// Whether this app may stop the engine to start it again: only one it
     /// could start itself.
     pub fn may_restart(&self) -> bool {
-        self.managed || self.spawn
+        self.managed || (self.spawn && !self.borrowed)
     }
 
     pub fn describe(&self) -> String {
@@ -256,6 +315,43 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     canon(a) == canon(b)
 }
 
+/// A desktop app's exe rather than a `zeron-engine`: it runs the engine as
+/// its `engine` subcommand (crates/launch's rule: a Windows install has no
+/// separate engine executable).
+fn is_app_binary(bin: &Path) -> bool {
+    let stem = bin.file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    !(stem.starts_with("zeron-engine") || stem == "zeron engine")
+}
+
+/// The desktop app whose engine last served `data_dir`, if it's still there.
+fn remembered_app(data_dir: &Path) -> Option<PathBuf> {
+    let path = std::fs::read_to_string(data_dir.join(REMEMBERED_APP)).ok()?;
+    let path = PathBuf::from(path.trim());
+    path.is_file().then_some(path)
+}
+
+/// A borrowed engine answered with this data dir's key: remember the desktop
+/// app it runs from (`exe`, the program on its port), so a later launch
+/// with nothing on the port starts that one. Only a Zeron app's exe, and
+/// never this app's own.
+pub fn remember_engine_app(config: &Config, exe: &Path) {
+    if !config.borrowed {
+        return;
+    }
+    let name = exe.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let own = std::env::current_exe().ok().is_some_and(|own| same_dir(&own, exe));
+    if own || !name.starts_with("zeron") || name.starts_with("zeron-zgx") || !exe.is_file() {
+        return;
+    }
+    if remembered_app(&config.data_dir).is_some_and(|known| same_dir(&known, exe)) {
+        return;
+    }
+    match std::fs::write(config.data_dir.join(REMEMBERED_APP), exe.to_string_lossy().as_bytes()) {
+        Ok(()) => eprintln!("zeron-zgx: engine: remembered {} as the engine to start", exe.display()),
+        Err(error) => eprintln!("zeron-zgx: engine: couldn't remember {}: {error}", exe.display()),
+    }
+}
+
 /// Starts engines for `config`, no more often than [`SPAWN_SPACING`].
 pub struct Spawner {
     last: Option<Instant>,
@@ -270,7 +366,9 @@ impl Spawner {
     /// Nothing answers on the port: start an engine, if this app may and
     /// it's been long enough since the last. Whether one was started.
     pub fn start_if_due(&mut self, config: &Config) -> bool {
-        if !config.spawn || self.last.is_some_and(|at| at.elapsed() < SPAWN_SPACING) {
+        let app = !config.managed && config.bin.as_deref().is_some_and(is_app_binary);
+        let spacing = if app { APP_SPAWN_SPACING } else { SPAWN_SPACING };
+        if !config.spawn || self.last.is_some_and(|at| at.elapsed() < spacing) {
             return false;
         }
         let Some(bin) = &config.bin else {
@@ -290,7 +388,13 @@ impl Spawner {
             return false;
         };
         self.last = Some(Instant::now());
-        let started = if config.managed { launch(config) } else { spawn(config, bin) };
+        let started = if config.managed {
+            launch(config)
+        } else if app {
+            spawn_app(config, bin)
+        } else {
+            spawn(config, bin)
+        };
         match started {
             Ok(()) => {
                 eprintln!("zeron-zgx: engine: started {} ({})", bin.display(), config.describe());
@@ -318,6 +422,33 @@ fn launch(config: &Config) -> std::io::Result<()> {
         },
         &exe,
     )?;
+    zeron_launch::reap(child);
+    Ok(())
+}
+
+/// A desktop app's engine, started as that app starts it
+/// (crates/launch's `launch`): `<exe> engine`, detached (no console, its own
+/// process group, out of this app's job), with the app's environment, so it
+/// outlives this app and the desktop app attaches to it later. Its edge and
+/// sign-in client are this app's (a dev build's, the same as the desktop
+/// app's); its callback port is the app's own default.
+fn spawn_app(config: &Config, bin: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(&config.data_dir)?;
+    let mut command = std::process::Command::new(bin);
+    command
+        .arg(zeron_launch::ENGINE_SUBCOMMAND)
+        .env(zeron_launch::MANAGED_ENV, "1")
+        .env(zeron_launch::APP_ENV, bin)
+        .env("ZERON_DATA_DIR", &config.data_dir)
+        .env("ZERON_IPC_PORT", config.port.to_string())
+        .env("ZERON_EDGE_URL", &config.edge)
+        .env("ZERON_WORKOS_CLIENT_ID", &config.client)
+        // (As `spawn` below: nothing of a chat's or another engine's.)
+        .env_remove("ZERON_ORIGIN")
+        .env_remove("ZERON_EDGE_TOKEN")
+        .env_remove("ZERON_IPC_TOKEN")
+        .env_remove("ZERON_IPC_TOKEN_FILE");
+    let child = zeron_launch::spawn_detached(&mut command)?;
     zeron_launch::reap(child);
     Ok(())
 }
@@ -429,7 +560,29 @@ mod tests {
         // Allowed explicitly: used as it is, never started or stopped there.
         let borrowed = config_of(&[("ZERON_ZGX_ENGINE_PORT", "27654"), ("ZERON_ZGX_ALLOW_DEFAULT_PORT", "1")], home, None, edge).unwrap();
         assert_eq!(borrowed.port, 27654);
-        assert!(borrowed.startable().is_none() && !borrowed.may_restart());
+        assert!(borrowed.startable().is_none() && !borrowed.may_restart() && !borrowed.starts_engine());
+        // Given a desktop app's exe: it starts that app's engine there when
+        // nothing answers, but still never stops or replaces one.
+        let app = Path::new(r"C:\Users\someone\Downloads\zeron-android-mine-e3ba6407.exe");
+        let with_app = config_of(
+            &[("ZERON_ZGX_ENGINE_PORT", "27654"), ("ZERON_ZGX_ALLOW_DEFAULT_PORT", "1"), ("ZERON_ZGX_ENGINE_BIN", app.to_str().unwrap())],
+            home,
+            None,
+            edge,
+        )
+        .unwrap();
+        assert!(with_app.starts_engine() && with_app.borrowed());
+        assert!(with_app.startable().is_none() && !with_app.may_restart());
+        // ZERON_ZGX_ENGINE_SPAWN=0 still keeps it from starting one.
+        let never = config_of(
+            &[("ZERON_ZGX_ENGINE_PORT", "27654"), ("ZERON_ZGX_ALLOW_DEFAULT_PORT", "1"), ("ZERON_ZGX_ENGINE_BIN", app.to_str().unwrap()), ("ZERON_ZGX_ENGINE_SPAWN", "0")],
+            home,
+            None,
+            edge,
+        )
+        .unwrap();
+        assert!(!never.starts_engine());
+        assert!(is_app_binary(app) && !is_app_binary(Path::new("/x/zeron-engine")) && !is_app_binary(Path::new("/x/Zeron Engine")));
         assert!(config_of(&[("ZERON_ZGX_ENGINE_PORT", "27654"), ("ZERON_ZGX_ALLOW_DEFAULT_PORT", "1"), ("ZERON_ZGX_ENGINE_DATA", "~/.zeron")], home, None, edge).is_err());
         assert!(config_of(&[("ZERON_ZGX_ENGINE_DATA", "~/.zeron")], home, None, edge).is_err());
         assert!(config_of(&[("ZERON_ZGX_ENGINE_DATA", "~/.comet-native")], home, None, edge).is_err());

@@ -27,6 +27,16 @@ fn main() {
     println!("cargo:rustc-env=ZERON_VERSION={version}");
     println!("cargo:rustc-env=ZERON_APP_VERSION={app}");
 
+    // A development build with a screen baked to open (src/baked.rs) is one
+    // to double-click: on Windows, no console window (`zgx_gui`, main.rs).
+    // (The other baked defaults are `option_env!`s, which rustc tracks.)
+    println!("cargo:rustc-check-cfg=cfg(zgx_gui)");
+    println!("cargo:rerun-if-env-changed=ZERON_ZGX_DEFAULT_ROUTE");
+    let gui = std::env::var("ZERON_ZGX_DEFAULT_ROUTE").is_ok_and(|route| !route.trim().is_empty());
+    if gui && std::env::var_os("CARGO_FEATURE_BETA").is_none() {
+        println!("cargo:rustc-cfg=zgx_gui");
+    }
+
     // On Windows, Zeron's icon in the exe: without one the taskbar shows
     // the system's blank one, and zgx has none to give the window.
     println!("cargo:rerun-if-changed=../../dist/windows/zeron.rc");
