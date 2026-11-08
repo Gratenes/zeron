@@ -9,6 +9,7 @@
 //! to hear each new connection (`on_connect`) to start their watches on it.
 
 pub mod manager;
+pub mod owner;
 pub mod rpc;
 
 use std::{
@@ -25,6 +26,20 @@ use rpc::{DialError, Rpc};
 
 /// How long a call waits for a connection before it says `offline`.
 const CONNECT_WAIT: Duration = Duration::from_secs(20);
+/// How long the port may refuse this app's key before it says so: a new
+/// engine refuses it until it has written its token.
+const REFUSED_KEY_GRACE: Duration = Duration::from_secs(8);
+/// How long nothing may answer (with no engine this app can start) before
+/// it says so.
+const NOTHING_GRACE: Duration = Duration::from_secs(10);
+
+/// What the supervisor has told about the engine it can't reach, in a toast
+/// that stays until it connects.
+fn tell(title: String, body: String) -> String {
+    use crate::plugins::host_bar::{Notice, Tone, notice};
+    notice(Notice { title: title.clone(), body, tone: Tone::Warning, action: None, stays: true });
+    title
+}
 
 type Listener = Rc<dyn Fn(&Rpc)>;
 
@@ -217,13 +232,29 @@ impl Engine {
         let mut spawner = Spawner::new();
         let mut delay = Duration::from_millis(250);
         let mut said = None::<String>;
+        // Since when the port refuses this app's key, or nothing answers; and
+        // the toast told about it, if any.
+        let mut refused_since = None::<Instant>;
+        let mut nothing_since = None::<Instant>;
+        let mut told = None::<String>;
         loop {
             let token = rpc::read_token(&config.data_dir);
             match rpc::connect(config.port, token).await {
                 Ok(rpc) => {
                     delay = Duration::from_millis(250);
                     said = None;
+                    (refused_since, nothing_since) = (None, None);
+                    if let Some(title) = told.take() {
+                        crate::plugins::host_bar::withdraw(&title);
+                    }
                     eprintln!("zeron-zgx: engine: connected");
+                    // A dev desktop app's engine: which app, to start that
+                    // one when nothing answers on a later launch.
+                    if config.borrowed()
+                        && let Some(exe) = owner::listener_exe(config.port)
+                    {
+                        manager::remember_engine_app(config, &exe);
+                    }
                     *self.rpc.borrow_mut() = Some(rpc.clone());
                     self.scope.borrow_mut().take();
                     self.restarting.set(false);
@@ -245,12 +276,42 @@ impl Engine {
                     eprintln!("zeron-zgx: engine: connection ended ({reason})");
                 }
                 Err(DialError::Refused) => {
+                    refused_since = None;
+                    if let Some(title) = told.take_if(|title| title.starts_with("Port ")) {
+                        crate::plugins::host_bar::withdraw(&title);
+                    }
+                    let since = *nothing_since.get_or_insert_with(Instant::now);
                     if spawner.start_if_due(config) {
                         delay = Duration::from_millis(500);
+                    } else if !config.starts_engine() && told.is_none() && since.elapsed() >= NOTHING_GRACE {
+                        told = Some(tell(
+                            format!("No Zeron engine on port {}", config.port),
+                            "Open the Zeron app whose engine this uses. Zeron connects by itself once it answers.".into(),
+                        ));
                     }
                 }
-                // A new engine is writing its token: try again shortly.
-                Err(DialError::Unauthorized) => {}
+                // A new engine is writing its token: try again shortly. One
+                // that keeps refusing it isn't this app's (another data dir:
+                // another build's engine holds the port), and is said.
+                Err(DialError::Unauthorized) => {
+                    nothing_since = None;
+                    // (Something answers now: "no engine" no longer holds.)
+                    if let Some(title) = told.take_if(|title| title.starts_with("No Zeron engine")) {
+                        crate::plugins::host_bar::withdraw(&title);
+                    }
+                    let since = *refused_since.get_or_insert_with(Instant::now);
+                    if told.is_none() && since.elapsed() >= REFUSED_KEY_GRACE {
+                        let holder = owner::listener_exe(config.port)
+                            .map_or_else(|| "Another program".to_owned(), |exe| exe.display().to_string());
+                        told = Some(tell(
+                            format!("Port {} is held by another Zeron engine", config.port),
+                            format!(
+                                "{holder} answers there but doesn't accept this app's key (from {}). Quit that engine (Task Manager → Details) and Zeron connects by itself.",
+                                config.data_dir.display()
+                            ),
+                        ));
+                    }
+                }
                 Err(DialError::Other(error)) => {
                     if said.as_deref() != Some(&error) {
                         eprintln!("zeron-zgx: engine: can't connect: {error}");

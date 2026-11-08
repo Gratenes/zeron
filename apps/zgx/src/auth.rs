@@ -124,8 +124,10 @@ pub struct Endpoint {
     pub port: u16,
 }
 
+/// (A variable unset at runtime falls back to the build's baked default, if
+/// any: src/baked.rs.)
 pub fn endpoint() -> Endpoint {
-    endpoint_with(|key| std::env::var(key).ok().filter(|v: &String| !v.trim().is_empty()))
+    endpoint_with(crate::baked::env_or_baked)
 }
 
 /// The beta's: production's, whatever the environment says. Nothing

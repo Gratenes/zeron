@@ -181,6 +181,15 @@ pub fn notice(notice: Notice) {
     });
 }
 
+/// Takes down the notices titled `title` (one that stays, once what it said
+/// is over).
+pub fn withdraw(title: &str) {
+    let Some(signal) = NOTICES.with(|n| n.borrow().clone()) else { return };
+    if signal.with_untracked(|list| list.iter().any(|s| s.notice.title == title)) {
+        signal.update(|list| list.retain(|s| s.notice.title != title));
+    }
+}
+
 fn dismiss(signal: &zgx::reactive::Signal<Vec<Shown>>, id: u64) {
     if signal.with_untracked(|list| list.iter().any(|s| s.id == id)) {
         signal.update(|list| list.retain(|s| s.id != id));

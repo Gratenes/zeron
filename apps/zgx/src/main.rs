@@ -25,13 +25,17 @@
 //! `ZERON_ZGX_REPLAY=1` shows every page, as if none were finished.
 //! `--inspect` (or `ZGX_INSPECT_SOCKET=1`) serves devtools to `zgx inspect`.
 
-#![cfg_attr(all(windows, feature = "beta"), windows_subsystem = "windows")]
+// (Also a development build with a route baked, one to double-click: build.rs's
+// `zgx_gui`; its output goes to a log, src/self_log.rs.)
+#![cfg_attr(all(windows, any(feature = "beta", zgx_gui)), windows_subsystem = "windows")]
 
 mod about;
 mod acp_registry;
 mod agents;
 mod appshots;
 mod auth;
+mod baked;
+mod self_log;
 mod carried_settings;
 mod chat;
 mod cloud;
@@ -171,6 +175,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if argv.get(1).map(String::as_str) == Some("terminal-bridge") {
         std::process::exit(terminal::bridge(&argv[2..]));
     }
+    // Double-clicked (no console, nothing catching its output): a log file.
+    self_log::when_detached();
+    // A bare launch opens the build's baked screen, if it has one.
+    let launch_args: Vec<String> = match (argv.len(), baked::route()) {
+        (1, Some(route)) => vec![route.to_owned()],
+        _ => argv[1..].to_vec(),
+    };
     // This launch as it started, for Reload Zeron (src/relaunch.rs), before
     // anything below sets a variable; started by one, the launch it
     // replaces waited out first.
@@ -224,7 +235,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(dir) = std::env::current_exe().ok().as_deref().and_then(std::path::Path::parent) {
         zeron_launch::set_full_app_engine(dir.join("beta").join(about::APP_VERSION).join("engine").join("zeron.exe"));
     }
-    if cfg!(feature = "beta") || !dev_launch(&argv[1..]) {
+    if cfg!(feature = "beta") || !dev_launch(&launch_args) {
         match zeron_cli::run(about::APP_VERSION, zeron_cli::Engines::Helper) {
             zeron_cli::Launch::Done(result) => {
                 // (As a `main` returning it would: the error, exit status 1.)
@@ -243,7 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut screen = Screen::Intro;
     let mut asked_for_intro = false;
     let mut inspect = false;
-    for arg in std::env::args().skip(1).filter(|_| !cfg!(feature = "beta") && open_url.is_none()) {
+    for arg in launch_args.iter().cloned().filter(|_| !cfg!(feature = "beta") && open_url.is_none()) {
         match arg.as_str() {
             "intro" => {
                 screen = Screen::Intro;
