@@ -318,6 +318,8 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     });
     #[cfg(windows)]
     crate::video_wallpaper::watch_minimized(host);
+    #[cfg(windows)]
+    crate::focus_guard::install();
     host.action("wallpaper.forget", |args| {
         let path = args.field("path").map(text).unwrap_or_default();
         if let Some(dir) = engine::data_dir() {

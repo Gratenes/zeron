@@ -69,6 +69,8 @@ mod tool_details;
 mod themes;
 mod transparency;
 #[cfg(windows)]
+mod focus_guard;
+#[cfg(windows)]
 mod video_wallpaper;
 mod visuals;
 #[cfg(test)]
