@@ -90,15 +90,26 @@ jobs:
           workspaces: |
             . -> target
             apps/zgx -> target
-      # The zgx app: its own workspace, no `beta` feature. Its server and
-      # engine are picked at run time (ZERON_ZGX_EDGE etc.), not baked in.
+      # The zgx app: its own workspace, no `beta` feature, as the PC builds it
+      # (build-final-zgx.ps1). The ZERON_ZGX_DEFAULT_* values are baked in by
+      # apps/zgx/src/baked.rs on PC branches; branches without it ignore them.
+      # All public values, no secrets.
       - name: zgx app (apps/zgx)
         working-directory: apps/zgx
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+          ZERON_ZGX_DEFAULT_EDGE: https://zeron-v2.embedez.com
+          ZERON_ZGX_DEFAULT_WORKOS_CLIENT: client_01M270WMSY2KHVFJFZJMG7YTDF
+          ZERON_ZGX_DEFAULT_ENGINE_PORT: "27654"
+          ZERON_ZGX_DEFAULT_ALLOW_DEFAULT_PORT: "1"
+          ZERON_ZGX_DEFAULT_ENGINE_DATA_NAME: Zeron-dev
+          ZERON_ZGX_DEFAULT_ENGINE_BIN: '%LOCALAPPDATA%\Programs\Zeron\zeron-engine.exe'
+          ZERON_ZGX_DEFAULT_ROUTE: main
         run: |
-          cargo build --release --locked
+          cargo build --release
           if ($LASTEXITCODE -ne 0) { throw 'zgx failed to build' }
-      # The headless engine the PC runs as zeron-engine.exe. The public
-      # zeron-v2 defaults, as dev-windows.yml bakes in (no secrets).
+      # The headless engine the PC runs as zeron-engine.exe
+      # (build-engine-headless.ps1): public zeron-v2 defaults, no secrets.
       - name: zeron-engine
         env:
           ZERON_DEFAULT_EDGE_URL: https://zeron-v2.embedez.com
