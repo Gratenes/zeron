@@ -11,8 +11,7 @@
 //!   ([`crate::agent_allowed`]); nothing that grants power.
 //! - [`Caller::Peer`]: another device, through the device-room relay
 //!   ([`crate::peer_refused`] keeps credentials, signing and templates
-//!   local; allowing a plugin takes a verified device,
-//!   [`crate::verified_peer_only`]).
+//!   local).
 //!
 //! The gates that matter are enforced by method at the transport guards
 //! themselves (the WS server's agent guard, the relay's guard), so they

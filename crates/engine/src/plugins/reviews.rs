@@ -8,21 +8,20 @@
 //! for, gone after [`TTL`]. Only a consent window's own host asks for one,
 //! and the window's Luau never sees it: this device's app, or, for allowing
 //! a plugin, the app on another of your devices showing this device's
-//! plugin (Settings → Plugins' device switcher), through the device-room
-//! relay as a device the edge verified on the link. A review remembers who
-//! minted it ([`Reviews::mint`]'s `by`) and is good only from them, so one
-//! minted for another device's window decides from there alone and never
-//! signs. The methods are refused to agents' scoped token
-//! ([`zeron_rpc::agent_allowed`]), to a relay dial the edge didn't verify
-//! ([`zeron_rpc::verified_peer_only`]); signing and templates stay this
-//! device's ([`zeron_rpc::peer_refused`]).
+//! plugin (Settings → Plugins' device switcher), through your device room's
+//! relay. A review remembers who minted it ([`Reviews::mint`]'s `by`: the
+//! device the edge verified on the link, else the one the forwarding engine
+//! says it is) and is good only from them, so one minted for another
+//! device's window decides from there alone and never signs. The methods
+//! are refused to agents' scoped token ([`zeron_rpc::agent_allowed`]);
+//! signing and templates stay this device's ([`zeron_rpc::peer_refused`]).
 //!
 //! What this holds against: an agent through its MCP server (on this device
 //! or another: its token never reaches a review, here or forwarded), a
 //! plugin or a template (which have no IPC token at all; they reach the
 //! engine only through the app's host actions, none of which mints a review
-//! outside the consent window), anything on the relay that isn't one of
-//! your own verified devices, and a stale or replayed decision for
+//! outside the consent window), anything that can't reach your device room
+//! (it takes your account's sign-in), and a stale or replayed decision for
 //! something other than what was shown. Not against code running as the
 //! user that reads the app's full token from the data dir (here, or on
 //! another of your devices): that code can rewrite the data dir itself.
@@ -64,7 +63,7 @@ pub struct Reviews {
 /// mints a fresh one and tries again.
 pub fn needed(what: &str) -> RpcError {
     RpcError::Failed(format!(
-        "review: {what} needs Zeron's own consent window (open it there and decide again)"
+        "review: {what} needs Zeron's consent window (open the plugin again and decide there)"
     ))
 }
 

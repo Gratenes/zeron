@@ -162,9 +162,9 @@ async fn a_review_allows_once() {
     assert_eq!(status(&f.plugins, "focus").await, Status::Off);
 }
 
-/// R6: an agent (its MCP server's scoped token) or a relay dial the edge
-/// didn't verify can't mint a review, nor use one minted for the app, nor
-/// sign: the engine checks who asked even past the transport guards.
+/// R6: an agent (its MCP server's scoped token) can't mint a review; it and
+/// another device can't use one minted for the app, nor sign: the engine
+/// checks who asked even past the transport guards.
 #[tokio::test]
 async fn agents_and_other_devices_cannot_review_allow_or_sign() {
     let f = fixture();
@@ -175,7 +175,9 @@ async fn agents_and_other_devices_cannot_review_allow_or_sign() {
             call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "evil", "hash": hash })),
         )
         .await;
-        assert!(minted.is_err(), "{caller:?} minted a review: {minted:?}");
+        if matches!(caller, Caller::Agent { .. }) {
+            assert!(minted.is_err(), "{caller:?} minted a review: {minted:?}");
+        }
 
         // Even holding one (say, read off the app's connection).
         let review = call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "evil", "hash": hash }))
@@ -208,10 +210,10 @@ async fn agents_and_other_devices_cannot_review_allow_or_sign() {
     }
 }
 
-/// Another of your devices the edge verified (its consent window showing
-/// this device's plugin) mints a review here and allows with it: good from
-/// that device alone (not this device's app, not a third device), once,
-/// never for signing; templates stay this device's.
+/// Another of your devices (its consent window showing this device's
+/// plugin) mints a review here and allows with it: good from that device
+/// alone (not this device's app, not a third device), once, never for
+/// signing; templates stay this device's.
 #[tokio::test]
 async fn a_verified_device_of_yours_can_review_and_allow_here() {
     let f = fixture();
@@ -270,6 +272,52 @@ async fn a_verified_device_of_yours_can_review_and_allow_here() {
     let replayed = with_caller(peer("dev-a"), call(&f.plugins, methods::DECIDE_PLUGIN, decide(review))).await;
     assert!(replayed.is_err(), "{replayed:?}");
     assert_eq!(status(&f.plugins, "focus").await, Status::Off);
+}
+
+/// A relay dial the edge didn't verify reviews and allows too, bound to the
+/// device its engine says it is (`callerDeviceId`): not good from another
+/// claim, nor from a verified device, nor from this device's app.
+#[tokio::test]
+async fn an_unverified_device_reviews_and_allows_bound_to_its_claim() {
+    let f = fixture();
+    let hash = waiting(&f.plugins, "focus").await;
+    let unverified = || Caller::Peer { device: None };
+    let mint = |claim: &'static str| {
+        let plugins = &f.plugins;
+        let hash = hash.clone();
+        async move {
+            with_caller(
+                Caller::Peer { device: None },
+                call(plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash, "callerDeviceId": claim })),
+            )
+            .await
+            .unwrap()["review"]
+            .clone()
+        }
+    };
+    let decide = |review: &Value, claim: &str| {
+        json!({ "id": "focus", "allow": true, "hash": hash, "review": review, "callerDeviceId": claim })
+    };
+
+    for (caller, claim) in [(unverified(), "dev-b"), (Caller::Peer { device: Some("dev-b".into()) }, "dev-x"), (Caller::Local, "dev-a")] {
+        let review = mint("dev-a").await;
+        let refused = with_caller(caller.clone(), call(&f.plugins, methods::DECIDE_PLUGIN, decide(&review, claim))).await;
+        assert!(refused.as_ref().is_err_and(|e| e.starts_with("review:")), "{caller:?} {claim}: {refused:?}");
+        assert_eq!(status(&f.plugins, "focus").await, Status::Pending);
+    }
+    // No claim at all: any unverified peer alike, still once.
+    let review = with_caller(unverified(), call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash })))
+        .await
+        .unwrap()["review"]
+        .clone();
+    let claimed = with_caller(unverified(), call(&f.plugins, methods::DECIDE_PLUGIN, decide(&review, "dev-a"))).await;
+    assert!(claimed.is_err(), "{claimed:?}");
+
+    let review = mint("dev-a").await;
+    let allowed = with_caller(unverified(), call(&f.plugins, methods::DECIDE_PLUGIN, decide(&review, "dev-a")))
+        .await
+        .unwrap();
+    assert_eq!(allowed["status"], "on", "{allowed}");
 }
 
 /// R4/R6: SignPlugin (which makes a plugin yours) needs the consent

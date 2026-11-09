@@ -8,8 +8,8 @@
 //! shown here, named for that device, and can be allowed or turned down
 //! from here: the decision goes to its engine (`targetDeviceId`), and an
 //! Allow carries a review that engine minted for this device, asked for
-//! through the relay as a device the edge verified (its engine refuses one
-//! from anyone else, and refuses signing from anywhere but its own app).
+//! through your device room's relay (good from this device alone; its
+//! engine refuses signing from anywhere but its own app).
 //!
 //! What a sheet shows is what's decided: its Allow carries a review the
 //! host mints from the plugin's engine (this one's or the other device's)
@@ -368,8 +368,21 @@ fn said(error: &str, on: &On) -> String {
     match (error, on) {
         ("offline" | "closed", _) => "Zeron isn't running right now. Try again in a moment.".into(),
         (e, Some((_, name))) if remote::unreachable(e) => format!("Can't reach {name} right now. Try again once it's online."),
+        // A Zeron there from before another device could allow its plugins.
+        (e, Some((_, name))) if older_there(e) => {
+            format!("Zeron on {name} needs updating before it can be allowed from here.")
+        }
+        (e, _) if e.starts_with("review:") => "That answer didn't go through. Choose Allow again.".into(),
         (other, _) => other.to_string(),
     }
+}
+
+/// Whether `error` is an older engine refusing a review or an Allow from
+/// another device.
+fn older_there(error: &str) -> bool {
+    error.starts_with("ReviewPlugin is only answered over this device's local IPC")
+        || error.starts_with("DecidePlugin: only this device's own window can do that")
+        || error.starts_with("ReviewPlugin: only that device's own window")
 }
 
 #[cfg(test)]
@@ -428,6 +441,21 @@ mod tests {
         let elsewhere = Some(("dev-b/focus@h1".to_string(), since));
         assert!(!may_allow(&elsewhere, "dev-b/focus@h1", since + ARMED / 2));
         assert!(may_allow(&elsewhere, "dev-b/focus@h1", since + ARMED));
+    }
+
+    /// Another device's engine from before this could allow: said plainly.
+    #[test]
+    fn an_older_zeron_there_and_a_lost_review_are_said_plainly() {
+        let on: On = Some(("dev-b".into(), "Devbox".into()));
+        assert_eq!(
+            said("ReviewPlugin is only answered over this device's local IPC", &on),
+            "Zeron on Devbox needs updating before it can be allowed from here."
+        );
+        assert_eq!(
+            said("review: Allowing a plugin needs Zeron's consent window (open the plugin again and decide there)", &on),
+            "That answer didn't go through. Choose Allow again."
+        );
+        assert_eq!(said("It changed while you were looking; review it again", &None), "It changed while you were looking; review it again");
     }
 
     #[test]

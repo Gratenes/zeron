@@ -454,17 +454,18 @@ pub mod methods {
     /// `{id, allow, hash, review?}` → `PluginItem`. Allowing needs `review`,
     /// minted by [`REVIEW_PLUGIN`] for the same `id` and `hash`, by the same
     /// caller: only a Zeron consent window holds one. Declining (`allow:
-    /// false`) needs none. Over the relay, allowing comes from another of
-    /// your devices the edge verified alone ([`verified_peer_only`]).
+    /// false`) needs none. Another of your devices may allow over the relay,
+    /// with a review it asked for here.
     pub const DECIDE_PLUGIN: &str = "DecidePlugin";
     /// `{id, hash}` → `{review}`: a one-time capability for one decision
     /// about plugin `id` as shown (`hash`) — `DecidePlugin {allow: true}` or
     /// `SignPlugin {id}` — good for a few minutes, from the caller it was
     /// minted for alone. Minted for a consent window's own host only: this
     /// device's app (full-token local IPC), or, for an Allow only, another
-    /// of your devices the edge verified on the relay link (its window
-    /// shows this device's plugin). Never an agent, never an unverified
-    /// dial.
+    /// of your devices through your device room's relay (its window shows
+    /// this device's plugin; its engine says which device it is,
+    /// [`CALLER_DEVICE_PARAM`], and the edge's verified device wins over
+    /// that). Never an agent.
     pub const REVIEW_PLUGIN: &str = "ReviewPlugin";
     /// `{id, off}` → `PluginItem` (an allowed plugin only).
     pub const SET_PLUGIN_OFF: &str = "SetPluginOff";
@@ -692,9 +693,8 @@ pub fn local_only(method: &str) -> bool {
 /// Methods a peer device may not have answered here even though they're
 /// relay-forwardable: a file path names a file on the caller's device,
 /// never this one. Declining, turning off, removing, installing from a link
-/// (which lands waiting here) and, from a verified device
-/// ([`verified_peer_only`]), reviewing and allowing stay open to your other
-/// devices (Settings → Plugins' device switcher).
+/// (which lands waiting here), reviewing and allowing stay open to your
+/// other devices (Settings → Plugins' device switcher).
 pub fn peer_refused(method: &str, params: &serde_json::Value) -> bool {
     if local_only(method) {
         return true;
@@ -705,18 +705,11 @@ pub fn peer_refused(method: &str, params: &serde_json::Value) -> bool {
     }
 }
 
-/// What a peer may have answered here only when the edge verified which of
-/// your devices it is (`fromDevice` on the relay link): asking for a review
-/// of a plugin here and allowing it (`DecidePlugin` with anything but
-/// `allow: false`), from that device's own consent window. A dial the edge
-/// didn't verify can still decline.
-pub fn verified_peer_only(method: &str, params: &serde_json::Value) -> bool {
-    match method {
-        methods::REVIEW_PLUGIN => true,
-        methods::DECIDE_PLUGIN => params.get("allow").is_none_or(|allow| allow != &serde_json::Value::Bool(false)),
-        _ => false,
-    }
-}
+/// The param a forwarding engine names itself in on `ReviewPlugin` and
+/// `DecidePlugin` (its device id, as it says): the plugin's engine binds a
+/// review to who asked for it, by the device the edge verified on the link
+/// if any, else by this.
+pub const CALLER_DEVICE_PARAM: &str = "callerDeviceId";
 
 /// The methods an agent's `zeron mcp` server may call with the
 /// agent-scoped IPC token: what its tools need and nothing that grants
@@ -1404,18 +1397,11 @@ mod tests {
     }
 
     #[test]
-    fn peers_may_decline_and_only_verified_devices_review_or_allow() {
+    fn peers_may_review_allow_and_decline_but_never_sign() {
         let hash = "ab".repeat(32);
-        let allow = serde_json::json!({"id": "x", "allow": true, "hash": hash});
-        assert!(!peer_refused(methods::DECIDE_PLUGIN, &allow));
-        assert!(verified_peer_only(methods::DECIDE_PLUGIN, &allow));
-        assert!(verified_peer_only(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": "yes"})));
-        assert!(verified_peer_only(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x"})));
-        let decline = serde_json::json!({"id": "x", "allow": false});
-        assert!(!peer_refused(methods::DECIDE_PLUGIN, &decline));
-        assert!(!verified_peer_only(methods::DECIDE_PLUGIN, &decline));
+        assert!(!peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": true, "hash": hash})));
+        assert!(!peer_refused(methods::DECIDE_PLUGIN, &serde_json::json!({"id": "x", "allow": false})));
         assert!(!peer_refused(methods::REVIEW_PLUGIN, &serde_json::json!({})));
-        assert!(verified_peer_only(methods::REVIEW_PLUGIN, &serde_json::json!({})));
         assert!(peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({"path": "/x"})));
         assert!(!peer_refused(methods::INSTALL_PLUGIN, &serde_json::json!({"url": "https://x", "path": null})));
         // Signing (this device's key) and templates stay this device's.

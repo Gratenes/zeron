@@ -2493,8 +2493,9 @@ fn forwardable(method: &str) -> bool {
             // (from a link; it lands waiting there) and removes them on
             // another of your devices from this one, and allows them: its
             // consent window asks that device for a review of the plugin
-            // shown (minted there, for this device alone) and brings it
-            // back with the Allow (`zeron_rpc::verified_peer_only`).
+            // shown (minted there, for this device alone: it names itself,
+            // `zeron_rpc::CALLER_DEVICE_PARAM`) and brings it back with the
+            // Allow.
             | methods::LIST_PLUGINS
             | methods::WATCH_PLUGINS
             | methods::REVIEW_PLUGIN
@@ -2935,6 +2936,18 @@ impl RpcService for EngineRpc {
             && target != self.doc_host.device_id()
         {
             let target = target.to_string();
+            // A review there is bound to who asked for it: this device says
+            // which it is (the edge's verified device wins, when it stamps
+            // one).
+            let mut params = params;
+            if matches!(method, methods::REVIEW_PLUGIN | methods::DECIDE_PLUGIN)
+                && let Some(object) = params.as_object_mut()
+            {
+                object.insert(
+                    zeron_rpc::CALLER_DEVICE_PARAM.into(),
+                    serde_json::json!(self.doc_host.device_id()),
+                );
+            }
             // A file on this device can't be read there: another device
             // installs from a link.
             if method == methods::INSTALL_PLUGIN && params.get("path").is_some_and(|p| !p.is_null()) {
