@@ -472,7 +472,7 @@ zeron.on("run.preparing", function(e)
 end, { provider = "claude-code" })
 ```
 
-`plugins-dev/account-pin` is the whole of it: it answers with the saved account that has the fewest chats (counted from `zeron.pins()`), so new chats take turns.
+`plugins-dev/account-pin` is the whole of it: it answers with the saved account that has the fewest chats (counted from `zeron.pins()`), so new chats take turns. `plugins-dev/claude-rotation` is the fuller one: it answers with the saved Claude Code account that has the most left (from `zeron.usage()`, skipping `signed_out` accounts and any with a `limited_until`), falls back to the fewest chats where usage is level or unread, moves a chat to another account when a limit stops its turn (`limit.hit`), and has a switch in its settings.
 
 
 ## Sending messages

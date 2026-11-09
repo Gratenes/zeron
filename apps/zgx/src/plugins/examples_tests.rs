@@ -4079,6 +4079,19 @@ fn account_pin_says_what_its_service_did() {
 }
 
 #[test]
+fn claude_rotation_says_what_its_service_did() {
+    let (mut app, heard) = shell_with_agents(vec![example("claude-rotation")], json!({}));
+    assert_eq!(app.error(), None, "the shell with the example failed");
+    tell(&mut app, "claude-rotation", "pinned", json!({ "chat": "s-unknown", "to": "b@example.com" }));
+    tell(&mut app, "claude-rotation", "moved", json!({ "chat": "s-unknown", "to": "c@example.com" }));
+    let toasts = said(&heard, "plugin.claude-rotation.toast");
+    assert_eq!(toasts.len(), 2, "{toasts:?}");
+    assert!(toasts[0].contains("running on b@example.com"), "{toasts:?}");
+    assert!(toasts[1].contains("moved to c@example.com"), "{toasts:?}");
+    assert_eq!(app.error(), None);
+}
+
+#[test]
 fn keep_going_says_what_its_service_sent() {
     let (mut app, heard) = shell_with_agents(vec![example("keep-going")], json!({}));
     assert_eq!(app.error(), None, "the shell with the example failed");

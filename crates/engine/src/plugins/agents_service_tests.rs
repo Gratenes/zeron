@@ -370,6 +370,83 @@ async fn agents_the_account_pin_example_spreads_new_chats_across_saved_accounts(
     assert_eq!(ops, ["pin_account"; 4], "{state}");
 }
 
+/// Installs a plugins-dev example as it ships, signed as yours and allowed.
+async fn install_example(f: &Fixture, id: &str) {
+    let dir = f.plugins.plugins_dir().join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let example = format!("../../apps/zgx/plugins-dev/{id}");
+    for file in ["zeron-plugin.json", "init.luau", "service.luau"] {
+        std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join(&example).join(file), dir.join(file)).unwrap();
+    }
+    std::fs::write(dir.join("zeron.luau"), scaffold::SDK).unwrap();
+    let signed = call(&f.plugins, methods::SIGN_PLUGIN, json!({ "id": id })).await;
+    assert!(signed.get("rpc_error").is_none(), "{signed}");
+    let items = call(&f.plugins, methods::LIST_PLUGINS, json!({})).await["plugins"].clone();
+    let item = items.as_array().unwrap().iter().find(|p| p["id"] == id).unwrap().clone();
+    let decided = call(&f.plugins, methods::DECIDE_PLUGIN, json!({ "id": id, "allow": true, "hash": item["hash"] })).await;
+    assert_eq!(decided["status"], "on", "{decided}");
+}
+
+fn pinned_to(f: &Fixture, chat: &str) -> Option<String> {
+    lock(&f.host.pinned).iter().find(|p| p.chat == chat).map(|p| p.account.clone())
+}
+
+/// The rotation example (plugins-dev/claude-rotation), as it ships: it answers
+/// a chat's first run with the saved account that has the most left, passing
+/// over signed-out and limited accounts, balances level accounts by chats,
+/// moves a chat a limit stopped, and follows its setting.
+#[tokio::test]
+async fn agents_the_claude_rotation_example_picks_the_account_with_headroom_and_moves_limited_chats() {
+    let f = fixture();
+    lock(&f.host.mechanisms).insert(zeron_proto::HarnessId::ClaudeCode, "login-dir");
+    {
+        let mut s = lock(&f.host.snapshot);
+        // a0: signed out. a3: its limit hasn't reset. a1 (active) 50% used, a2 10%.
+        let mut signed_out = account("a0", false, 0.0);
+        signed_out.usage_error = Some("Sign in again".into());
+        let mut limited = account("a3", false, 1.0);
+        limited.usage_windows[0].resets_at = Some(chrono::TimeZone::timestamp_opt(&chrono::Utc, 4_102_444_800, 0).unwrap());
+        s.accounts.insert(0, signed_out);
+        s.accounts.push(limited);
+    }
+    install_example(&f, "claude-rotation").await;
+    until("its listeners are known", || {
+        f.plugins.inner.services.status("claude-rotation")["listeners"].as_array().is_some_and(|l| l.len() == 4)
+    })
+    .await;
+    let agents = f.plugins.agents().clone();
+    agents.observe_accounts(&snapshot(&f));
+    let claude = zeron_proto::HarnessId::ClaudeCode;
+
+    // Most left: a2 (the binding window is its week, 20%), never a0 or a3.
+    assert_eq!(agents.preparing(claude, "c1").await.as_deref(), Some("a2"));
+    assert_eq!(agents.preparing(claude, "c2").await.as_deref(), Some("a2"), "headroom beats the chat count");
+    // Level (within 5 points): the account with fewer chats.
+    for a in lock(&f.host.snapshot).accounts.iter_mut().filter(|a| a.id == "a2") {
+        a.usage_windows[0].used_fraction = 0.52;
+    }
+    agents.observe_accounts(&snapshot(&f));
+    assert_eq!(agents.preparing(claude, "c3").await.as_deref(), Some("a1"));
+    assert_eq!(f.host.activations.load(Ordering::SeqCst), 0, "the active account is never switched");
+
+    // A turn a limit stopped: that chat moves to another account for its next turn.
+    assert_eq!(pinned_to(&f, "c1").as_deref(), Some("a2"));
+    agents.observe_problem("c1", "Claude usage limit reached — try again after the limit resets.");
+    until("c1 moved", || pinned_to(&f, "c1").as_deref() == Some("a1")).await;
+
+    // Off: it answers nothing, and the chat stays where it is.
+    let off = ask_plugin(&f, "claude-rotation", "set_enabled", json!({ "enabled": false })).await;
+    assert_eq!(off["value"]["enabled"], false, "{off}");
+    assert_eq!(agents.preparing(claude, "c4").await, None);
+    let on = ask_plugin(&f, "claude-rotation", "set_enabled", json!({ "enabled": true })).await;
+    assert_eq!(on["value"]["enabled"], true, "{on}");
+    assert!(agents.preparing(claude, "c5").await.is_some());
+}
+
+async fn ask_plugin(f: &Fixture, plugin: &str, method: &str, args: serde_json::Value) -> serde_json::Value {
+    call(&f.plugins, methods::CALL_PLUGIN_SERVICE, json!({ "plugin": plugin, "method": method, "args": args })).await
+}
+
 #[test]
 fn agents_pinning_is_known_and_stays_outside_the_sandbox() {
     assert!(manifest::KNOWN_PERMISSIONS.contains(&"accounts.pin"));
