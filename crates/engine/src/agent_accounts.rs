@@ -120,6 +120,7 @@ mod proxy;
 pub use muse::MuseRunEnvironment;
 mod rotation;
 pub use pins::{ChatPin, PinHook, PinRunEnvironment};
+pub(crate) use rotation::LIVE as LIVE_CREDENTIAL;
 pub use rotation::{
     AccountsRunEnvironment, Lease, RotationMechanism, default_rotation_mechanism,
     rotation_supported,

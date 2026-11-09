@@ -3716,6 +3716,30 @@ fn finish_segment<'a>(
     }
 }
 
+/// What a run relaunched after its login was refused is told.
+const AUTH_RELAUNCH_PROMPT: &str = "Your Claude sign-in was refused part-way through, and has been \
+    renewed. Carry on with what you were doing.";
+
+/// Whether a run that just ended with an error is owed the one relaunch:
+/// it was a Claude run on an account of its own (rotated or pinned: a login
+/// the CLI holds apart from the live one, which can be refreshed under it),
+/// and its login was refused (`authentication_failed`).
+fn auth_relaunch_due(
+    harness: HarnessId,
+    credential: Option<&str>,
+    saw_auth_error: bool,
+    done_error: Option<&str>,
+) -> bool {
+    use zeron_proto::run_errors::{ProviderProblem, provider_problem};
+    harness == HarnessId::ClaudeCode
+        && credential.is_some_and(|c| {
+            let live = crate::agent_accounts::LIVE_CREDENTIAL;
+            c != live && !c.ends_with(&format!(":{live}"))
+        })
+        && (saw_auth_error
+            || done_error.and_then(provider_problem) == Some(ProviderProblem::SignedOut))
+}
+
 /// Resume bookkeeping for one run task: which user entry the run answers (so
 /// the startup-crash retry re-dispatches idempotently against the same doc
 /// entry), whether `dispatch` injected the resume id itself (only
@@ -4275,6 +4299,10 @@ async fn drive_run(
     let mut interrupt_deadline: Option<tokio::time::Instant> = None;
     let mut interrupted = false;
     let mut saw_session_started = false;
+    // The run was refused its login (see `auth_relaunch_due`), and how many
+    // turns of it have ended: the safety net's evidence.
+    let mut saw_auth_error = false;
+    let mut dones_seen = 0u32;
     // Liveness heartbeat: this loop RUNNING is proof the harness stream is
     // open, so freshness must not depend on events arriving. Silent stretches
     // are normal and UNBOUNDED — a long tool call, redacted thinking, an
@@ -5104,6 +5132,60 @@ async fn drive_run(
                 }
             }
             _ => {}
+        }
+
+        if let AgentEvent::Error { message } = &event
+            && zeron_proto::run_errors::provider_problem(message)
+                == Some(zeron_proto::run_errors::ProviderProblem::SignedOut)
+        {
+            saw_auth_error = true;
+        }
+
+        // Safety net for a run on a rotated or pinned Claude account whose
+        // login was refused anyway (a token killed under it, a login that
+        // moved): relaunch it ONCE on the credential a run would get now,
+        // resumed, and carry on. See `auth_relaunch_due`.
+        if !resume_state.startup_retry
+            && !resume_state.idle
+            && !interrupted
+            && let AgentEvent::Done {
+                status: DoneStatus::Errored,
+                error,
+                ..
+            } = &event
+            && let started_with = lock(&inner.runs)
+                .get(&chat_id)
+                .and_then(|h| h.credential.clone())
+            && auth_relaunch_due(harness_id, started_with.as_deref(), saw_auth_error, error.as_deref())
+            && let Some(mut retry) = retry_request.take()
+        {
+            // The run's first prompt is only still the right one while its
+            // first turn is what failed, before it said anything; after
+            // that (a later turn, a wake turn, work already done) the
+            // session carries on from where it was.
+            if dones_seen > 0 || self_continued_turn || !folded.is_empty() {
+                retry.prompt = AUTH_RELAUNCH_PROMPT.into();
+            }
+            tracing::warn!(chat = %chat_id, credential = ?started_with,
+                "the run's Claude login was refused; relaunching it once on the current login");
+            inner.remove_run(&chat_id, &run_id);
+            let engine = SessionsEngine { inner: inner.clone() };
+            let chat = chat_id.clone();
+            let message_id = resume_state.user_message_id.clone();
+            let stops_seen = resume_state.stops_seen;
+            tokio::spawn(async move {
+                if let Err(err) = engine
+                    .dispatch_with(&chat, harness_id, retry, Some(message_id), true, 0, Some(stops_seen))
+                    .await
+                {
+                    tracing::error!(chat = %chat, error = %err, "authentication relaunch dispatch failed");
+                    engine.inner.set_status(&chat, SessionStatus::Errored, false);
+                }
+            });
+            return;
+        }
+        if matches!(event, AgentEvent::Done { .. }) {
+            dones_seen += 1;
         }
 
         // Startup-crash retry: a run that dies before ever starting (errored
@@ -6602,6 +6684,22 @@ mod tests {
             entry("a1", MessageRole::Assistant, "  "),
         ];
         assert!(!answered_in(&blank, "u1"));
+    }
+
+    #[test]
+    fn a_refused_login_relaunches_only_runs_on_an_account_of_their_own() {
+        let refused = "Authentication failed — sign in to Claude again.";
+        // A rotated or pinned Claude run whose login was refused: once.
+        assert!(auth_relaunch_due(HarnessId::ClaudeCode, Some("login:abc"), true, None));
+        assert!(auth_relaunch_due(HarnessId::ClaudeCode, Some("rotation:abc:1f2e"), false, Some(refused)));
+        // The live login, a run with no known credential, another provider,
+        // or an error that isn't a refused login: never.
+        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, Some("live"), true, Some(refused)));
+        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, Some("rotation:abc:live"), true, Some(refused)));
+        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, None, true, Some(refused)));
+        assert!(!auth_relaunch_due(HarnessId::Codex, Some("login:abc"), true, Some(refused)));
+        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, Some("login:abc"), false, Some("Claude usage limit reached")));
+        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, Some("login:abc"), false, None));
     }
 
     #[test]
