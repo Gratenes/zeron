@@ -696,6 +696,7 @@ mod tests {
             client: String::new(),
             callback_port: 0,
             managed: false,
+            borrowed: false,
         };
         std::fs::create_dir_all(&config.data_dir).unwrap();
         let lock = std::fs::File::create(config.data_dir.join("engine.lock")).unwrap();
