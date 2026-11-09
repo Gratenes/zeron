@@ -1516,8 +1516,24 @@ impl Plugins {
             .collect()
     }
 
-    /// Use up a consent-window review for `subject` as shown (`hash`):
-    /// refused to anything but this device's own app.
+    /// Who asks for a review of `kind`, or brings one: this device's app
+    /// (`None`), or, for allowing a plugin, another of your devices the
+    /// edge verified on the relay link (its consent window, showing this
+    /// device's plugin). Refused to an agent, an unverified dial, and to
+    /// another device for a template.
+    fn reviewer(kind: reviews::Kind) -> Result<Option<String>, RpcError> {
+        match (zeron_rpc::caller(), kind) {
+            (zeron_rpc::Caller::Local, _) => Ok(None),
+            (zeron_rpc::Caller::Peer { device: Some(device) }, reviews::Kind::Plugin) => Ok(Some(device)),
+            _ => Err(reviews::needed(match kind {
+                reviews::Kind::Plugin => "Allowing a plugin",
+                reviews::Kind::Template => "Allowing a template",
+            })),
+        }
+    }
+
+    /// Use up a consent-window review for `subject` as shown (`hash`),
+    /// brought by whoever minted it ([`Self::reviewer`]).
     fn redeem_review(
         &self,
         kind: reviews::Kind,
@@ -1525,13 +1541,8 @@ impl Plugins {
         hash: &str,
         review: Option<&str>,
     ) -> Result<(), RpcError> {
-        if !zeron_rpc::caller().is_local() {
-            return Err(reviews::needed(match kind {
-                reviews::Kind::Plugin => "Allowing a plugin",
-                reviews::Kind::Template => "Allowing a template",
-            }));
-        }
-        lock(&self.inner.reviews).redeem(kind, subject, hash, review)
+        let by = Self::reviewer(kind)?;
+        lock(&self.inner.reviews).redeem(kind, subject, hash, review, by.as_deref())
     }
 
     /// `SignPlugin`'s review: for the plugin `id` names, or `path` when it's
@@ -1557,6 +1568,11 @@ impl Plugins {
         let Some(id) = id else {
             return Err(failed("Only a plugin in your plugins folder can be signed, by its id"));
         };
+        // Signing is with this device's key: this device's app alone
+        // (another device's window allows, never signs).
+        if !zeron_rpc::caller().is_local() {
+            return Err(reviews::needed("Signing a plugin"));
+        }
         self.rescan().await;
         let hash = self.entry(&id).map(|e| e.item.hash).unwrap_or_default();
         self.redeem_review(reviews::Kind::Plugin, &id, &hash, review)
@@ -1581,9 +1597,14 @@ impl Plugins {
             }
             methods::REVIEW_PLUGIN | methods::REVIEW_TEMPLATE => {
                 let p: ReviewParams = parse_params(params)?;
-                if !zeron_rpc::caller().is_local() {
-                    return Err(reviews::needed("A review"));
-                }
+                // This device's consent window, or (a plugin only) another
+                // of your verified devices' showing this device's plugin.
+                let kind = if method == methods::REVIEW_PLUGIN {
+                    reviews::Kind::Plugin
+                } else {
+                    reviews::Kind::Template
+                };
+                let by = Self::reviewer(kind).map_err(|_| reviews::needed("A review"))?;
                 let review = if method == methods::REVIEW_PLUGIN {
                     let id = p.id.unwrap_or_default();
                     self.rescan().await;
@@ -1593,10 +1614,10 @@ impl Plugins {
                     if entry.item.hash != p.hash {
                         return Err(failed("It changed while you were looking; review it again"));
                     }
-                    lock(&self.inner.reviews).mint(reviews::Kind::Plugin, &id, &p.hash)?
+                    lock(&self.inner.reviews).mint(kind, &id, &p.hash, by.as_deref())?
                 } else {
                     let pending = p.pending.unwrap_or_default();
-                    lock(&self.inner.reviews).mint(reviews::Kind::Template, pending.trim(), &p.hash)?
+                    lock(&self.inner.reviews).mint(kind, pending.trim(), &p.hash, by.as_deref())?
                 };
                 RpcReply::value(&serde_json::json!({ "review": review }))
             }
@@ -1609,7 +1630,8 @@ impl Plugins {
             methods::DECIDE_PLUGIN => {
                 let p: DecideParams = parse_params(params)?;
                 // Allowing is Zeron's consent window's alone: this device's
-                // app, with a review minted for this plugin as shown.
+                // app, or another of your devices' showing this plugin, with
+                // a review minted here for this plugin as shown, for it.
                 if p.allow {
                     // (Changed since it was shown: say so, keeping the review.)
                     self.rescan().await;

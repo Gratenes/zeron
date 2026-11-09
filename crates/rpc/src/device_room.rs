@@ -328,9 +328,11 @@ impl HostRelayConfig {
 
 /// The service as relay clients see it: every method but the ones a peer
 /// may not have answered here ([`crate::peer_refused`]: the local-only
-/// ones, allowing a plugin, a file path on the caller's device), refused
-/// before they reach it; the rest served as [`crate::Caller::Peer`], with
-/// the device the edge verified for this connection (`fromDevice`), if any.
+/// ones, a file path on the caller's device), and, from a dial the edge
+/// didn't verify, reviewing and allowing a plugin
+/// ([`crate::verified_peer_only`]), refused before they reach it; the rest
+/// served as [`crate::Caller::Peer`], with the device the edge verified for
+/// this connection (`fromDevice`), if any.
 struct RelayGuard {
     inner: Arc<dyn RpcService>,
     device: Option<String>,
@@ -349,6 +351,11 @@ impl RpcService for RelayGuard {
             } else {
                 format!("{method}: only this device's own window can do that")
             }));
+        }
+        if self.device.is_none() && crate::verified_peer_only(method, &params) {
+            return Err(RpcError::Failed(format!(
+                "{method}: only one of your own devices, verified on the link, can do that"
+            )));
         }
         let caller = crate::Caller::Peer { device: self.device.clone() };
         crate::with_caller(caller, self.inner.handle(method, params)).await
@@ -1293,10 +1300,10 @@ mod tests {
         assert_eq!(reached.load(Ordering::SeqCst), 3);
     }
 
-    /// R6/R25: a peer device can't allow a plugin here, mint a review, sign,
-    /// or install from a path; it can still decline, turn off and install
-    /// from a link (which lands waiting here). What it reaches runs as a
-    /// peer.
+    /// R6/R25: a dial the edge didn't verify can't allow a plugin here or
+    /// mint a review; no peer can sign, decide a template or install from a
+    /// path; any can still decline, turn off and install from a link (which
+    /// lands waiting here). What it reaches runs as a peer.
     #[tokio::test]
     async fn relay_refuses_allowing_and_paths_from_peers() {
         use crate::{RpcReply, RpcService, methods};
@@ -1346,6 +1353,58 @@ mod tests {
         assert!(
             seen.iter().all(|(_, caller)| matches!(caller, crate::Caller::Peer { .. })),
             "served as a peer: {seen:?}"
+        );
+    }
+
+    /// Another of your devices the edge verified (`fromDevice`) may ask for a
+    /// review of a plugin here and allow it (its consent window, showing
+    /// this device's plugin; the engine checks the review). Signing,
+    /// templates and paths stay refused.
+    #[tokio::test]
+    async fn relay_lets_a_verified_device_review_and_allow_a_plugin() {
+        use crate::{RpcReply, RpcService, methods};
+        use std::sync::{Arc, Mutex};
+
+        struct Seen(Arc<Mutex<Vec<(String, crate::Caller)>>>);
+        #[async_trait::async_trait]
+        impl RpcService for Seen {
+            async fn handle(
+                &self,
+                method: &str,
+                _params: serde_json::Value,
+            ) -> Result<RpcReply, crate::RpcError> {
+                self.0.lock().unwrap().push((method.to_owned(), crate::caller()));
+                Ok(RpcReply::Value(serde_json::json!({})))
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let guard = super::RelayGuard {
+            inner: Arc::new(Seen(seen.clone())),
+            device: Some("device-a".into()),
+        };
+        let hash = "ab".repeat(32);
+        for (method, params) in [
+            (methods::SIGN_PLUGIN, serde_json::json!({"id": "x", "review": "r"})),
+            (methods::REVIEW_TEMPLATE, serde_json::json!({"pending": "x", "hash": hash})),
+            (methods::DECIDE_TEMPLATE, serde_json::json!({"pending": "x", "allow": true, "hash": hash})),
+            (methods::INSTALL_PLUGIN, serde_json::json!({"path": "/tmp/x.zeron-plugin"})),
+        ] {
+            assert!(guard.handle(method, params.clone()).await.is_err(), "{method} {params}");
+        }
+        assert!(seen.lock().unwrap().is_empty(), "refused before the service");
+
+        for (method, params) in [
+            (methods::REVIEW_PLUGIN, serde_json::json!({"id": "x", "hash": hash})),
+            (methods::DECIDE_PLUGIN, serde_json::json!({"id": "x", "allow": true, "hash": hash, "review": "r"})),
+        ] {
+            guard.handle(method, params).await.expect(method);
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(
+            seen.iter().all(|(_, caller)| *caller == crate::Caller::Peer { device: Some("device-a".into()) }),
+            "served as that device: {seen:?}"
         );
     }
 

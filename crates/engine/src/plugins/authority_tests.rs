@@ -162,9 +162,9 @@ async fn a_review_allows_once() {
     assert_eq!(status(&f.plugins, "focus").await, Status::Off);
 }
 
-/// R6: an agent (its MCP server's scoped token) or another device can't
-/// mint a review, nor use one minted for the app, nor sign: the engine
-/// checks who asked even past the transport guards.
+/// R6: an agent (its MCP server's scoped token) or a relay dial the edge
+/// didn't verify can't mint a review, nor use one minted for the app, nor
+/// sign: the engine checks who asked even past the transport guards.
 #[tokio::test]
 async fn agents_and_other_devices_cannot_review_allow_or_sign() {
     let f = fixture();
@@ -206,6 +206,70 @@ async fn agents_and_other_devices_cannot_review_allow_or_sign() {
         assert_eq!(status(&f.plugins, "evil").await, Status::Pending);
         assert!(!f.plugins.entry("evil").unwrap().item.own, "not made yours");
     }
+}
+
+/// Another of your devices the edge verified (its consent window showing
+/// this device's plugin) mints a review here and allows with it: good from
+/// that device alone (not this device's app, not a third device), once,
+/// never for signing; templates stay this device's.
+#[tokio::test]
+async fn a_verified_device_of_yours_can_review_and_allow_here() {
+    let f = fixture();
+    let hash = waiting(&f.plugins, "focus").await;
+    let peer = |device: &str| Caller::Peer { device: Some(device.into()) };
+    let mint = |caller: Caller| {
+        let plugins = &f.plugins;
+        let hash = hash.clone();
+        async move {
+            with_caller(caller, call(plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash })))
+                .await
+                .unwrap()["review"]
+                .clone()
+        }
+    };
+    let decide = |review: Value| json!({ "id": "focus", "allow": true, "hash": hash, "review": review });
+
+    // Minted for device A: refused from this device's app and from device B
+    // (and used up by the try).
+    for caller in [Caller::Local, peer("dev-b")] {
+        let review = mint(peer("dev-a")).await;
+        let refused = with_caller(caller.clone(), call(&f.plugins, methods::DECIDE_PLUGIN, decide(review.clone()))).await;
+        assert!(refused.as_ref().is_err_and(|e| e.starts_with("review:")), "{caller:?}: {refused:?}");
+        let used = with_caller(peer("dev-a"), call(&f.plugins, methods::DECIDE_PLUGIN, decide(review))).await;
+        assert!(used.is_err(), "{used:?}");
+        assert_eq!(status(&f.plugins, "focus").await, Status::Pending);
+    }
+    // Minted for this device's app: refused from device A.
+    let review = mint(Caller::Local).await;
+    let refused = with_caller(peer("dev-a"), call(&f.plugins, methods::DECIDE_PLUGIN, decide(review))).await;
+    assert!(refused.is_err(), "{refused:?}");
+
+    // Never signs, even with a review it minted.
+    let review = mint(peer("dev-a")).await;
+    let signed = with_caller(peer("dev-a"), call(&f.plugins, methods::SIGN_PLUGIN, json!({ "id": "focus", "review": review }))).await;
+    assert!(signed.is_err(), "{signed:?}");
+    assert!(!f.plugins.entry("focus").unwrap().item.own, "not made yours");
+
+    // A template's review stays this device's.
+    let template = with_caller(
+        peer("dev-a"),
+        call(&f.plugins, methods::REVIEW_TEMPLATE, json!({ "pending": "midnight-1", "hash": "h" })),
+    )
+    .await;
+    assert!(template.is_err(), "{template:?}");
+
+    // Device A's window: its own review, once.
+    let review = mint(peer("dev-a")).await;
+    let allowed = with_caller(peer("dev-a"), call(&f.plugins, methods::DECIDE_PLUGIN, decide(review.clone())))
+        .await
+        .unwrap();
+    assert_eq!(allowed["status"], "on", "{allowed}");
+    with_caller(peer("dev-a"), call(&f.plugins, methods::DECIDE_PLUGIN, json!({ "id": "focus", "allow": false, "hash": hash })))
+        .await
+        .unwrap();
+    let replayed = with_caller(peer("dev-a"), call(&f.plugins, methods::DECIDE_PLUGIN, decide(review))).await;
+    assert!(replayed.is_err(), "{replayed:?}");
+    assert_eq!(status(&f.plugins, "focus").await, Status::Off);
 }
 
 /// R4/R6: SignPlugin (which makes a plugin yours) needs the consent
