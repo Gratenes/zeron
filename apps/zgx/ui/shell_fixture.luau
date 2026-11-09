@@ -1136,6 +1136,21 @@ ui.command {
 		publish()
 	end,
 }
+-- One side chat of Fix the build, hosted on devbox (with
+-- `fixture.devbox_offline`, one that's away): the sidebar's unreachable glyph
+-- on nested side chats (tests/sidebar_unreachable).
+ui.command {
+	id = "side_chat_on_devbox",
+	title = "Fix the build has a side chat on devbox",
+	run = function()
+		(model :: any).children = {
+			a1 = {
+				{ id = "s1", parent = "a1", kind = "side", title = "Look into the flake", device = "box", updated = NOW - 30, created = NOW - 5 * HOUR, agent = "claude" },
+			},
+		}
+		publish()
+	end,
+}
 -- Fix the build's side chats as the engine tells their kind, one of them
 -- working, and a subagent's chat beside them (not a side chat); and a side
 -- chat whose chat isn't listed (archived, or gone), in Atlas: the sidebar's

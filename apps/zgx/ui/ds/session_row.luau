@@ -68,6 +68,9 @@ export type Session = {
 	-- Its device isn't reachable right now (its presence went quiet): its
 	-- row says so (`M.unreachable`).
 	offline: boolean?,
+	-- Any of its side chats (nested under it) is on a device that's away:
+	-- its row says so while they're folded away.
+	kids_offline: boolean?,
 	time: (number | string)?,
 	agent: Mark.Name?,
 	-- An agent from the ACP registry: its harness (`acp.<id>`) and icon,
@@ -317,11 +320,19 @@ end
 -- A chat whose device is away: a small wifi-off glyph in the warning hue,
 -- its tooltip saying which device and what that means; reachable, nothing.
 -- (`on`: the "Unreachable chats" setting.)
-function M.unreachable(cur: () -> Session, on: () -> boolean): Node
+-- `folded`: its side chats are folded away, so one of them being away shows
+-- on it (`kids_offline`), its tooltip saying so.
+function M.unreachable(cur: () -> Session, on: () -> boolean, folded: (() -> boolean)?): Node
 	-- (Keyed by what it says, as a tooltip takes a string: it follows its
 	-- device's name and the language.)
 	return ui.presence(function(): string
-		if not (on() and cur().offline == true) then
+		if not on() then
+			return ""
+		end
+		if cur().offline ~= true then
+			if folded and folded() and cur().kids_offline == true then
+				return locale.s("ds.sidebar.unreachable_side")
+			end
 			return ""
 		end
 		return locale.s("ds.sidebar.unreachable", { device = cur().device or locale.s("shell.sidebar.unknown_device") })
