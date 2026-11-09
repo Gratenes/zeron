@@ -119,16 +119,36 @@ jobs:
         run: |
           cargo build --release --locked -p zeron --bin zeron-engine
           if ($LASTEXITCODE -ne 0) { throw 'the engine failed to build' }
-      - name: collect
+      # zgx reads its scripts, and the official templates it installs into
+      # <data dir>\templates\.live, from a `ui` folder: on Windows
+      # `beta\<app version>\ui` beside the exe (bundled_ui in main.rs),
+      # else the build machine's source path baked in at compile time, which
+      # exists only where it was built. So ship them beside the exe, as
+      # scripts/package-windows.ps1 does (tests left out).
+      - name: collect (exe, engine, and the ui + plugins-builtin zgx reads beside it)
         run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if (-not $version) { throw 'no workspace version in Cargo.toml' }
           New-Item -ItemType Directory out | Out-Null
           Copy-Item apps/zgx/target/release/zeron-zgx.exe out/
           Copy-Item target/release/zeron-engine.exe out/
+          $beta = "out/beta/$version"
+          New-Item -ItemType Directory -Force $beta | Out-Null
+          Copy-Item -Recurse apps/zgx/ui "$beta/ui"
+          Remove-Item -Recurse -Force "$beta/ui/tests"
+          Copy-Item -Recurse apps/zgx/plugins-builtin "$beta/plugins-builtin"
           (git rev-parse HEAD) | Set-Content out/COMMIT.txt
-          Get-ChildItem out | Select-Object Name, Length
+          # The exe must look for exactly this folder, and it must hold the template.
+          $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes('out/zeron-zgx.exe'))
+          if (-not $text.Contains($version)) { throw "the exe doesn't carry its app version $version" }
+          foreach ($f in "$beta/ui/app.luau", "$beta/ui/templates/zeron-v2/screens", "$beta/plugins-builtin") {
+            if (-not (Test-Path -LiteralPath $f)) { throw "missing $f" }
+          }
+          Get-ChildItem out -Recurse -File | Measure-Object Length -Sum | ForEach-Object { "$($_.Count) files, $($_.Sum) bytes" }
+          Get-ChildItem "$beta/ui/templates/zeron-v2" -Recurse -File | Select-Object -First 5 FullName
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: zeron-windows-pc
-          path: out/*
+          path: out
           retention-days: 7
           if-no-files-found: error
