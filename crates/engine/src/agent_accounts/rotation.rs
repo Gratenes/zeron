@@ -27,18 +27,23 @@
 //! runs exactly as without rotation. Any other account reaches only its own
 //! chat's process:
 //!
-//! - **Claude Code** gets `CLAUDE_CODE_OAUTH_TOKEN` = the saved login's access
-//!   token. The config dir stays the user's own (settings, MCP servers,
-//!   skills, plugins, hooks, `projects/` transcripts — resume just works) and
-//!   the CLI neither refreshes nor writes a token it got from the
-//!   environment, so the live login can't be touched. Zeron owns the
-//!   refresh: a run starting with less than [`CLAUDE_REFRESH_MARGIN`] left
-//!   on the token refreshes the saved login first (the slot is the only
-//!   holder of its refresh token), and the run credential carries the
-//!   token's fingerprint, so a session parked on the old token is replaced
-//!   (and resumed) before its next turn. Claude Code treats an environment
-//!   token as inference-only: features that need the account's profile
-//!   scope (Remote Control) are unavailable in rotated chats.
+//! - **Claude Code** gets `CLAUDE_SECURESTORAGE_CONFIG_DIR` = a folder of
+//!   its own holding only the saved login's `.credentials.json` ([`super::logins`]).
+//!   The config dir stays the user's own (settings, MCP servers, skills,
+//!   plugins, hooks, `projects/` transcripts — resume just works), and the CLI
+//!   holds the account's full login: it refreshes its own token (serialised
+//!   with every other process on that login by its lock in the folder) and
+//!   features that need the profile scope (Remote Control) work. The live
+//!   login is never touched and never has a folder. The run credential is the
+//!   account (`login:<slot>`), not a token, so a refresh never reads as a
+//!   change. (An earlier build handed the chat the slot's access token in
+//!   `CLAUDE_CODE_OAUTH_TOKEN` and refreshed the slot itself: each refresh
+//!   killed the token chats already running on it held, and they failed with
+//!   "Authentication failed".) macOS keeps the access-token environment
+//!   mechanism, because the CLI's login lives in the Keychain there: a run
+//!   starting with less than [`CLAUDE_REFRESH_MARGIN`] left on the token
+//!   refreshes the saved login first, and the credential carries its
+//!   fingerprint.
 //! - **Cursor** gets `CURSOR_API_KEY` = the saved login's minted user API
 //!   key (the SDK takes it over its stored login; a key minted against
 //!   another Cursor backend also gets `CURSOR_BACKEND_URL`). **Devin** gets
@@ -51,7 +56,7 @@
 //!
 //! | harness     | mechanism | how a rotated chat reaches its account |
 //! |-------------|-----------|----------------------------------------|
-//! | Claude Code | Env       | `CLAUDE_CODE_OAUTH_TOKEN` (engine refreshes the slot) |
+//! | Claude Code | Env       | `CLAUDE_SECURESTORAGE_CONFIG_DIR` → the account's login folder (macOS: `CLAUDE_CODE_OAUTH_TOKEN`) |
 //! | Cursor      | Env       | `CURSOR_API_KEY` (+ `CURSOR_BACKEND_URL`), expiry respected |
 //! | Devin       | Env       | `WINDSURF_API_KEY` (+ `WINDSURF_API_SERVER_URL`) |
 //! | Codex       | Proxy     | `openai_base_url` per thread → proxy route |
@@ -1158,6 +1163,31 @@ impl AgentAccounts {
                 });
             }
             match harness {
+                // The account's own login folder: the CLI holds and refreshes
+                // its login (see `logins`).
+                HarnessId::ClaudeCode if super::logins::login_dir_usable() => {
+                    match self.claude_login_run(&slot).await {
+                        Ok(Some(run)) => {
+                            return Some(RotationRun {
+                                account_id: slot.id.clone(),
+                                credential: run.credential,
+                                env: run.env,
+                            });
+                        }
+                        Ok(None) => return None,
+                        // Refused: signed out for rotation; the chat gets the next.
+                        Err(error @ ProbeError::Unauthorized { .. }) => {
+                            self.mark_rejected(&slot, error);
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!(slot = %slot.id, class = error.class(),
+                                "rotated Claude login unavailable; running on the live login");
+                            return None;
+                        }
+                    }
+                }
+                // macOS keeps the login in the Keychain: the access token it is.
                 HarnessId::ClaudeCode => match self.fresh_claude_token(&slot).await {
                     Ok(token) => {
                         return Some(RotationRun {
