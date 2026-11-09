@@ -6,17 +6,17 @@ name = "zgx-terminal"
 version = "0.1.10"
 edition = "2024"
 license = "MIT"
-repository = "file:///C:/src/zgx-local"
+repository = "https://github.com/Gratenes/zgx"
 rust-version = "1.95"
 keywords = ["terminal", "pty", "conpty", "gui", "zgx"]
 categories = ["gui", "command-line-interface"]
 description = "Terminal sessions for zgx: a shell on a pseudoterminal (openpty, ConPTY) and its screen, kept by alacritty_terminal."
 
 [dependencies]
-zgx = { git = "file:///C:/src/zgx-local", rev = "adcfe57d8e49181d3f74a1e82800333dad7b420e", default-features = false }
+zgx = { git = "https://github.com/Gratenes/zgx", rev = "adcfe57d8e49181d3f74a1e82800333dad7b420e", default-features = false }
 # The screen model: the VT parser, grid, scrollback, selection and modes,
 # and the pseudoterminals (openpty on Unix, ConPTY on Windows).
-alacritty_terminal = { package = "zgx-alacritty-terminal", git = "file:///C:/src/zgx-local", rev = "adcfe57d8e49181d3f74a1e82800333dad7b420e", default-features = false }
+alacritty_terminal = { package = "zgx-alacritty-terminal", git = "https://github.com/Gratenes/zgx", rev = "adcfe57d8e49181d3f74a1e82800333dad7b420e", default-features = false }
 # The session's I/O thread sleeps in it until the shell writes or the app does.
 polling = "3"
 
