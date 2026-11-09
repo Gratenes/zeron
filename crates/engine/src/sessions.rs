@@ -2960,6 +2960,14 @@ impl Inner {
         }
     }
 
+    /// The credential the chat's current run started with. Returns an owned
+    /// value so the `runs` guard is gone before the caller does anything else:
+    /// in a `let`-chain the guard of an inline `lock(&inner.runs)…` lives to
+    /// the end of the `if` body, and `remove_run` there deadlocks on it.
+    fn run_credential(&self, chat_id: &str) -> Option<String> {
+        lock(&self.runs).get(chat_id).and_then(|h| h.credential.clone())
+    }
+
     fn remove_run(&self, chat_id: &str, run_id: &str) {
         let mut runs = lock(&self.runs);
         if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
@@ -5153,9 +5161,7 @@ async fn drive_run(
                 error,
                 ..
             } = &event
-            && let started_with = lock(&inner.runs)
-                .get(&chat_id)
-                .and_then(|h| h.credential.clone())
+            && let started_with = inner.run_credential(&chat_id)
             && auth_relaunch_due(harness_id, started_with.as_deref(), saw_auth_error, error.as_deref())
             && let Some(mut retry) = retry_request.take()
         {
@@ -6188,6 +6194,135 @@ mod tests {
         }
         core.sessions.shutdown().await;
     }
+    /// A Claude run on an account of its own whose login is refused is
+    /// relaunched once. The relaunch removes the run handle while the engine
+    /// is still inside the branch that read its credential: that read must
+    /// not hold the `runs` lock, or the run task deadlocks on itself.
+    struct RefusedLoginFixture {
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl zeron_harness::Harness for RefusedLoginFixture {
+        fn id(&self) -> HarnessId {
+            HarnessId::ClaudeCode
+        }
+        fn display_name(&self) -> &str {
+            "Offline refused-login fixture"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> zeron_proto::SteeringMode {
+            zeron_proto::SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[zeron_proto::ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<zeron_proto::Model>, zeron_harness::HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            _controls: zeron_harness::RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
+            zeron_harness::HarnessError,
+        > {
+            use futures::StreamExt;
+            let attempt = self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let started = AgentEvent::SessionStarted {
+                harness: HarnessId::ClaudeCode,
+                model: "fixture".into(),
+                tools: vec![],
+                cwd: request.cwd,
+                session_id: "native-thread".into(),
+                assistant_message_id: format!("fixture-{attempt}"),
+            };
+            let rest = if attempt == 0 {
+                vec![
+                    AgentEvent::Error {
+                        message: "Authentication failed — sign in to Claude again.".into(),
+                    },
+                    AgentEvent::Done {
+                        status: zeron_proto::DoneStatus::Errored,
+                        result: None,
+                        error: Some("Authentication failed — sign in to Claude again.".into()),
+                        session_id: None,
+                    },
+                ]
+            } else {
+                vec![AgentEvent::Done {
+                    status: zeron_proto::DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                }]
+            };
+            Ok(futures::stream::iter(std::iter::once(started).chain(rest).map(Ok))
+                .chain(futures::stream::pending())
+                .boxed())
+        }
+    }
+
+    struct OwnLoginEnvironment;
+    #[async_trait::async_trait]
+    impl crate::registry::RunEnvironment for OwnLoginEnvironment {
+        async fn prepare(
+            &self,
+            _harness: HarnessId,
+            _chat_id: Option<&str>,
+            _request: &mut RunRequest,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn credential(&self, _harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
+            Some("login:abc".into())
+        }
+    }
+
+    #[test]
+    fn a_refused_login_relaunch_does_not_deadlock_on_the_runs_lock() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = runs.clone();
+        let relaunched = runtime.block_on(async move {
+            let temp = tempfile::tempdir().unwrap();
+            let registry = crate::HarnessRegistry::new();
+            registry.register(Arc::new(RefusedLoginFixture { runs }));
+            registry.set_run_environment(Arc::new(OwnLoginEnvironment));
+            let core = crate::EngineCore::assemble_with_profile(
+                crate::EngineProfile::local(temp.path()).unwrap(),
+                Arc::new(registry),
+                HarnessId::ClaudeCode,
+                None,
+            )
+            .unwrap();
+            core.workspace
+                .create_chat("c1", None, Some(&core.device_id), None, None)
+                .unwrap();
+            core.sessions
+                .dispatch("c1", HarnessId::ClaudeCode, request(), None)
+                .await
+                .unwrap();
+            let ok = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while seen.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .is_ok();
+            ok
+        });
+        // A deadlocked run task would block runtime teardown too.
+        runtime.shutdown_background();
+        assert!(relaunched, "the refused login was never relaunched: the run task is wedged");
+    }
+
     #[tokio::test]
     async fn voice_idle_startup_failure_never_retries_as_inference() {
         idle_startup_case(true).await;
