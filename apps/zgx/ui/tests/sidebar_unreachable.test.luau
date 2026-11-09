@@ -59,3 +59,64 @@ test("Show → Unreachable chats off hides it; on, it's back", function()
 	app:frames(30)
 	expect(glyphs(app)).to_be(2)
 end)
+
+-- Nested side chats (Show → Nest side chats): Fix the build is on this
+-- computer, its one side chat on devbox.
+local NEST = "screens/shell/sidebar.luau::shell_sidebar_side_chats"
+-- (The tree clips a long tooltip: its start is enough.)
+local SIDE_SAYS = "A side chat is on an offline device"
+local GROUP_SAYS = "A chat in here is on an offline"
+
+local function count(app: any, words: string): number
+	local n = 0
+	for line in app:tree(SIDE):gmatch("[^\n]+") do
+		if line:find(words, 1, true) then
+			n += 1
+		end
+	end
+	return n
+end
+
+local function nested(): any
+	local app = open()
+	app:command("side_chat_on_devbox")
+	app:set_state(NEST, true)
+	app:command("fixture.devbox_offline")
+	app:frames(40)
+	return app
+end
+
+test("a nested side chat on an offline device wears the glyph; its folded parent shows it for them", function()
+	local app = nested()
+	-- Folded (as they start): the parent says a side chat is away; Borealis's
+	-- two own chats say their device.
+	expect(count(app, SIDE_SAYS)).to_be(1)
+	expect(glyphs(app)).to_be(2)
+	app:click(`{SIDE} >> role:button "Show side chats"`)
+	app:frames(40)
+	-- Opened: the side chat's own row has it, the parent's is gone.
+	expect(count(app, SIDE_SAYS)).to_be(0)
+	expect(glyphs(app)).to_be(3)
+	app:command("fixture.devbox_online")
+	app:frames(40)
+	expect(glyphs(app)).to_be(0)
+end)
+
+test("a folded group's tile says a chat in it is unreachable; unfolded, its chats do", function()
+	local app = nested()
+	-- (Ship the release, asking for you, is archived: a state's dot would
+	-- take the tile's badge, and stays on a folded group.)
+	app:right_click(`{SIDE} >> role:button "Ship the release"`)
+	app:frames(20)
+	app:click(`role:menuitem "Archive"`)
+	app:frames(30)
+	expect(count(app, GROUP_SAYS)).to_be(0)
+	app:click(`{SIDE} >> role:button "Borealis"`)
+	app:frames(40)
+	expect(count(app, GROUP_SAYS)).to_be(1)
+	expect(glyphs(app)).to_be(0)
+	app:click(`{SIDE} >> role:button "Borealis"`)
+	app:frames(40)
+	expect(count(app, GROUP_SAYS)).to_be(0)
+	expect(glyphs(app)).to_be(1)
+end)

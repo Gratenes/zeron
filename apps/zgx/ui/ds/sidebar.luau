@@ -332,6 +332,17 @@ local function pressing(sessions: { Session }): status.Kind?
 	return best
 end
 
+-- Whether any of `sessions` (or a side chat under one) is on a device that's
+-- away: a folded group's tile says so when nothing more pressing does.
+local function any_offline(sessions: { Session }): boolean
+	for _, s in sessions do
+		if s.offline or s.kids_offline then
+			return true
+		end
+	end
+	return false
+end
+
 local function list_gap(): number
 	return (ui.theme.get("zeron.list.gap") :: number?) or 2
 end
@@ -1432,6 +1443,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						return cur()
 					end, function(): boolean
 						return show_unreachable:get()
+					end, function(): boolean
+						return nesting() and not side_open(s.id)
 					end),
 					subagents_pill(function(): number
 						return cur().subagents or 0
@@ -1709,6 +1722,22 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				status.StatusDot { kind = kind, size = 8 },
 			}
 		end
+		-- (Nothing more pressing: a chat of a device that's away, a wifi-off
+		-- glyph in the warning hue, where "Unreachable chats" is on.)
+		local function away_badge(): Node
+			return ui.div {
+				absolute = true,
+				right = -4,
+				top = -4,
+				color = "$zeron.status.limited",
+				tooltip = locale.s("ds.sidebar.unreachable_group"),
+				label = locale.s("ds.sidebar.unreachable_group"),
+				Icon { name = "wifi-off", size = 11 },
+			}
+		end
+		local function away(list: { Session }): boolean
+			return show_unreachable:get() and pressing(list) == nil and any_offline(list)
+		end
 		if type(sessions) == "table" then
 			local most = pressing(sessions)
 			return ui.div {
@@ -1717,6 +1746,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				h = 18,
 				Tile { hue = if type(hue) == "string" or type(hue) == "function" then hue :: any else nil, inside = inside, size = 18, src = src, emoji = emoji },
 				if most then ui.show(hidden, badge(most)) else nil,
+				ui.show(function(): boolean
+					return hidden() and away(sessions)
+				end, away_badge()),
 			}
 		end
 		-- Sessions that move: the badge follows the most pressing, a dot of
@@ -1729,6 +1761,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			ui.presence(function(): status.Kind?
 				return if hidden() then pressing(listed(sessions)) else nil
 			end, badge),
+			ui.show(function(): boolean
+				return hidden() and away(listed(sessions))
+			end, away_badge()),
 		}
 	end
 	-- The chrome's own tile (pinned's, a device's, the list's): quiet, a

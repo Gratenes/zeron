@@ -447,6 +447,8 @@
       },
       "subagents_running": "{n, plural, one {# subagent running} other {# subagents running}}",
       "unreachable": "{device} is offline — this chat can't run until it reconnects",
+      "unreachable_side": "A side chat is on an offline device — it can't run until it reconnects",
+      "unreachable_group": "A chat in here is on an offline device",
       "session_name": "Session name",
       "archive": "Archive",
       "unarchive": "Unarchive",

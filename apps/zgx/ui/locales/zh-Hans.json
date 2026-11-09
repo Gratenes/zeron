@@ -447,6 +447,8 @@
       },
       "subagents_running": "{n, plural, other {# 个子智能体运行中}}",
       "unreachable": "{device} 已离线——重新连接前此会话无法运行",
+      "unreachable_side": "有侧边会话所在设备已离线——重新连接前无法运行",
+      "unreachable_group": "此处有会话所在设备已离线",
       "session_name": "会话名称",
       "archive": "归档",
       "unarchive": "取消归档",

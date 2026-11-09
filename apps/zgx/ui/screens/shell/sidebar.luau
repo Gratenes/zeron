@@ -595,6 +595,8 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		-- Its side chats, nested under it (the narrowed list's own: those in
 		-- a state it shows).
 		local kids: { any }? = nil
+		-- (Any of them on a device that's away: its row says so while they're folded.)
+		local kids_offline = false
 		if nest and not act then
 			local rows: { any } = {}
 			for _, k in (now.children or {})[c.id] or {} do
@@ -613,11 +615,18 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 					created = k.created,
 					agent = k.agent :: any,
 					device = names[k.device] or locale.s("shell.sidebar.unknown_device"),
+					offline = offline[k.device] == true,
 					branch = k.branch,
 				}))
 			end
 			if #rows > 0 then
 				kids = kept_kids(c.id, rows)
+			end
+			for _, row in rows do
+				if row.offline then
+					kids_offline = true
+					break
+				end
 			end
 		end
 		table.insert(group.sessions, kept({
@@ -636,6 +645,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			-- lanes' badge counts them: screens/chat/lanes.)
 			subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
 			side_chats = kids,
+			kids_offline = kids_offline,
 		}) :: any)
 	end
 	if #loose.sessions > 0 then
