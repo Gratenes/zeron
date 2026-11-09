@@ -265,6 +265,16 @@ async fn claude_token(env: &AccountsRunEnvironment, chat: &str) -> Option<String
     env.prepare(HarnessId::ClaudeCode, Some(chat), &mut request)
         .await
         .unwrap();
+    run_token(&request)
+}
+
+/// The access token a Claude run was given: in its login folder (where the
+/// CLI finds it), or in its environment on macOS.
+fn run_token(request: &zeron_proto::RunRequest) -> Option<String> {
+    if let Some(dir) = request.env.get("CLAUDE_SECURESTORAGE_CONFIG_DIR") {
+        let creds = read_json(&std::path::Path::new(dir).join(".credentials.json"))?;
+        return str_field(&creds["claudeAiOauth"], "accessToken");
+    }
     request.env.get("CLAUDE_CODE_OAUTH_TOKEN").cloned()
 }
 
@@ -461,7 +471,12 @@ async fn turning_rotation_off_returns_chats_to_the_live_login() {
         .credential(HarnessId::ClaudeCode, Some("chat-1"))
         .await
         .unwrap();
-    assert!(rotated.starts_with("rotation:"), "{rotated}");
+    // A login folder's credential is the account (`login:`): the CLI refreshes
+    // inside it, so a refresh is never a change of account.
+    assert!(
+        rotated.starts_with(if cfg!(target_os = "macos") { "rotation:" } else { "login:" }),
+        "{rotated}"
+    );
 
     let snapshot = accounts
         .set_rotation(HarnessId::ClaudeCode, false)
@@ -889,12 +904,17 @@ async fn an_expiring_rotated_claude_login_is_refreshed_into_its_slot() {
         "fresh-refresh"
     );
     assert_eq!(hits.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        env.credential(HarnessId::ClaudeCode, Some("chat-1"))
-            .await
-            .unwrap(),
-        before
-    );
+    let after = env
+        .credential(HarnessId::ClaudeCode, Some("chat-1"))
+        .await
+        .unwrap();
+    if super::super::logins::login_dir_usable() {
+        // The CLI refreshes its own token from here: a refresh is no change
+        // of account, so a parked session is never replaced for one.
+        assert_eq!(after, before);
+    } else {
+        assert_eq!(after, before, "no second refresh, so the same token");
+    }
     // The live login is untouched.
     let live = read_json(&AgentAccountsConfig::isolated(tmp.path()).claude_creds_file()).unwrap();
     assert_eq!(live["claudeAiOauth"]["accessToken"], "live-token");
@@ -1005,10 +1025,7 @@ async fn consecutive_chats_spawn_on_different_accounts_only_when_enabled() {
             .prepare_run(HarnessId::ClaudeCode, Some(chat), &mut request)
             .await
             .unwrap();
-        (
-            credential,
-            request.env.get("CLAUDE_CODE_OAUTH_TOKEN").cloned(),
-        )
+        (credential, run_token(&request))
     };
 
     // Off: both chats on the live login, nothing injected.
@@ -1032,7 +1049,7 @@ async fn consecutive_chats_spawn_on_different_accounts_only_when_enabled() {
         .prepare_run(HarnessId::ClaudeCode, None, &mut request)
         .await
         .unwrap();
-    assert!(!request.env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
+    assert!(request.env.is_empty());
 }
 
 // ── proxy leases ────────────────────────────────────────────────────────────
@@ -1133,7 +1150,10 @@ async fn a_rejected_account_is_skipped_until_it_signs_in_again() {
     );
     // A re-login (new credentials) makes it usable again.
     let mut slot = accounts.read_slot(HarnessId::ClaudeCode, &ids[0]).unwrap();
+    // (A sign-in is a new pair with a later expiry, not just a new token.)
     slot.credentials["claudeAiOauth"]["accessToken"] = "relogged".into();
+    slot.credentials["claudeAiOauth"]["refreshToken"] = "relogged-rt".into();
+    slot.credentials["claudeAiOauth"]["expiresAt"] = (now_ms() + 12 * HOUR).into();
     accounts.write_slot(&slot).unwrap();
     let snapshot = accounts.list(false).await.unwrap();
     assert_eq!(

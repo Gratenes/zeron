@@ -35,11 +35,18 @@
 //!                                 sign-ins with throwaway state
 //!   ZERON_ZGX_ENGINE_SPAWN=0      never start one; only use one that runs
 //!
-//! A development build never uses the production engine: port 27654 and
-//! ~/.zeron (and the pre-0.2.0 ~/.comet-native) are refused, whatever the
-//! variables say, unless `ZERON_ZGX_ALLOW_DEFAULT_PORT=1`: then it uses the
-//! engine a dev desktop build (its own data dir and edge) runs there, and
-//! never stops or restarts it. With an engine to start there
+//! A development build never uses the production engine by accident: ports
+//! 27654 and 27655 (Zeron v3's on Windows), ~/.zeron (and the pre-0.2.0
+//! ~/.comet-native) and, on Windows, %LOCALAPPDATA%\Zeron are refused unless
+//! it's asked for by name:
+//!
+//!   ZERON_ZGX_ENGINE_PRODUCTION=1 the production engine is allowed (the real
+//!                                 chats: for comparing against the shipping
+//!                                 app; never sign out from it)
+//!
+//! `ZERON_ZGX_ALLOW_DEFAULT_PORT=1` opens port 27654 alone (not the data
+//! dirs): it uses the engine a dev desktop build (its own data dir and
+//! edge) runs there, and never stops or restarts it. With an engine to start there
 //! (`ZERON_ZGX_ENGINE_BIN`, or the one it last found serving that port,
 //! [`remember_engine_app`]) it starts one when nothing answers, as that
 //! desktop app starts its own, detached, so the app attaches to it later.
@@ -61,6 +68,22 @@ use std::time::{Duration, Instant};
 /// The production engine's data dirs, relative to home: today's and the one
 /// it was renamed from in 0.2.0.
 const PRODUCTION_DATA: &[&str] = &[".zeron", ".comet-native"];
+
+/// The ports the production engine serves: Zeron's, and the one Zeron v3's
+/// Windows install serves beside it.
+const PRODUCTION_PORTS: &[u16] = &[zeron_cli::DEFAULT_IPC_PORT, 27655];
+
+/// The production engine's data dirs: [`PRODUCTION_DATA`] under home, and on
+/// Windows where zeron_cli puts it there (%LOCALAPPDATA%\Zeron, which no
+/// HOME moves).
+fn production_dirs(var: &impl Fn(&str) -> Option<String>, home: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = PRODUCTION_DATA.iter().map(|dir| home.join(dir)).collect();
+    if cfg!(windows) {
+        let local = var("LOCALAPPDATA").map(PathBuf::from).or_else(|| var("USERPROFILE").map(|p| Path::new(&p).join("AppData").join("Local")));
+        dirs.extend(local.map(|local| local.join("Zeron")));
+    }
+    dirs
+}
 
 const STAGING_PORT: u16 = 27871;
 const STAGING_DATA: &str = ".zeron-staging";
@@ -255,18 +278,21 @@ impl Config {
         // (separate data dir, its own edge) listens there. It starts one there
         // only from an engine binary it was given (or found serving there
         // before), never the checkout's, and never stops one to follow its
-        // session: the engine is the desktop app's.
+        // session: the engine is the desktop app's. It opens only that port:
+        // 27655 and the production data dirs stay refused.
         let allow_default = var("ZERON_ZGX_ALLOW_DEFAULT_PORT").as_deref() == Some("1");
-        if port == zeron_cli::DEFAULT_IPC_PORT && !allow_default {
-            return Err(format!(
-                "port {} is the production engine's (ZERON_ZGX_ALLOW_DEFAULT_PORT=1 to use one already there)",
-                zeron_cli::DEFAULT_IPC_PORT
-            ));
+        if var("ZERON_ZGX_ENGINE_PRODUCTION").as_deref() != Some("1") {
+            if PRODUCTION_PORTS.contains(&port) && !(allow_default && port == zeron_cli::DEFAULT_IPC_PORT) {
+                return Err(format!(
+                    "port {port} is the production engine's (ZERON_ZGX_ENGINE_PRODUCTION=1 to use it anyway, or ZERON_ZGX_ALLOW_DEFAULT_PORT=1 for a dev engine already on {})",
+                    zeron_cli::DEFAULT_IPC_PORT
+                ));
+            }
+            if let Some(dir) = production_dirs(&var, home).into_iter().find(|dir| same_dir(&data_dir, dir)) {
+                return Err(format!("{} is the production engine's (ZERON_ZGX_ENGINE_PRODUCTION=1 to use it anyway)", dir.display()));
+            }
         }
         let borrowed = port == zeron_cli::DEFAULT_IPC_PORT;
-        if let Some(dir) = PRODUCTION_DATA.iter().find(|dir| same_dir(&data_dir, &home.join(dir))) {
-            return Err(format!("~/{dir} is the production engine's"));
-        }
         let given = var("ZERON_ZGX_ENGINE_BIN").map(|p| expand(&p, home));
         let bin = given.clone().or_else(|| {
             if borrowed {
@@ -600,8 +626,21 @@ mod tests {
         assert!(!never.starts_engine());
         assert!(is_app_binary(app) && !is_app_binary(Path::new("/x/zeron-engine")) && !is_app_binary(Path::new("/x/Zeron Engine")));
         assert!(config_of(&[("ZERON_ZGX_ENGINE_PORT", "27654"), ("ZERON_ZGX_ALLOW_DEFAULT_PORT", "1"), ("ZERON_ZGX_ENGINE_DATA", "~/.zeron")], home, None, edge).is_err());
+        // It opens 27654 alone: v3's port stays refused.
+        assert!(config_of(&[("ZERON_ZGX_ENGINE_PORT", "27655"), ("ZERON_ZGX_ALLOW_DEFAULT_PORT", "1")], home, None, edge).is_err());
         assert!(config_of(&[("ZERON_ZGX_ENGINE_DATA", "~/.zeron")], home, None, edge).is_err());
         assert!(config_of(&[("ZERON_ZGX_ENGINE_DATA", "~/.comet-native")], home, None, edge).is_err());
+        assert!(config_of(&[("ZERON_ZGX_ENGINE_PORT", "27655")], home, None, edge).is_err());
+        // Asked for by name, it's allowed.
+        let production = config_of(&[("ZERON_ZGX_ENGINE_PORT", "27655"), ("ZERON_ZGX_ENGINE_DATA", "~/.zeron"), ("ZERON_ZGX_ENGINE_PRODUCTION", "1")], home, None, edge).unwrap();
+        assert_eq!((production.port, production.data_dir.clone()), (27655, home.join(".zeron")));
+        // Windows' own place for it, which no HOME moves.
+        if cfg!(windows) {
+            let local = [("LOCALAPPDATA", r"C:\Users\someone\AppData\Local"), ("ZERON_ZGX_ENGINE_DATA", r"C:\Users\someone\AppData\Local\Zeron")];
+            assert!(config_of(&local, home, None, edge).is_err());
+            let profile = [("USERPROFILE", r"C:\Users\someone"), ("ZERON_ZGX_ENGINE_DATA", r"C:\Users\someone\AppData\Local\Zeron")];
+            assert!(config_of(&profile, home, None, edge).is_err());
+        }
         let staging = config_of(&[], home, None, edge).unwrap();
         assert_eq!((staging.port, staging.data_dir.clone()), (STAGING_PORT, home.join(STAGING_DATA)));
         assert!(!staging.follows_bundle());

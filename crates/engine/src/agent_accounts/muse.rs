@@ -134,7 +134,7 @@ impl AgentAccounts {
 
     /// The environment that points Muse at account `name`'s config root,
     /// with its mirror refreshed.
-    fn muse_env(&self, name: &str) -> Result<BTreeMap<String, String>, EngineError> {
+    pub(super) fn muse_env(&self, name: &str) -> Result<BTreeMap<String, String>, EngineError> {
         let home = self.muse_home(name)?;
         private_dir(&home)?;
         let root = home.join("config");

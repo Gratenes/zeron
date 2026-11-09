@@ -110,6 +110,8 @@ pub struct RelayedCallback {
 }
 
 mod muse;
+mod logins;
+mod pins;
 mod oauth;
 mod registry_login;
 #[cfg(test)]
@@ -117,6 +119,8 @@ mod provider_tests;
 mod proxy;
 pub use muse::MuseRunEnvironment;
 mod rotation;
+pub use pins::{ChatPin, PinHook, PinRunEnvironment};
+pub(crate) use rotation::LIVE as LIVE_CREDENTIAL;
 pub use rotation::{
     AccountsRunEnvironment, Lease, RotationMechanism, default_rotation_mechanism,
     rotation_supported,
@@ -819,6 +823,12 @@ struct Inner {
     /// The last snapshot a list, switch or removal made, for whoever follows
     /// them (plugins' usage and account events). Never holds a credential.
     snapshots: tokio::sync::watch::Sender<Option<AgentAccountsSnapshot>>,
+    /// Chats pinned to an account of their own; mirrored to disk (see
+    /// [`pins`]).
+    pins: Mutex<pins::PinState>,
+    /// Asked for a chat's account at its first run (a plugin's
+    /// `run.preparing`).
+    pin_hook: Mutex<Option<PinHook>>,
 }
 
 /// Reports the chats with a turn in flight (see [`Inner::running_chats`]).
@@ -888,6 +898,7 @@ impl AgentAccounts {
                 }
             }
         }
+        let pins = pins::PinState::load(&config.root_dir().join(pins::PINS_FILE));
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
@@ -918,6 +929,8 @@ impl AgentAccounts {
                 proxy: Default::default(),
                 running_chats: Mutex::new(None),
                 snapshots: tokio::sync::watch::channel(None).0,
+                pins: Mutex::new(pins),
+                pin_hook: Mutex::new(None),
             }),
         }
     }
@@ -1026,6 +1039,7 @@ impl AgentAccounts {
                 message,
             });
         }
+        let live_claude = claude.as_ref().map(|d| d.account_key.clone());
         if let Some(detected) = claude {
             live(HarnessId::ClaudeCode, &detected);
             if detected.credentials.is_some() {
@@ -1033,6 +1047,13 @@ impl AgentAccounts {
             } else {
                 unreadable.push((HarnessId::ClaudeCode, detected));
             }
+        }
+        // Saved Claude logins live in folders of their own, but the live one
+        // (signed in by a terminal, say, after it had a folder) never does.
+        self.migrate_login_dirs(live_claude.as_deref());
+        if let Some(key) = &live_claude {
+            self.retire_login_dir(&slot_id_for(HarnessId::ClaudeCode, key), true, "is the live login")
+                .await;
         }
         self.migrate_codex_slot_keys()?;
         if let Some(detected) = self.detect_codex() {
@@ -1274,7 +1295,12 @@ impl AgentAccounts {
         match harness {
             HarnessId::ClaudeCode => {
                 let slot = self.revive_claude_slot(slot).await?;
-                self.activate_claude(&slot).await?
+                self.activate_claude(&slot).await?;
+                // The live login has the one copy of its refresh token the
+                // CLI keeps: the folder it had for chats is folded back into
+                // the slot and removed. Chats still on it move to the live
+                // login when their session next starts.
+                self.retire_login_dir(&slot.id, true, "became the live login").await;
             }
             HarnessId::Codex => self.activate_codex(&slot)?,
             HarnessId::Cursor => self.write_cursor_auth(&slot.credentials)?,
@@ -1640,6 +1666,9 @@ impl AgentAccounts {
         let file = self.slots_dir(harness)?.join(format!("{account_id}.json"));
         if file.exists() {
             std::fs::remove_file(&file)?;
+        }
+        if harness == HarnessId::ClaudeCode {
+            self.retire_login_dir(account_id, false, "the account was removed").await;
         }
         self.forget_rotation(harness, account_id);
         self.list_locked(false).await
@@ -2962,7 +2991,9 @@ impl AgentAccounts {
     /// One saved slot by id (`None` when missing or unparseable).
     fn read_slot(&self, harness: HarnessId, id: &str) -> Option<Slot> {
         let file = self.slots_dir(harness).ok()?.join(format!("{id}.json"));
-        serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()
+        let mut slot: Slot = serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
+        self.overlay_login(&mut slot);
+        Some(slot)
     }
 
     // ── Claude credential store (Keychain on macOS, file elsewhere) ─────────
@@ -3087,10 +3118,11 @@ impl AgentAccounts {
                 continue;
             }
             // One malformed slot file must skip THAT slot, not brick the page.
-            if let Some(slot) = std::fs::read_to_string(&path)
+            if let Some(mut slot) = std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|raw| serde_json::from_str::<Slot>(&raw).ok())
             {
+                self.overlay_login(&mut slot);
                 slots.push(slot);
             }
         }
@@ -3135,7 +3167,9 @@ impl AgentAccounts {
             .map_err(|e| EngineError::Other(format!("serialize slot: {e}")))?;
         // Atomic + 0600 from birth: tokens must never be world-readable, and a
         // crash mid-write must never leave torn JSON.
-        write_file_atomic(&file, json.as_bytes(), true)
+        write_file_atomic(&file, json.as_bytes(), true)?;
+        self.sync_login_dir(&full);
+        Ok(())
     }
 
     // ── remaining usage ─────────────────────────────────────────────────────
@@ -3341,7 +3375,7 @@ impl AgentAccounts {
         )
         .await?;
         if let Some(account_id) = str_field(&body, "account_id")
-            && account_id != slot.account_key
+            && account_id != codex_workspace(&slot.account_key)
         {
             return Err(ProbeError::NoCredentials {
                 why: NoCredentials::Missing,
@@ -3572,6 +3606,10 @@ impl AgentAccounts {
             set: &self.inner.inflight_refreshes,
             keys: vec![slot.id.clone()],
         };
+        // A login in its folder is refreshed under the CLI's own lock.
+        if logins::login_dir_usable() {
+            return self.refresh_login_dir(slot).await;
+        }
         self.refresh_claude_slot_once(slot).await.map(Some)
     }
 
@@ -3640,6 +3678,7 @@ impl AgentAccounts {
                 }
             }
         }
+        tracing::info!(slot = %slot.id, expires_in, "refreshed a saved Claude login");
         let mut refreshed = slot.clone();
         // Keep sibling keys (mcpOAuth, pluginSecrets, …) — rewriting the blob
         // as oauth-only would drop them, and a later activate of this slot
@@ -4162,6 +4201,14 @@ fn parse_codex_auth(auth: serde_json::Value) -> Option<Detected> {
     })
 }
 
+// account keys put the user id before "::" so team seats sharing a workspace
+// stay distinct (`parse_codex_auth`), but openai only ever reports the workspace
+fn codex_workspace(account_key: &str) -> &str {
+    account_key
+        .rsplit_once("::")
+        .map_or(account_key, |(_, workspace)| workspace)
+}
+
 fn codex_slot_auth(slot: &Slot) -> Result<(&str, &str), EngineError> {
     let detected = parse_codex_auth(slot.credentials.clone())
         .ok_or_else(|| EngineError::Other("This Codex login needs to be refreshed.".into()))?;
@@ -4175,7 +4222,7 @@ fn codex_slot_auth(slot: &Slot) -> Result<(&str, &str), EngineError> {
     match (account_id, access_token) {
         (Some(account_id), Some(access_token))
             if !access_token.is_empty()
-                && account_id == slot.account_key
+                && account_id == codex_workspace(&slot.account_key)
                 && detected.account_key == slot.account_key =>
         {
             Ok((access_token, account_id))

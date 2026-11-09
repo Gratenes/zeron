@@ -5,16 +5,17 @@
 //! answer it.
 //!
 //! A plugin on another of your devices (Settings → Plugins' switcher) is
-//! shown here, named for that device, and can be turned down from here
-//! (the decision goes to its engine, `targetDeviceId`); it's allowed on
-//! that device alone, in its own window there (its engine refuses an
-//! Allow that came over the relay).
+//! shown here, named for that device, and can be allowed or turned down
+//! from here: the decision goes to its engine (`targetDeviceId`), and an
+//! Allow carries a review that engine minted for this device, asked for
+//! through your device room's relay (good from this device alone; its
+//! engine refuses signing from anywhere but its own app).
 //!
 //! What a sheet shows is what's decided: its Allow carries a review the
-//! host mints from the engine for the plugin at the hash shown
-//! (`ReviewPlugin`), taken only once the sheet has shown a moment
-//! (`ARMED`), and a plugin's own words reach it bounded and plain
-//! (`bounded`).
+//! host mints from the plugin's engine (this one's or the other device's)
+//! for the plugin at the hash shown (`ReviewPlugin`), taken only once the
+//! sheet has shown a moment (`ARMED`), and a plugin's own words reach it
+//! bounded and plain (`bounded`).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -255,8 +256,7 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
 
     // Your answer: what was shown (its hash), allowed or not. The window
     // closes once the engine has it. Only of the sheet shown now, as it
-    // is (`seen`), and an Allow only once it has shown a moment (`ARMED`)
-    // and only on this device: another device's is allowed there alone.
+    // is (`seen`), and an Allow only once it has shown a moment (`ARMED`).
     let (weak, window, out, ons, ids, seen_) = (Rc::downgrade(bridge), cx.window.clone(), shared.clone(), on.clone(), id.clone(), seen.clone());
     host.action("plugins.decide", move |arg| {
         let Some(b) = weak.upgrade() else { return };
@@ -268,7 +268,7 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
         let Some(item) = showable(&b, &id, &on).filter(|item| *ids.borrow() == id && item.hash() == hash) else {
             return;
         };
-        if allow && !may_allow(&seen_.borrow(), &key(&on, &item), on.is_some(), Instant::now()) {
+        if allow && !may_allow(&seen_.borrow(), &key(&on, &item), Instant::now()) {
             return;
         }
         eprintln!("zeron-zgx: plugins: {id} {}", if allow { "allowed" } else { "not allowed (Not now)" });
@@ -276,12 +276,13 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
         let (weak, window, out) = (Rc::downgrade(&b), window.clone(), out.clone());
         engine::get().spawn(async move {
             let device = on.as_ref().map(|(d, _)| d.as_str());
-            // An Allow carries a review of what was shown, minted here, now
-            // (single-use, for this plugin at this hash): only this
-            // window's host holds one, never a script.
+            // An Allow carries a review of what was shown, minted now by
+            // the plugin's engine, there for this device (single-use, for
+            // this plugin at this hash): only this window's host holds one,
+            // never a script.
             let mut params = json!({ "id": id, "allow": allow, "hash": hash });
             if allow {
-                match mint_review(&id, &hash).await {
+                match mint_review(device, &id, &hash).await {
                     Ok(review) => params["review"] = json!(review),
                     Err(error) => {
                         if let Some(b) = weak.upgrade() {
@@ -321,7 +322,7 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
         out.set(shown(&b, &id, &None, true, None));
         let (weak, out) = (Rc::downgrade(&b), out.clone());
         engine::get().spawn(async move {
-            let result = match mint_review(&id, &hash).await {
+            let result = match mint_review(None, &id, &hash).await {
                 Ok(review) => engine::get().call("SignPlugin", json!({ "id": id, "review": review })).await,
                 Err(error) => Err(error),
             };
@@ -341,9 +342,10 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
 }
 
 /// Whether an Allow of the sheet `key` may be taken `now`: it's the sheet
-/// shown, it has shown `ARMED` at least, and it's this device's.
-fn may_allow(seen: &Option<(String, Instant)>, key: &str, elsewhere: bool, now: Instant) -> bool {
-    !elsewhere && seen.as_ref().is_some_and(|(shown, since)| shown == key && now.duration_since(*since) >= ARMED)
+/// shown (on whichever device: `key` names it), and it has shown `ARMED`
+/// at least.
+fn may_allow(seen: &Option<(String, Instant)>, key: &str, now: Instant) -> bool {
+    seen.as_ref().is_some_and(|(shown, since)| shown == key && now.duration_since(*since) >= ARMED)
 }
 
 /// Whether "It's mine" may sign `item`: one this device holds, by someone
@@ -352,10 +354,13 @@ fn claimable(item: &super::Item) -> bool {
     item.status() == "pending" && item.json["author"]["kind"].as_str().is_none_or(|kind| kind == "unknown")
 }
 
-/// A review of plugin `id` at `hash`, from the engine: what an Allow or a
-/// signing carries, so nothing but this window's host can make one.
-async fn mint_review(id: &str, hash: &str) -> Result<String, String> {
-    let answer = engine::get().call("ReviewPlugin", json!({ "id": id, "hash": hash })).await?;
+/// A review of plugin `id` at `hash`, from the engine that holds it
+/// (`device`: another of yours, through the relay; none, this one): what an
+/// Allow or a signing carries, so nothing but this window's host can make
+/// one.
+async fn mint_review(device: Option<&str>, id: &str, hash: &str) -> Result<String, String> {
+    let params = remote::addressed(device, json!({ "id": id, "hash": hash }));
+    let answer = engine::get().call("ReviewPlugin", params).await?;
     answer["review"].as_str().map(str::to_string).ok_or_else(|| "review: none given".to_string())
 }
 
@@ -363,8 +368,21 @@ fn said(error: &str, on: &On) -> String {
     match (error, on) {
         ("offline" | "closed", _) => "Zeron isn't running right now. Try again in a moment.".into(),
         (e, Some((_, name))) if remote::unreachable(e) => format!("Can't reach {name} right now. Try again once it's online."),
+        // A Zeron there from before another device could allow its plugins.
+        (e, Some((_, name))) if older_there(e) => {
+            format!("Zeron on {name} needs updating before it can be allowed from here.")
+        }
+        (e, _) if e.starts_with("review:") => "That answer didn't go through. Choose Allow again.".into(),
         (other, _) => other.to_string(),
     }
+}
+
+/// Whether `error` is an older engine refusing a review or an Allow from
+/// another device.
+fn older_there(error: &str) -> bool {
+    error.starts_with("ReviewPlugin is only answered over this device's local IPC")
+        || error.starts_with("DecidePlugin: only this device's own window can do that")
+        || error.starts_with("ReviewPlugin: only that device's own window")
 }
 
 #[cfg(test)]
@@ -409,16 +427,35 @@ mod tests {
     }
 
     /// R27: Allow is taken only for the sheet shown, once it has shown a
-    /// moment, and never for another device's.
+    /// moment; another device's too, as that device's sheet.
     #[test]
-    fn allow_waits_for_the_sheet_and_is_this_device_s_alone() {
+    fn allow_waits_for_the_sheet_shown() {
         let since = Instant::now();
         let seen = Some(("/focus@h1".to_string(), since));
-        assert!(!may_allow(&seen, "/focus@h1", false, since + ARMED / 2));
-        assert!(may_allow(&seen, "/focus@h1", false, since + ARMED));
-        assert!(!may_allow(&seen, "/focus@h2", false, since + ARMED * 2), "changed while shown");
-        assert!(!may_allow(&seen, "/focus@h1", true, since + ARMED * 2), "another device's");
-        assert!(!may_allow(&None, "/focus@h1", false, since + ARMED * 2));
+        assert!(!may_allow(&seen, "/focus@h1", since + ARMED / 2));
+        assert!(may_allow(&seen, "/focus@h1", since + ARMED));
+        assert!(!may_allow(&seen, "/focus@h2", since + ARMED * 2), "changed while shown");
+        assert!(!may_allow(&seen, "dev-b/focus@h1", since + ARMED * 2), "another device's, not the one shown");
+        assert!(!may_allow(&None, "/focus@h1", since + ARMED * 2));
+
+        let elsewhere = Some(("dev-b/focus@h1".to_string(), since));
+        assert!(!may_allow(&elsewhere, "dev-b/focus@h1", since + ARMED / 2));
+        assert!(may_allow(&elsewhere, "dev-b/focus@h1", since + ARMED));
+    }
+
+    /// Another device's engine from before this could allow: said plainly.
+    #[test]
+    fn an_older_zeron_there_and_a_lost_review_are_said_plainly() {
+        let on: On = Some(("dev-b".into(), "Devbox".into()));
+        assert_eq!(
+            said("ReviewPlugin is only answered over this device's local IPC", &on),
+            "Zeron on Devbox needs updating before it can be allowed from here."
+        );
+        assert_eq!(
+            said("review: Allowing a plugin needs Zeron's consent window (open the plugin again and decide there)", &on),
+            "That answer didn't go through. Choose Allow again."
+        );
+        assert_eq!(said("It changed while you were looking; review it again", &None), "It changed while you were looking; review it again");
     }
 
     #[test]

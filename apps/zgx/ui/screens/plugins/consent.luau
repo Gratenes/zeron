@@ -8,8 +8,9 @@
 --
 -- The host publishes what to show as `consent`:
 --   { item = PluginItem?, busy = boolean, error = string?,
---     device_name = string? }   (another of your devices it's on: allowed
---                                there alone, and named here)
+--     device_name = string? }   (another of your devices it's on: named
+--                                here; allowed from here, the host asks
+--                                that device for the review)
 -- (The item's name, version and tools' words come bounded and plain from
 -- the host, src/plugins/consent.rs `bounded`.) It answers
 -- `plugins.decide { id, allow, hash }` (the hash it was shown: a plugin
@@ -223,25 +224,23 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 			end,
 			ui.t("plugins.consent.not_now"),
 		},
-		-- Another device's is allowed on that device alone (its own
-		-- window there): from here, only Not now.
-		if elsewhere
-			then nil
-			else ds.Button {
-				id = "consent-allow",
-				tone = "primary",
-				size = "md",
-				disabled = function(): boolean
-					return busy() or not armed:get()
-				end,
-				on_click = function()
-					if not armed:peek() then
-						return
-					end
-					ui.invoke("plugins.decide", { id = it.id, allow = true, hash = it.hash })
-				end,
-				ui.t("plugins.consent.allow"),
-			},
+		-- (Another device's too: the host asks that device for the
+		-- review, and the Allow goes there.)
+		ds.Button {
+			id = "consent-allow",
+			tone = "primary",
+			size = "md",
+			disabled = function(): boolean
+				return busy() or not armed:get()
+			end,
+			on_click = function()
+				if not armed:peek() then
+					return
+				end
+				ui.invoke("plugins.decide", { id = it.id, allow = true, hash = it.hash })
+			end,
+			ui.t("plugins.consent.allow"),
+		},
 	}
 
 	local confirm_claim = ui.column {
@@ -378,7 +377,7 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 					else nil,
 				if elsewhere
 					then ui.text {
-						ui.t("plugins.consent.allow_there", { device = elsewhere }),
+						ui.t("plugins.consent.allow_from_here", { device = elsewhere }),
 						text_size = "$font.size.sm",
 						line_height = "$font.line.sm",
 						color = "$text.secondary",

@@ -2491,10 +2491,14 @@ fn forwardable(method: &str) -> bool {
             // Plugins are per device (what it runs, what it allowed): Settings
             // → Plugins' device switcher lists, declines, turns off, installs
             // (from a link; it lands waiting there) and removes them on
-            // another of your devices from this one. Allowing stays with
-            // that device's own window (`zeron_rpc::peer_refused`, both ends).
+            // another of your devices from this one, and allows them: its
+            // consent window asks that device for a review of the plugin
+            // shown (minted there, for this device alone: it names itself,
+            // `zeron_rpc::CALLER_DEVICE_PARAM`) and brings it back with the
+            // Allow.
             | methods::LIST_PLUGINS
             | methods::WATCH_PLUGINS
+            | methods::REVIEW_PLUGIN
             | methods::DECIDE_PLUGIN
             | methods::SET_PLUGIN_OFF
             | methods::REMOVE_PLUGIN
@@ -2932,6 +2936,18 @@ impl RpcService for EngineRpc {
             && target != self.doc_host.device_id()
         {
             let target = target.to_string();
+            // A review there is bound to who asked for it: this device says
+            // which it is (the edge's verified device wins, when it stamps
+            // one).
+            let mut params = params;
+            if matches!(method, methods::REVIEW_PLUGIN | methods::DECIDE_PLUGIN)
+                && let Some(object) = params.as_object_mut()
+            {
+                object.insert(
+                    zeron_rpc::CALLER_DEVICE_PARAM.into(),
+                    serde_json::json!(self.doc_host.device_id()),
+                );
+            }
             // A file on this device can't be read there: another device
             // installs from a link.
             if method == methods::INSTALL_PLUGIN && params.get("path").is_some_and(|p| !p.is_null()) {
@@ -2939,8 +2955,9 @@ impl RpcService for EngineRpc {
                     "Another device installs a plugin from a link (url), not a file on this one".into(),
                 ));
             }
-            // Allowing a plugin is that device's person's, in its own window
-            // (the receiving side refuses it too: `zeron_rpc::peer_refused`).
+            // What only that device's own app may do there (signing,
+            // templates, credentials; the receiving side refuses it too:
+            // `zeron_rpc::peer_refused`).
             if zeron_rpc::peer_refused(method, &params) {
                 return Err(RpcError::Failed(format!(
                     "{method}: only that device's own window can do that. It's waiting for you there."
@@ -6102,6 +6119,14 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_READY));
         // The bearer is for local clients only, never a remote device's ask.
         assert!(!forwardable(methods::ACCESS_TOKEN));
+        // Another device's consent window asks the plugin's device for the
+        // review and brings it back with the Allow; signing and templates
+        // stay this device's.
+        assert!(forwardable(methods::REVIEW_PLUGIN));
+        assert!(forwardable(methods::DECIDE_PLUGIN));
+        assert!(!forwardable(methods::SIGN_PLUGIN));
+        assert!(!forwardable(methods::REVIEW_TEMPLATE));
+        assert!(!forwardable(methods::DECIDE_TEMPLATE));
         assert!(forwardable(methods::QUEUE_COMMAND));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));
