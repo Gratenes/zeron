@@ -81,6 +81,9 @@ local shared = {
 		-- a side chat whose chat isn't listed (archived, or gone) stands
 		-- as a row of its own. Off until asked for.
 		side_chats = ui.persist("shell_sidebar_side_chats", false),
+		-- A chat whose device is away (its presence went quiet) wears a
+		-- wifi-off glyph, so a dead chat shows before it's clicked: on.
+		unreachable = ui.persist("shell_sidebar_show_unreachable", true),
 	},
 	-- The groups showing all their sessions ("Show N more"): until the app
 	-- quits (a reload keeps them).
@@ -261,6 +264,20 @@ local function devices(): ({ [string]: string }, string?)
 		end
 	end
 	return names, here
+end
+
+-- The devices that are away now, by id: the engine's own judgement of its
+-- presence (`online`: this device always, another seen within its
+-- heartbeat's window, src/sessions.rs). A device it doesn't list isn't
+-- called away.
+local function away(): { [string]: boolean }
+	local out: { [string]: boolean } = {}
+	for _, d in sessions.now:get().devices do
+		if d.online == false and not d.here then
+			out[d.id] = true
+		end
+	end
+	return out
 end
 
 -- A device's id by the name its group shows (ds.Sidebar groups by name):
@@ -490,6 +507,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 	local only = narrow:get()
 	local just = only_project()
 	local names = devices()
+	local offline = away()
 	local out: { ds.SidebarProject } = {}
 	local by: { [string]: ds.SidebarProject } = {}
 	-- One group for each repository, whichever device its clones are on: it stands
@@ -577,6 +595,8 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		-- Its side chats, nested under it (the narrowed list's own: those in
 		-- a state it shows).
 		local kids: { any }? = nil
+		-- (Any of them on a device that's away: its row says so while they're folded.)
+		local kids_offline = false
 		if nest and not act then
 			local rows: { any } = {}
 			for _, k in (now.children or {})[c.id] or {} do
@@ -595,17 +615,25 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 					created = k.created,
 					agent = k.agent :: any,
 					device = names[k.device] or locale.s("shell.sidebar.unknown_device"),
+					offline = offline[k.device] == true,
 					branch = k.branch,
 				}))
 			end
 			if #rows > 0 then
 				kids = kept_kids(c.id, rows)
 			end
+			for _, row in rows do
+				if row.offline then
+					kids_offline = true
+					break
+				end
+			end
 		end
 		table.insert(group.sessions, kept({
 			id = c.id,
 			title = c.title,
 			status = status :: any,
+			offline = offline[c.device] == true,
 			time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
 			shelf = on_shelf,
 			rank = rank,
@@ -617,6 +645,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 			-- lanes' badge counts them: screens/chat/lanes.)
 			subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
 			side_chats = kids,
+			kids_offline = kids_offline,
 		}) :: any)
 	end
 	if #loose.sessions > 0 then

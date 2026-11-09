@@ -141,6 +141,9 @@ export type Details = {
 	-- folds them away), where the caller lists them (a session's
 	-- `side_chats`). Off unless the caller says.
 	side_chats: State<boolean>?,
+	-- A chat whose device is away wears a wifi-off glyph, in its row and on
+	-- the rail. On unless the caller says.
+	unreachable: State<boolean>?,
 }
 -- How grouped sessions are ordered (Zeron's Sort): the most recently
 -- updated first, or the most recently made. (Pinned and sections keep the
@@ -327,6 +330,17 @@ local function pressing(sessions: { Session }): status.Kind?
 		end
 	end
 	return best
+end
+
+-- Whether any of `sessions` (or a side chat under one) is on a device that's
+-- away: a folded group's tile says so when nothing more pressing does.
+local function any_offline(sessions: { Session }): boolean
+	for _, s in sessions do
+		if s.offline or s.kids_offline then
+			return true
+		end
+	end
+	return false
 end
 
 local function list_gap(): number
@@ -651,6 +665,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local expanded = props.expanded or ui.use_state({} :: { [string]: boolean })
 	-- Whether a folded place still lists its sessions in a state.
 	local keep_active: State<boolean> = details.keep_active or ui.use_state(true)
+	local show_unreachable: State<boolean> = details.unreachable or ui.use_state(true)
 	-- The first nine sessions the list shows, by id: their jump (⌘1–⌘9).
 	local slots = ui.use_state({} :: { [string]: number })
 	local function hinting(): boolean
@@ -1074,6 +1089,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- corner unseen).
 	local function session_glyph(s: Session, strong: () -> boolean, row: (() -> Session)?): Node
 		local cur = row or now_of(s)
+		local function rail_offline(): boolean
+			return railed() and cur().status == nil and show_unreachable:get() and cur().offline == true
+		end
 		-- (On the rail, its state's glyph, one of its kind.)
 		return ui.div {
 			-- (Its glyph follows its state in place: ds/status.)
@@ -1088,9 +1106,14 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					size = 16,
 				}
 			),
+			-- (On the rail, a chat of a device that's away has no row to carry
+			-- its glyph: it takes the agent's place, in the warning hue.)
 			ui.show(function(): boolean
-				return not railed() or cur().status == nil
+				return (not railed() or cur().status == nil) and not rail_offline()
 			end, agent(s, strong, cur)),
+			ui.show(rail_offline, SessionRow.unreachable(cur, function(): boolean
+				return true
+			end)),
 		}
 	end
 	-- Whether a session asks to be seen: in a state, or the one open.
@@ -1416,6 +1439,13 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					title,
 					if s.pr then ui.show(details.pr, pr_badge(s.pr)) else nil,
 					side_fold_toggle(s, cur, in_flyout or shelved),
+					SessionRow.unreachable(function(): Session
+						return cur()
+					end, function(): boolean
+						return show_unreachable:get()
+					end, function(): boolean
+						return nesting() and not side_open(s.id)
+					end),
 					subagents_pill(function(): number
 						return cur().subagents or 0
 					end),
@@ -1692,6 +1722,22 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				status.StatusDot { kind = kind, size = 8 },
 			}
 		end
+		-- (Nothing more pressing: a chat of a device that's away, a wifi-off
+		-- glyph in the warning hue, where "Unreachable chats" is on.)
+		local function away_badge(): Node
+			return ui.div {
+				absolute = true,
+				right = -4,
+				top = -4,
+				color = "$zeron.status.limited",
+				tooltip = locale.s("ds.sidebar.unreachable_group"),
+				label = locale.s("ds.sidebar.unreachable_group"),
+				Icon { name = "wifi-off", size = 11 },
+			}
+		end
+		local function away(list: { Session }): boolean
+			return show_unreachable:get() and pressing(list) == nil and any_offline(list)
+		end
 		if type(sessions) == "table" then
 			local most = pressing(sessions)
 			return ui.div {
@@ -1700,6 +1746,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				h = 18,
 				Tile { hue = if type(hue) == "string" or type(hue) == "function" then hue :: any else nil, inside = inside, size = 18, src = src, emoji = emoji },
 				if most then ui.show(hidden, badge(most)) else nil,
+				ui.show(function(): boolean
+					return hidden() and away(sessions)
+				end, away_badge()),
 			}
 		end
 		-- Sessions that move: the badge follows the most pressing, a dot of
@@ -1712,6 +1761,9 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			ui.presence(function(): status.Kind?
 				return if hidden() then pressing(listed(sessions)) else nil
 			end, badge),
+			ui.show(function(): boolean
+				return hidden() and away(listed(sessions))
+			end, away_badge()),
 		}
 	end
 	-- The chrome's own tile (pinned's, a device's, the list's): quiet, a
@@ -4776,6 +4828,9 @@ fn layer(input:LayerInput)->vec4<f32> {
 		{ key = "project_icon", label = "ds.sidebar.view.project_icon", icon = "project-default" },
 		{ key = "location", label = "ds.sidebar.view.location", icon = "remote-server" },
 	}
+	if (details :: any).unreachable then
+		table.insert(SHOW, { key = "unreachable", label = "ds.sidebar.view.unreachable", icon = "wifi-off" })
+	end
 	if (details :: any).keep_active then
 		table.insert(SHOW, { key = "keep_active", label = "ds.sidebar.view.keep_active", icon = "bell" })
 	end

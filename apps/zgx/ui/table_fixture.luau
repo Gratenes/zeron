@@ -19,6 +19,15 @@ local TABLES: { [string]: string } = {
 | The veil keeps a chunk list per paragraph until it finishes fading | No, but the list is short and goes when the reply settles |
 | A wider retained tree makes hit testing walk more nodes | Yes, the spatial index skips whole columns once #1523 lands |
 ]],
+	-- A 30-character label beside prose, as in a reply listing its chats: the
+	-- label's room is its words' own, the prose takes the rest.
+	running = [[
+| Chat | Doing |
+| --- | --- |
+| **bd116421**, engine hang | Getting function names into the hang capture, which lock froze and whose code holds it, then a fix in a separate worktree. It won't deploy, restart the engine or push. It will say whether threadripper should go back to the rotation-only build until there's a fix. |
+| **1f88cdc9**, personal CI builds | The first full build on GitHub passed: Linux in 17m and Windows in 43m29s. It's rerunning to measure how fast a second build is once cached. |
+| **9fb86b6f**, sidebar offline icon | Building it. |
+]],
 	-- Short labels and numbers beside a column of prose.
 	mixed = [[
 | Build | Size | Change | Notes |
@@ -122,6 +131,7 @@ return ui.column {
 				return width:get()
 			end,
 			shown("two"),
+			shown("running"),
 			shown("mixed"),
 			shown("many"),
 			shown("code"),

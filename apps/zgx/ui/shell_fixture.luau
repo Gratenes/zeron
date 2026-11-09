@@ -489,6 +489,27 @@ ui.command {
 		publish()
 	end,
 }
+-- A device's presence going quiet (its heartbeat stale: the engine
+-- publishes it `online = false`), and coming back.
+for _, online in { false, true } do
+	ui.command {
+		id = if online then "fixture.devbox_online" else "fixture.devbox_offline",
+		title = `Fixture: devbox {if online then "back online" else "offline"}`,
+		run = function()
+			local devices = {}
+			for _, d in model.devices do
+				local d2 = table.clone(d)
+				if d2.id == "box" then
+					d2.online = online
+					d2.seen = if online then nil else os.time() - 300
+				end
+				table.insert(devices, d2)
+			end
+			model.devices = devices
+			publish()
+		end,
+	}
+end
 ui.command { id = "fixture.icons_outdated", title = "Fixture: an engine without project icons", menu = "Fixture", run = function()
 	icons_refused = "outdated"
 end }
@@ -1158,6 +1179,21 @@ ui.command {
 			a1 = {
 				{ id = "s1", parent = "a1", title = "Look into the flake", device = "mac", updated = NOW - 30, created = NOW - 5 * HOUR, agent = "claude" },
 				{ id = "s2", parent = "a1", title = "Write the changelog", device = "mac", updated = NOW - 2 * HOUR, created = NOW - HOUR, agent = "openai" },
+			},
+		}
+		publish()
+	end,
+}
+-- One side chat of Fix the build, hosted on devbox (with
+-- `fixture.devbox_offline`, one that's away): the sidebar's unreachable glyph
+-- on nested side chats (tests/sidebar_unreachable).
+ui.command {
+	id = "side_chat_on_devbox",
+	title = "Fix the build has a side chat on devbox",
+	run = function()
+		(model :: any).children = {
+			a1 = {
+				{ id = "s1", parent = "a1", kind = "side", title = "Look into the flake", device = "box", updated = NOW - 30, created = NOW - 5 * HOUR, agent = "claude" },
 			},
 		}
 		publish()
