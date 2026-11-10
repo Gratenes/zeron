@@ -417,9 +417,17 @@ impl EngineCore {
         // the P2P service, which serves it to that device alone.
         let agent_accounts =
             AgentAccounts::with_callback_routes(agent_accounts_config, previews.callback_routes());
-        registry.set_account_environment(Arc::new(agent_accounts::AccountsRunEnvironment(
+        registry.set_account_environment(Arc::new(agent_accounts::PinRunEnvironment(
             agent_accounts.clone(),
         )));
+        // A chat's first run asks the plugins that pin (`run.preparing`).
+        {
+            let agents = plugins.agents().clone();
+            agent_accounts.set_pin_hook(Arc::new(move |harness, chat| {
+                let agents = agents.clone();
+                Box::pin(async move { agents.preparing(harness, &chat).await })
+            }));
+        }
         // Rotation's per-account chat counts are the chats running now.
         agent_accounts.set_running_chats(Arc::new(sessions.running_chats_probe()));
         // Plugins' agent ops (usage, accounts, models: plugins/agents) reach
@@ -1254,12 +1262,13 @@ impl Engine {
         });
         let server = serve_ipc(config.ipc_port, &config.data_dir, service).await?;
         // Only a port this process actually serves goes to agents: the
-        // injected MCP server must dial back into THIS engine.
-        runtime.core().sessions.set_ipc_port(config.ipc_port);
+        // injected MCP server must dial back into THIS engine. (Its bearer
+        // first: a run revived on boot waits on the port, then reads both.)
         runtime
             .core()
             .sessions
             .set_ipc_token_file(zeron_rpc::ipc_auth::agent_token_path(&config.data_dir));
+        runtime.core().sessions.set_ipc_port(config.ipc_port);
         update_trial::prove_and_commit(runtime.core(), &config);
 
         tokio::select! {

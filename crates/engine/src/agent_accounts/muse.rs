@@ -134,7 +134,7 @@ impl AgentAccounts {
 
     /// The environment that points Muse at account `name`'s config root,
     /// with its mirror refreshed.
-    fn muse_env(&self, name: &str) -> Result<BTreeMap<String, String>, EngineError> {
+    pub(super) fn muse_env(&self, name: &str) -> Result<BTreeMap<String, String>, EngineError> {
         let home = self.muse_home(name)?;
         private_dir(&home)?;
         let root = home.join("config");
@@ -669,9 +669,7 @@ for line in sys.stdin:
 
         // A run gets the selected account's root; switching changes it.
         let mut request = run_request();
-        env.prepare(HarnessId::Muse, None, &mut request)
-            .await
-            .unwrap();
+        env.prepare(HarnessId::Muse, None, &mut request).await.unwrap();
         let root_a = request.env["XDG_CONFIG_HOME"].clone();
         assert_eq!(request.env["TBH_CREDENTIAL_BACKEND"], "file");
         assert_eq!(
@@ -688,9 +686,7 @@ for line in sys.stdin:
         assert!(listed[1].1 && !listed[0].1);
         assert_ne!(env.credential(HarnessId::Muse, None).await, before);
         let mut request = run_request();
-        env.prepare(HarnessId::Muse, None, &mut request)
-            .await
-            .unwrap();
+        env.prepare(HarnessId::Muse, None, &mut request).await.unwrap();
         assert_ne!(request.env["XDG_CONFIG_HOME"], root_a);
         // Other agents are untouched; the user's own login never moved.
         let mut other = run_request();

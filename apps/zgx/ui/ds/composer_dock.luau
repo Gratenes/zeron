@@ -595,7 +595,11 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 	local function pill(): Node
 		local p = glass.style({
 			h = PILL_H,
-			px = ui.raw(PILL_PAD, "the capsules' inset in the pill"),
+			-- The capsules' inset, the same on all four sides: the glass's 1
+			-- point border is laid out inside the pill, so the padding is the
+			-- inset less it (a side padding alone left the ends a point wider
+			-- than the top and bottom).
+			p = ui.raw(PILL_PAD - 1, "the capsules' inset in the pill, less its border"),
 			gap = "$zeron.space.hair",
 			items = "center",
 			shrink = 0,
@@ -725,6 +729,10 @@ local function deck(tabs: { Tab }, open: State<Tray?>, geometry: { [string]: num
 		ui.effect(function()
 			local w = pill_w:get()
 			report(if any() and not is_open() and w > 0 then w else nil)
+		end)
+		-- (Gone with it: a pill beside it no longer moves aside for it.)
+		ui.on_cleanup(function()
+			report(nil)
 		end)
 	end
 	return top, floating
@@ -1079,7 +1087,7 @@ local function task_row(t: Task, row: State<Task>, now: State<number>, props: Pr
 		return row:get().ended ~= nil
 	end
 	local agent = t.kind == "agent"
-	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif agent then "bot" else "action-play"
+	local glyph: Icon.Name = if t.kind == "terminal" then "terminal" elseif agent then "side-chat" else "action-play"
 	local opens = agent and props.on_open_task ~= nil
 	local function open()
 		if props.on_open_task then

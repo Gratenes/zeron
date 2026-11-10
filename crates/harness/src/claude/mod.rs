@@ -230,27 +230,6 @@ fn model_arg(request: &RunRequest) -> Option<String> {
     })
 }
 
-/// The context window autocompact works within, when the picker's 200K is
-/// chosen on a model that offers 1M. The CLI gives such models (Opus 5.5,
-/// Fable, Sonnet 5) a 1M window with or without the `[1m]` suffix (verified
-/// on 2.1.319: `modelUsage.contextWindow` is 1000000 for both), so leaving
-/// the suffix off no longer keeps a chat to 200K: `autoCompactWindow` does.
-/// A choice missing from `modelOptions` is the picker's default, 200K.
-fn compact_window(request: &RunRequest) -> Option<u64> {
-    match request.model_options.get("contextWindow").and_then(Value::as_str) {
-        Some("1m") => None,
-        Some(_) => Some(200_000),
-        None => {
-            let model = request.model.as_deref()?;
-            catalog::static_models()
-                .iter()
-                .find(|m| m.id == model)
-                .is_some_and(|m| m.options.iter().any(|o| o.id == "contextWindow"))
-                .then_some(200_000)
-        }
-    }
-}
-
 /// Whether this run must really be limited to a 200K window. The model id
 /// alone cannot do it: models such as `claude-opus-5-5` run 1M under their
 /// plain id, so the "200K" choice only held for ids that happen to default to
@@ -259,24 +238,14 @@ fn compact_window(request: &RunRequest) -> Option<u64> {
 /// 1000000 -> 200000), and its own autocompact then works from that window.
 /// It is read at launch, so changing it needs a fresh process.
 ///
-/// An unset choice is the catalog default (200K) for the models that offer the
-/// option; a model without it keeps whatever the CLI gives it.
+/// Only an explicit 200K choice sets it. Unset, a model keeps the window the
+/// CLI gives it (1M for the long-context rows, whose select defaults to 1M).
 fn caps_context_at_200k(request: &RunRequest) -> bool {
-    match request
+    request
         .model_options
         .get("contextWindow")
         .and_then(Value::as_str)
-    {
-        Some(window) => window.eq_ignore_ascii_case("200k"),
-        None => request.model.as_deref().is_some_and(|model| {
-            catalog::static_models().iter().any(|m| {
-                m.id == model
-                    && m.options
-                        .iter()
-                        .any(|o| o.id == "contextWindow" && o.default_choice == "200k")
-            })
-        }),
-    }
+        .is_some_and(|window| window.eq_ignore_ascii_case("200k"))
 }
 
 /// Every flag-layer setting a request launches with, for
@@ -290,7 +259,6 @@ fn flag_settings(request: &RunRequest) -> Value {
         "fastMode": on(option_is_on(&request.model_options, "fastMode")),
         "alwaysThinkingEnabled": on(option_is_on(&request.model_options, "thinking")),
         "ultracode": on(request.reasoning == Some(ReasoningLevel::Ultracode)),
-        "autoCompactWindow": compact_window(request).map_or(Value::Null, Value::from),
     })
 }
 
@@ -511,9 +479,6 @@ impl ClaudeHarness {
         }
         if request.reasoning == Some(ReasoningLevel::Ultracode) {
             settings.insert("ultracode".into(), Value::Bool(true));
-        }
-        if let Some(window) = compact_window(request) {
-            settings.insert("autoCompactWindow".into(), window.into());
         }
         if !settings.is_empty() {
             args.push("--settings".into());
@@ -2555,11 +2520,16 @@ mod access_tests {
 
     #[test]
     fn the_200k_choice_limits_the_window_through_the_cli() {
-        // Chosen, or unset on a model whose catalog default is 200K.
+        // Only an explicit 200K choice caps; unset keeps the CLI's window
+        // (1M on Opus 5.5), which is what its select now shows as default.
         let chosen = with_options("claude-opus-5-5", json!({"contextWindow": "200k"}));
         let unset = with_options("claude-opus-5-5", json!({}));
         assert!(caps_context_at_200k(&chosen));
-        assert!(caps_context_at_200k(&unset));
+        assert!(!caps_context_at_200k(&unset));
+        assert!(catalog::static_models().iter().any(|m| m.id == "claude-opus-5-5"
+            && m.options
+                .iter()
+                .any(|o| o.id == "contextWindow" && o.default_choice == "1m")));
         // 1M keeps the `[1m]` id and never the limit.
         let one_m = with_options("claude-opus-5-5", json!({"contextWindow": "1m"}));
         assert!(!caps_context_at_200k(&one_m));
@@ -2574,7 +2544,9 @@ mod access_tests {
         assert!(!harness.same_runtime(&chosen, &one_m));
         assert!(!harness.reconfigures_in_place(&chosen, &one_m));
         assert!(!harness.reconfigures_in_place(&one_m, &chosen));
-        assert!(harness.same_runtime(&chosen, &unset));
+        // Same `--model` and flags; only the 200K limit differs.
+        assert!(!harness.same_runtime(&chosen, &unset));
+        assert!(harness.same_runtime(&unset, &with_options("claude-opus-5-5", json!({}))));
         // The command carries it.
         let env_of = |r: &RunRequest| {
             let cmd = ClaudeHarness::build_command(std::path::Path::new("claude"), r, false);
@@ -2585,6 +2557,7 @@ mod access_tests {
         };
         assert_eq!(env_of(&chosen).as_deref(), Some("1"));
         assert_eq!(env_of(&one_m), None);
+        assert_eq!(env_of(&unset), None);
     }
 
     #[test]
@@ -2724,51 +2697,5 @@ mod mcp_injection_tests {
             serde_json::from_str(&mcp_servers_config_arg(None, &[extra]).unwrap()).unwrap();
         assert!(only["mcpServers"].get("zeron").is_none());
         assert!(only["mcpServers"].get("plugin-focus").is_some());
-    }
-}
-
-#[cfg(test)]
-mod compact_window_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn request(model: &str, window: Option<&str>) -> RunRequest {
-        let mut model_options = serde_json::Map::new();
-        if let Some(window) = window {
-            model_options.insert("contextWindow".into(), json!(window));
-        }
-        RunRequest {
-            mcp: None,
-            prompt: "hi".into(),
-            harness: None,
-            model: Some(model.into()),
-            reasoning: None,
-            model_options,
-            cwd: "/work".into(),
-            sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-            auto_approve: false,
-            access: AccessMode::Supervised,
-            plan: false,
-            attachments: Vec::new(),
-            worktree: None,
-            resume: None,
-            env: Default::default(),
-            extra_mcp: Vec::new(),
-        }
-    }
-
-    /// 200K (chosen, or the default) caps autocompact's window; 1M and a
-    /// model with no window choice leave the CLI's own.
-    #[test]
-    fn the_200k_choice_caps_autocompact_where_1m_is_offered() {
-        assert_eq!(compact_window(&request("claude-opus-5-5", Some("200k"))), Some(200_000));
-        assert_eq!(compact_window(&request("claude-opus-5-5", None)), Some(200_000));
-        assert_eq!(compact_window(&request("claude-opus-5-5", Some("1m"))), None);
-        assert_eq!(compact_window(&request("claude-opus-4-8", None)), None);
-        assert_eq!(flag_settings(&request("claude-opus-5-5", None))["autoCompactWindow"], json!(200_000));
-        assert_eq!(flag_settings(&request("claude-opus-5-5", Some("1m")))["autoCompactWindow"], Value::Null);
-        let args = ClaudeHarness::launch_args(&request("claude-sonnet-5", Some("200k")));
-        let settings = args.iter().position(|a| a == "--settings").map(|i| &args[i + 1]);
-        assert!(settings.is_some_and(|s| s.contains(r#""autoCompactWindow":200000"#)), "{args:?}");
     }
 }

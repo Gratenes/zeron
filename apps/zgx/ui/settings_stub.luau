@@ -140,6 +140,9 @@ local answers: { [string]: (arg: any) -> any } = {
 	["account.me"] = function()
 		return settled(table.clone(me))
 	end,
+	["dictation.call"] = function(arg: any)
+		return settled(if arg.op == "status" then { installed = false, size = 670479942 } elseif arg.op == "inputs" then {} else nil)
+	end,
 	["account.rename"] = function(name: string)
 		local r = change(nil)
 		if r.error then
@@ -580,6 +583,18 @@ ui.command {
 			mono = t["font.mono"],
 			secondary = t["text.secondary"],
 			tertiary = t["text.tertiary"],
+			-- "Accent colour throughout": a status dot, a find's highlight,
+			-- an @file token, a list marker, and a link's ink (nil: the
+			-- text's own).
+			working_dot = t["zeron.status.dot.working"],
+			working = t["zeron.status.working"],
+			find = t["zeron.editor.match"],
+			file_token = t["zeron.composer.token.file"],
+			marker = t["zeron.prose.marker"],
+			link = require("@ds/look").accented_ink(nil)(),
+			-- What the accent's own token is, and what the theme's says.
+			accented_ink = ui.theme.get("zeron.accented.ink"),
+			accent_ink = ui.theme.get("accent"),
 		})
 	end,
 }

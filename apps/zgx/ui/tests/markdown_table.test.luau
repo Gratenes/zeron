@@ -64,6 +64,27 @@ test("table: two columns of prose fit the reply, wrapped, rather than running ou
 	expect(words(app, 2, 1, 2).w > whole * 0.3).to_be(true)
 end)
 
+test("table: a 30-character label beside prose fits the reply at its widths, wrapped", function()
+	for _, width in { 480, 620, 760 } do
+		local app = only("running", width)
+		fits(app, 2)
+		-- The prose wrapped inside the view, not past it.
+		local view, prose = box(app, ".md-table"), words(app, 2, 1, 2)
+		expect(prose.x + prose.w <= view.x + view.w).to_be(true)
+		expect(prose.h > words(app, 2, 0, 2).h).to_be(true)
+	end
+end)
+
+test("table: the same table scrolls, rather than clips, once its columns' least widths can't fit", function()
+	local app = only("running", 280)
+	-- (Its prose runs past the view: the header's words end inside it.)
+	local view, prose = box(app, ".md-table"), words(app, 2, 1, 2)
+	expect(prose.x + prose.w + 16 > view.x + view.w).to_be(true)
+	app:wheel(".md-table", { dy = 40, mouse = true, shift = true })
+	expect(across(app)).to_be(40)
+	expect(down(app)).to_be(0)
+end)
+
 test("table: short columns keep to one line and the prose beside them takes the rest", function()
 	local app = only("mixed")
 	fits(app, 4)
@@ -75,6 +96,16 @@ test("table: short columns keep to one line and the prose beside them takes the 
 	expect(words(app, 4, 1, 1).h).to_be(line)
 	expect(words(app, 4, 1, 2).h).to_be(line)
 	expect(words(app, 4, 1, 3).h).to_be(line)
+end)
+
+test("table: a table narrower than the reply still runs its rules to its frame", function()
+	local app = only("loose")
+	-- Its prose column takes what the words leave, so the numbers, on their
+	-- cells' right edges, end as far in from the frame's right as the first
+	-- words start from its left: the cells, and the rules under them, reach
+	-- the frame.
+	local frame, first, last = box(app, ".md-table"), words(app, 2, 0, 1), words(app, 2, 3, 2)
+	near(frame.x + frame.w - (last.x + last.w), first.x - frame.x)
 end)
 
 test("table: a column of numbers sits on its right edge, whether the source says so or not", function()

@@ -9,6 +9,7 @@
 --   LaneTab { tab = { id, kind = "side_chat" | "subagent", chat, title } }
 
 local ds = require("@ds")
+local Dictation = require("@app/screens/chat/dictation")
 local T = require("@ds/transcript")
 local lanes = require("@app/screens/chat/lanes")
 local store = require("@app/screens/chat/store")
@@ -20,6 +21,7 @@ local Where = require("@app/screens/chat/where")
 local Dock = require("@app/screens/chat/dock")
 local ReplyImages = require("@app/screens/chat/reply_images")
 local FileLinks = require("@app/screens/chat/file_links")
+local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Shared = require("@app/screens/chat/shared")
 local boundary = require("@app/screens/shell/boundary")
@@ -52,8 +54,8 @@ function M.title(tab: any): string
 	return locale.s(if tab.kind == "subagent" then "chat.lane_tab.subagent" else "chat.lane_tab.side_chat")
 end
 
-function M.icon(tab: any): string
-	return if tab.kind == "subagent" then "bot" else "side-chat"
+function M.icon(_tab: any): string
+	return "side-chat"
 end
 
 -- A side chat's composer: the chat page's (ds.Composer), its footer the
@@ -422,7 +424,16 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end,
 		run = run_command,
 	}
+	local dictation = Dictation.bind(draft, function(): string
+		local edit = editing:get()
+		return `{chat}|{name}|{if edit then edit.item else ""}`
+	end, function(): boolean
+		local current = session:get()
+		return asks.question:get() ~= nil or asks.approval:get() ~= nil
+			or (current ~= nil and (current.state == "missing" or current.state == "offline"))
+	end, name)
 	return ds.Composer {
+		dictation = dictation,
 		cargo = carried,
 		-- (Its chips' × under the pointer, as the chat page's.)
 		on_remove_cargo = function(cid: string)
@@ -548,7 +559,8 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			local chips = Shared.take_cargo_of(chat)
 			local pack = Carried.pack(chips, words, words)
 			-- (Each command or skill picked: its canonical reference.)
-			local typed = Invocations.encode(pack.typed)
+			-- (And each reference to what it carries, `@` picked: its name.)
+			local typed = Carried.settle(Invocations.encode(pack.typed), chips)
 			local prompt = Carried.text(typed, pack)
 			-- As the chat page sends: the prompt joins its transcript as the
 			-- transcript's send steps clear of the end (it glides to the top,
@@ -798,6 +810,10 @@ M.Tab = ui.component(function(props: { tab: any }): Node
 			end
 		end,
 		link_menu = LinkMenu(open_link, function(): any
+			return view.session:peek()
+		end),
+		-- (A reply's link to one of its files or its agent's skills: a chip.)
+		link_chip = LinkChips(function(): any
 			return view.session:peek()
 		end),
 	}
