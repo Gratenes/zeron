@@ -1829,6 +1829,7 @@ return ui.component(function(props: Props): Node
 	local surface = ui.div {
 		ref = pill,
 		on_resize = measure(pill_w, "w"),
+		id = "composer-pill",
 		-- The pill's hairline border too: the press layer below sits inside
 		-- it, so a press on the hairline reached nothing.
 		focus_on_press = false,
