@@ -1035,19 +1035,17 @@ fn serve_with(
             }
         });
     });
-    // The window's corner radius as it is now, for the scripts' cards to stay
-    // concentric with it (`window.corner_radius`, ui/ds/tokens.luau): on
-    // Windows 11 8, square while maximized or in full screen (Windows rounds
-    // neither), and on Windows 10 (0 from zgx). Windows' alone: macOS's cards
-    // keep their own corner, and zgx knows no other platform's (it says 0).
+    // The window's corner radius, for the scripts' cards to stay concentric
+    // with it (`window.corner_radius`, ui/ds/tokens.luau): on Windows 11 8, on
+    // Windows 10 0 from zgx. Kept as is maximized and in full screen: Windows
+    // rounds neither, but the cards are set in from the window's edge by a gap
+    // (`zeron.inset.gap`) and their own corner is what shows there, so it
+    // stays rounded. Windows' alone: macOS's cards keep their own corner, and
+    // zgx knows no other platform's (it says 0).
     let corner = cfg!(windows).then(|| {
-        let info = &cx.window_info;
-        let (radius, fullscreen, bounds) = (info.corner_radius.clone(), info.fullscreen.clone(), info.bounds.clone());
+        let radius = cx.window_info.corner_radius.clone();
         let told = host.shared("window.corner_radius", Value::Nil);
-        cx.ui.runtime.effect(move || {
-            let square = fullscreen.get() || bounds.with(fills_work_area);
-            told.set(Value::from(if square { 0. } else { radius.get() }));
-        })
+        cx.ui.runtime.effect(move || told.set(Value::from(radius.get())))
     });
     let keep = RefCell::new(Some((host, devtools, commands, corner)));
     cx.on_closed(move || {
@@ -1060,29 +1058,6 @@ fn serve_with(
         }
     });
     handle
-}
-
-/// Whether a window at `bounds` fills its monitor's work area (the screen less
-/// the taskbar): maximized, as a frameless window's client is then (winit
-/// fits it to the work area), within a pixel.
-#[cfg(windows)]
-fn fills_work_area(bounds: &zgx_desktop::WindowBounds) -> bool {
-    use windows_sys::Win32::{
-        Foundation::POINT,
-        Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint},
-    };
-    let Some((x, y)) = bounds.position else { return false };
-    let (w, h) = (bounds.size.0 as i32, bounds.size.1 as i32);
-    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-    // SAFETY: the monitor nearest the window's middle (always one, by the
-    // flag), and a MONITORINFO sized as the call asks.
-    let found = unsafe { GetMonitorInfoW(MonitorFromPoint(POINT { x: x + w / 2, y: y + h / 2 }, MONITOR_DEFAULTTONEAREST), &mut info) } != 0;
-    let work = info.rcWork;
-    found && ((work.right - work.left) - w).abs() <= 1 && ((work.bottom - work.top) - h).abs() <= 1
-}
-#[cfg(not(windows))]
-fn fills_work_area(_bounds: &zgx_desktop::WindowBounds) -> bool {
-    false
 }
 
 /// The scripts' commands as the app's menu bar while this window has it

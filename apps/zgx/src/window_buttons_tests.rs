@@ -363,8 +363,8 @@ fn every_menu_item_is_in_the_command_palette() {
 
 /// The page's card stays concentric with the window's corner where the host
 /// says what it is (Windows): its radius less the 4 the card is set in by, 4
-/// on Windows 11's 8; square once the window is (maximized, full screen,
-/// Windows 10). Told nothing (macOS), the theme's own.
+/// on Windows 11's 8, maximized or not (the host tells the same); square
+/// only where the window is (Windows 10). Told nothing (macOS), the theme's own.
 #[test]
 fn the_cards_corner_follows_the_windows() {
     let mut app = mount(windows(W));
