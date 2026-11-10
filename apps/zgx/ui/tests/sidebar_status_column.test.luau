@@ -82,3 +82,54 @@ test("the corner sits 4 from the chevron's slot and the row's end", function()
 	end
 	error("no time on Tidy the tests")
 end)
+
+-- The mixed cases: a side chat can run on another device than its parent.
+local function mixed(): any
+	local app = mount("shell_fixture.luau")
+	app:resize(1200, 900)
+	app:frames(30)
+	app:command("mixed_status")
+	app:set_state(NEST, true)
+	app:command("fixture.devbox_offline")
+	app:frames(40)
+	return app
+end
+
+local SIDE_WAY = "A side chat is on an offline"
+
+test("a parent online with a pill and a folded side chat on an offline device: the pill, then the side glyph, at the column", function()
+	local app = mixed()
+	local _, pill = edges(app, "Fix the build", "subagent")
+	local glyph_left, glyph = edges(app, "Fix the build", SIDE_WAY)
+	local chevron = edges(app, "Fix the build", "Show side chats")
+	expect(glyph + 4).to_be(chevron)
+	expect(glyph_left - pill).to_be(4)
+	-- (The column the other rows end at.)
+	local _, alone = edges(app, "Tidy the tests", WAY)
+	expect(glyph).to_be(alone)
+end)
+
+test("a parent offline with a working side chat on an online device: the pill, then the glyph, in the same order", function()
+	local app = mixed()
+	local _, pill = edges(app, "Tidy the tests", "subagent")
+	local glyph_left, glyph = edges(app, "Tidy the tests", WAY)
+	local chevron = edges(app, "Tidy the tests", "Show side chats")
+	expect(glyph + 4).to_be(chevron)
+	expect(glyph_left - pill).to_be(4)
+end)
+
+test("unfolded, the offline side chat's own row has the glyph at the column, and the parent's side glyph is gone", function()
+	local app = mixed()
+	local chevron = edges(app, "Fix the build", "Show side chats")
+	app:click(`{SIDE} >> role:button "Fix the build" >> role:button "Show side chats"`)
+	app:frames(40)
+	local _, glyph = edges(app, "Side on devbox", WAY)
+	expect(glyph + 4).to_be(chevron)
+	local has_side = false
+	for line in app:tree(`{SIDE} >> role:button "Fix the build"`):gmatch("[^\n]+") do
+		if line:find(SIDE_WAY, 1, true) then
+			has_side = true
+		end
+	end
+	expect(has_side).to_be(false)
+end)

@@ -1205,6 +1205,31 @@ ui.command {
 		publish()
 	end,
 }
+-- The mixed cases (tests/sidebar_status_column): Fix the build, on this
+-- computer, has a subagent running and a side chat on devbox; Tidy the tests,
+-- on devbox, has a working side chat on this computer. With devbox away, the
+-- first says its side chat is unreachable beside its pill, the second says
+-- its own device is, beside the pill its working side chat makes.
+ui.command {
+	id = "mixed_status",
+	title = "Fix the build: a side chat on devbox; Tidy the tests on devbox: a working side chat here",
+	run = function()
+		for _, c in model.chats do
+			if c.id == "a1" then
+				c.running_subagents = 1
+				c.status = nil
+			elseif c.id == "a3" then
+				c.device = "box"
+				c.working_side_chats = 1
+			end
+		end
+		;(model :: any).children = {
+			a1 = { { id = "s1", parent = "a1", kind = "side", title = "Side on devbox", device = "box", updated = NOW - 30, created = NOW - HOUR, agent = "claude" } },
+			a3 = { { id = "s3", parent = "a3", kind = "side", title = "Side working here", device = "mac", status = "working", updated = NOW - 30, created = NOW - HOUR, agent = "claude" } },
+		}
+		publish()
+	end,
+}
 -- One side chat of Fix the build, hosted on devbox (with
 -- `fixture.devbox_offline`, one that's away): the sidebar's unreachable glyph
 -- on nested side chats (tests/sidebar_unreachable).
