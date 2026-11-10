@@ -355,6 +355,8 @@ local Tab = ui.component(function(props: { chat: string }): Node
 			on_aux_click = function(e: any)
 				if e.button == "middle" then
 					close(id)
+				else
+					route.aux_click(e)
 				end
 			end,
 			-- (`session`, as a sidebar row's: dropped on a pane, it joins the split.)
