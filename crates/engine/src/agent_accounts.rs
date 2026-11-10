@@ -4294,7 +4294,7 @@ fn usage_error_message(
         .map(|at| format!(" — retrying in {}", short_duration(at - now)))
         .unwrap_or_default();
     Some(match error {
-        ProbeError::RateLimited { .. } => format!("Rate limited by {provider}{retry}"),
+        ProbeError::RateLimited { .. } => format!("Usage check rate-limited by {provider}{retry}"),
         // Devin's key never expires on its own: a rejection means it was
         // revoked, whichever login it is.
         ProbeError::Unauthorized { .. } if harness == HarnessId::Devin => {
@@ -5722,7 +5722,7 @@ mod probe_tests {
                 }
             )
             .as_deref(),
-            Some("Rate limited by Anthropic — retrying in 2m")
+            Some("Usage check rate-limited by Anthropic — retrying in 2m")
         );
         assert_eq!(
             message(
