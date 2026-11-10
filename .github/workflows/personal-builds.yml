@@ -141,7 +141,7 @@ jobs:
           # The exe must look for exactly this folder, and it must hold the template.
           $text = [Text.Encoding]::Latin1.GetString([IO.File]::ReadAllBytes('out/zeron-zgx.exe'))
           if (-not $text.Contains($version)) { throw "the exe doesn't carry its app version $version" }
-          foreach ($f in "$beta/ui/app.luau", "$beta/ui/templates/zeron-v2/screens", "$beta/plugins-builtin") {
+          foreach ($f in "$beta/ui/.luaurc", "$beta/ui/templates/zeron-v2/.base.json", "$beta/ui/app.luau", "$beta/ui/templates/zeron-v2/screens", "$beta/plugins-builtin") {
             if (-not (Test-Path -LiteralPath $f)) { throw "missing $f" }
           }
           Get-ChildItem out -Recurse -File | Measure-Object Length -Sum | ForEach-Object { "$($_.Count) files, $($_.Sum) bytes" }
@@ -150,5 +150,6 @@ jobs:
         with:
           name: zeron-windows-pc
           path: out
+          include-hidden-files: true
           retention-days: 7
           if-no-files-found: error
