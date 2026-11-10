@@ -90,10 +90,11 @@ local function box(app: any, sel: string): (number, number, number, number)
 	return tonumber(x) :: number, tonumber(y) :: number, tonumber(w) :: number, tonumber(h) :: number
 end
 
--- A jump's keys take the corner's place, as wide as they need: Ctrl+1 is
--- wider than ⌘1 or a time, and the subagents pill before it gives way,
--- never drawn over; within the row, at the sidebar's width and narrowed.
-test("a jump's keys take the corner's width, the pill beside it never under them", function()
+-- A jump's keys are drawn over the end of the row, anchored to the corner's
+-- right edge, and take no room: Ctrl+1 is wider than ⌘1 or a time, and
+-- grows leftward over the subagents pill and the title without moving
+-- either; the keys end inside the row, at the sidebar's width and narrowed.
+test("a jump's keys are drawn over the row's end and take no room: the pill stays where it was", function()
 	local app = open()
 	app:command("subagents_3")
 	app:frames(30)
@@ -105,14 +106,15 @@ test("a jump's keys take the corner's width, the pill beside it never under them
 			app:set_state("shell_sidebar_width", width)
 			app:frames(40)
 		end
+		local px, py, pw = box(app, pill)
 		hold(app, true)
 		app:frames(4)
 		expect(wears(app, "Fix the build")).to_be(keys(1))
 		local hx, _, hw = box(app, `{row} >> "{keys(1)}"`)
-		local px, _, pw = box(app, pill)
+		local qx, qy, qw = box(app, pill)
 		local rx, _, rw = box(app, row)
-		-- The pill ends before the keys start; the keys end inside the row.
-		expect(`{width}: pill ends {px + pw}, keys start {hx}`).to_be(`{width}: pill ends {px + pw}, keys start {math.max(hx, px + pw)}`)
+		-- Nothing moved; the keys end inside the row.
+		expect(`{width}: pill at {qx},{qy} {qw}`).to_be(`{width}: pill at {px},{py} {pw}`)
 		expect(hx + hw <= rx + rw).to_be(true)
 		hold(app, false)
 		app:frames(4)

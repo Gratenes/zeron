@@ -238,17 +238,17 @@ export type CornerProps = {
 
 -- The corner as a row wears it: its state (or time) at rest; under the
 -- pointer, its action, its glyph on the state's own centre; ⌘ held alone,
--- its jump's keys in its place (as Zeron's). All share one box of a fixed
--- width (`corner_width`), their content to its right, so nothing before it
--- moves as a time ticks, a state comes, the pointer arrives or ⌘ is held.
--- One width for every corner, so what sits before it (the fold chevron)
--- keeps its column on every row and in every state: the widest of a time
--- ("104w", 26 points at the small size), the archive button (22) and the
--- jump hint (⌘1; Ctrl+1 on Windows and Linux, about 6.7 a character).
+-- its jump's keys (as Zeron's), drawn over the end of the row. At rest it
+-- is one width for every row (`corner_width`, the widest of a time and the
+-- archive button), its content to the right, so what sits before it (the
+-- pill, the fold chevron) keeps its column as a time ticks, a state comes or
+-- the pointer arrives. The jump keys (⌘1; Ctrl+1 and wider elsewhere) take
+-- no room: they grow leftward from the corner's right edge on a ground of
+-- their own, over the pill or the title, so nothing moves as ⌘ is pressed.
 local CORNER_MIN = 26
 function M.corner_width(): number
-	local hint = math.ceil(6.7 * (utf8.len(ui.shortcut_text("cmd+1")) or 2))
-	return math.max(CORNER_MIN, 22, hint)
+	-- ("104w", 26 points at the small size; the archive button, 22.)
+	return math.max(CORNER_MIN, 22)
 end
 
 function M.Corner(props: CornerProps): Node
@@ -275,10 +275,19 @@ function M.Corner(props: CornerProps): Node
 			function(): boolean
 				return jump() ~= nil
 			end,
+			-- (Out of the layout: right-anchored, wider than the corner where it
+			-- needs, over what's to its left, on the sidebar's own tone.)
 			ui.div {
 				class = "jump-hint",
+				absolute = true,
+				right = 0,
+				top = 0,
 				h = 16,
+				px = "$space.1",
+				items = "center",
 				justify = "center",
+				rounded = "$radius.sm",
+				bg = "$zeron.inset.bg",
 				pointer_events = "none",
 				M.hint(function(): string
 					return ui.shortcut_text(`cmd+{jump() or ""}`)
