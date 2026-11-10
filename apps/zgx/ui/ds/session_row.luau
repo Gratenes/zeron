@@ -83,6 +83,40 @@ export type Session = {
 	pr: { number: number, state: string?, title: string? }?,
 }
 
+-- A row's trailing items (the subagents pill, the unreachable glyph, the
+-- fold chevron or its empty slot, the corner), closer than its title and
+-- badges stand: 4 apart. One not shown leaves no gap.
+function M.trailing(...: Node?): Node
+	local parts: ContainerProps = { shrink = 0, gap = "$space.1", items = "center" }
+	for i = 1, select("#", ...) do
+		local node = select(i, ...)
+		if node then
+			table.insert(parts, node)
+		end
+	end
+	return ui.row(parts)
+end
+
+-- A session row's line: `M.line` with a 4-point inset at its end (the
+-- selection's ring is 4 clear of the corner, not 8).
+function M.row_line(text: Node, ...: Node?): Node
+	local parts: ContainerProps = {
+		w_full = true,
+		h = M.SLOT,
+		pr = "$space.1",
+		gap = "$space.2",
+		items = "center",
+		text,
+	}
+	for i = 1, select("#", ...) do
+		local node = select(i, ...)
+		if node then
+			table.insert(parts, node)
+		end
+	end
+	return ui.row(parts)
+end
+
 function M.line(text: Node, ...: Node?): Node
 	local parts: ContainerProps = {
 		w_full = true,
@@ -238,13 +272,12 @@ export type CornerProps = {
 
 -- The corner as a row wears it: its state (or time) at rest; under the
 -- pointer, its action, its glyph on the state's own centre; ⌘ held alone,
--- its jump's keys (as Zeron's), drawn over the end of the row. At rest it
--- is one width for every row (`corner_width`, the widest of a time and the
--- archive button), its content to the right, so what sits before it (the
--- pill, the fold chevron) keeps its column as a time ticks, a state comes or
--- the pointer arrives. The jump keys (⌘1; Ctrl+1 and wider elsewhere) take
--- no room: they grow leftward from the corner's right edge on a ground of
--- their own, over the pill or the title, so nothing moves as ⌘ is pressed.
+-- its jump's keys in its place (as Zeron's). At rest it is one width for
+-- every row (`corner_width`, the widest of a time and the archive button),
+-- its content to the right, so what sits before it (the pill, the fold
+-- chevron) keeps its column as a time ticks, a state comes or the pointer
+-- arrives. The jump keys, wider than that (Ctrl+1), widen the corner while
+-- they show, the items before it moving left, never drawn over.
 local CORNER_MIN = 26
 function M.corner_width(): number
 	-- ("104w", 26 points at the small size; the archive button, 22.)
@@ -260,7 +293,7 @@ function M.Corner(props: CornerProps): Node
 	return ui.overlay {
 		shrink = 0,
 		relative = true,
-		w = M.corner_width(),
+		min_w = M.corner_width(),
 		h = 16,
 		items = "end",
 		justify = "center",
@@ -275,19 +308,10 @@ function M.Corner(props: CornerProps): Node
 			function(): boolean
 				return jump() ~= nil
 			end,
-			-- (Out of the layout: right-anchored, wider than the corner where it
-			-- needs, over what's to its left, on the sidebar's own tone.)
 			ui.div {
 				class = "jump-hint",
-				absolute = true,
-				right = 0,
-				top = 0,
 				h = 16,
-				px = "$space.1",
-				items = "center",
 				justify = "center",
-				rounded = "$radius.sm",
-				bg = "$zeron.inset.bg",
 				pointer_events = "none",
 				M.hint(function(): string
 					return ui.shortcut_text(`cmd+{jump() or ""}`)
@@ -341,9 +365,9 @@ end
 -- `folded`: its side chats are folded away, so one of them being away shows
 -- on it (`kids_offline`), its tooltip saying so.
 function M.unreachable(cur: () -> Session, on: () -> boolean, folded: (() -> boolean)?): Node
-	-- (Keyed by what it says, as a tooltip takes a string: it follows its
-	-- device's name and the language.)
-	return ui.presence(function(): string
+	-- What it says, or "" for nothing (a tooltip takes a string: it follows
+	-- its device's name and the language).
+	local function says(): string
 		if not on() then
 			return ""
 		end
@@ -354,10 +378,11 @@ function M.unreachable(cur: () -> Session, on: () -> boolean, folded: (() -> boo
 			return ""
 		end
 		return locale.s("ds.sidebar.unreachable", { device = cur().device or locale.s("shell.sidebar.unknown_device") })
-	end, function(says: string): Node
-		if says == "" then
-			return ui.div { shrink = 0, w = 0, h = 0 }
-		end
+	end
+	-- (Not shown, it is no node at all: it leaves no gap beside its neighbours.)
+	return ui.show(function(): boolean
+		return says() ~= ""
+	end, ui.presence(says, function(text: string): Node
 		return ui.div {
 			shrink = 0,
 			w = 16,
@@ -365,11 +390,11 @@ function M.unreachable(cur: () -> Session, on: () -> boolean, folded: (() -> boo
 			items = "center",
 			justify = "center",
 			color = "$zeron.status.limited",
-			tooltip = says,
-			label = says,
+			tooltip = text,
+			label = text,
 			Icon { name = "wifi-off", size = 14 },
 		}
-	end)
+	end))
 end
 
 -- Subagents running under it (Zeron's running_pill.rs): its working dot
