@@ -1242,6 +1242,18 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end)
 		)
 	end
+	-- Where a chevron isn't (the row has no side chats) but the unreachable
+	-- glyph is, its slot kept empty (the chevron's 22 wide), so the glyph
+	-- lines up from row to row.
+	local function side_fold_spacer(cur: () -> Session, off: boolean): Node?
+		if off or not details.side_chats then
+			return nil
+		end
+		return ui.show(function(): boolean
+			local row = cur()
+			return nesting() and #(row.side_chats or {}) == 0 and show_unreachable:get() and row.offline == true
+		end, ui.div { shrink = 0, w = 22, h = 22 })
+	end
 	local function session_row(s: Session, by: Organize, place: Place?): Node
 		local in_flyout = place ~= nil and place.wide == true
 		-- (On the Archived shelf: Unarchive under the pointer, no drag.)
@@ -1443,6 +1455,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						return nesting() and not side_open(s.id)
 					end),
 					side_fold_toggle(s, cur, in_flyout or shelved),
+					side_fold_spacer(cur, in_flyout or shelved),
 					subagents_pill(function(): number
 						return cur().subagents or 0
 					end),
