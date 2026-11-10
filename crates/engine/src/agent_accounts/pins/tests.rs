@@ -163,8 +163,8 @@ async fn a_chat_pinned_to_the_live_login_or_a_gone_account_runs_as_without_a_pin
 async fn the_run_credential_follows_the_pin_so_a_parked_session_is_replaced() {
     let d = device();
     let env = PinRunEnvironment(d.accounts.clone());
-    // Never pinned: unknown, so nothing is replaced.
-    assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c1")).await, None);
+    // Never pinned: it runs on the live login, as it would without a pin.
+    assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c1")).await.as_deref(), Some("live"));
     d.accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&d.saved));
     let pinned = env.credential(HarnessId::ClaudeCode, Some("c1")).await.expect("a credential");
     assert!(pinned.starts_with("claude:"), "{pinned}");
@@ -179,8 +179,8 @@ async fn the_run_credential_follows_the_pin_so_a_parked_session_is_replaced() {
     assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c1")).await.as_deref(), Some("live"));
     assert!(prepared(&env, "c1").await.unwrap().env.is_empty());
     assert!(d.accounts.pins().is_empty(), "a taken-back pin isn't listed");
-    // A chat never pinned stays unknown after another's pin goes.
-    assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c9")).await, None);
+    // A chat never pinned stays on the live login after another's pin goes.
+    assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c9")).await.as_deref(), Some("live"));
 }
 
 #[tokio::test]
