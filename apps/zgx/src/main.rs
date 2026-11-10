@@ -1043,9 +1043,10 @@ fn serve_with(
     // stays rounded. Windows' alone: macOS's cards keep their own corner, and
     // zgx knows no other platform's (it says 0).
     let corner = cfg!(windows).then(|| {
-        let radius = cx.window_info.corner_radius.clone();
         let told = host.shared("window.corner_radius", Value::Nil);
-        cx.ui.runtime.effect(move || { told.set(Value::from(radius.get())); })
+        tell_window_corner(&cx.ui.runtime, cx.window_info.corner_radius.clone(), move |radius| {
+            told.set(Value::from(radius));
+        })
     });
     let keep = RefCell::new(Some((host, devtools, commands, corner)));
     cx.on_closed(move || {
@@ -1058,6 +1059,14 @@ fn serve_with(
         }
     });
     handle
+}
+
+/// Keeps `tell` told the window's corner radius as `radius` has it: once now
+/// and again only when the window's own radius changes (it is set when the
+/// window is made). Nothing the scripts do reaches `radius`, so this cannot
+/// feed back into itself.
+fn tell_window_corner(runtime: &zgx::reactive::Runtime, radius: zgx::reactive::Signal<f64>, tell: impl Fn(f64) + 'static) -> zgx::reactive::Effect {
+    runtime.effect(move || tell(radius.get()))
 }
 
 /// The scripts' commands as the app's menu bar while this window has it
