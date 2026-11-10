@@ -137,3 +137,13 @@ test("a row's unreachable glyph is left of its side chats' chevron", function()
 	-- (Folded: the glyph says its side chat is away.)
 	expect(x_of(app, "Fix the build", SIDE_SAYS) < x_of(app, "Fix the build", "Show side chats")).to_be(true)
 end)
+
+test("a row without a chevron keeps its slot, so the glyph lines up with the rows that have one", function()
+	local app = nested()
+	-- Fix the build has a side chat (chevron); Ship the release has none.
+	-- Both are away (Ship's own device; Fix's side chat): the glyphs share a
+	-- column, the chevron's slot empty on the row without one.
+	local with = x_of(app, "Fix the build", SIDE_SAYS)
+	local without = x_of(app, "Ship the release", "devbox is offline")
+	expect(with).to_be(without)
+end)
