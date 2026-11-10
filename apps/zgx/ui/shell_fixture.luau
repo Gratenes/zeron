@@ -1184,6 +1184,45 @@ ui.command {
 		publish()
 	end,
 }
+-- Atlas's three chats, each with a side chat (the chevron), and what sits
+-- before the chevron or inside the corner varying: Fix the build with two
+-- subagents running and 5m, Write the docs without and 12h, Tidy the tests
+-- without and 104w (tests/sidebar_row_columns). `fixture.subagents_done`:
+-- Fix the build's finish.
+ui.command {
+	id = "row_columns",
+	title = "Atlas's chats: chevrons, a subagents pill, times 5m, 12h and 104w",
+	run = function()
+		local WEEK = 7 * DAY
+		for _, c in model.chats do
+			if c.id == "a1" then
+				c.running_subagents = 2
+				c.updated = NOW - 5 * 60
+			elseif c.id == "a2" then
+				c.updated = NOW - 12 * HOUR
+			elseif c.id == "a3" then
+				c.updated = NOW - 104 * WEEK
+			end
+		end
+		local function side(parent: string, id: string)
+			return { id = id, parent = parent, kind = "side", title = `Side of {parent}`, device = "mac", updated = NOW - 30, created = NOW - HOUR, agent = "claude" }
+		end
+		;(model :: any).children = { a1 = { side("a1", "s1") }, a2 = { side("a2", "s2") }, a3 = { side("a3", "s3") } }
+		publish()
+	end,
+}
+ui.command {
+	id = "fixture.subagents_done",
+	title = "Fixture: Fix the build's subagents finish",
+	run = function()
+		for _, c in model.chats do
+			if c.id == "a1" then
+				c.running_subagents = 0
+			end
+		end
+		publish()
+	end,
+}
 -- One side chat of Fix the build, hosted on devbox (with
 -- `fixture.devbox_offline`, one that's away): the sidebar's unreachable glyph
 -- on nested side chats (tests/sidebar_unreachable).

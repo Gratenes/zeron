@@ -1450,7 +1450,13 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				line(
 					title,
 					if s.pr then ui.show(details.pr, pr_badge(s.pr)) else nil,
-					-- (Its unreachable glyph sits left of its side chats' chevron.)
+					-- (What comes and goes sits left of the chevron, so the chevron, a
+					-- click target, keeps its place: the subagents pill, then the
+					-- unreachable glyph, then the chevron (or its empty slot), then
+					-- the corner, of one width.)
+					subagents_pill(function(): number
+						return cur().subagents or 0
+					end),
 					SessionRow.unreachable(function(): Session
 						return cur()
 					end, function(): boolean
@@ -1460,9 +1466,6 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					end),
 					side_fold_toggle(s, cur, in_flyout or shelved),
 					side_fold_spacer(cur, in_flyout or shelved),
-					subagents_pill(function(): number
-						return cur().subagents or 0
-					end),
 					-- Its state (or time) at rest; under the pointer, archive (on
 					-- the shelf, unarchive); ⌘ held alone, its jump's keys.
 					SessionRow.Corner {
