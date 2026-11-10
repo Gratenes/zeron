@@ -13,10 +13,10 @@ categories = ["gui", "command-line-interface"]
 description = "Terminal sessions for zgx: a shell on a pseudoterminal (openpty, ConPTY) and its screen, kept by alacritty_terminal."
 
 [dependencies]
-zgx = { git = "https://github.com/zeronsh/zgx", rev = "0bce8ef438f100ab80e8d9e1861bf7cadbb45565", default-features = false }
+zgx = { git = "https://github.com/zeronsh/zgx", rev = "eecfd6e7b8d70319848e088382f6ba084488d741", default-features = false }
 # The screen model: the VT parser, grid, scrollback, selection and modes,
 # and the pseudoterminals (openpty on Unix, ConPTY on Windows).
-alacritty_terminal = { package = "zgx-alacritty-terminal", git = "https://github.com/zeronsh/zgx", rev = "0bce8ef438f100ab80e8d9e1861bf7cadbb45565", default-features = false }
+alacritty_terminal = { package = "zgx-alacritty-terminal", git = "https://github.com/zeronsh/zgx", rev = "eecfd6e7b8d70319848e088382f6ba084488d741", default-features = false }
 # The session's I/O thread sleeps in it until the shell writes or the app does.
 polling = "3"
 # Escapes found in the output a word at a time, not a byte.
