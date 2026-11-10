@@ -1032,7 +1032,7 @@ fn serve_with(
     let corner = cfg!(windows).then(|| {
         let radius = cx.window_info.corner_radius.clone();
         let told = host.shared("window.corner_radius", Value::Nil);
-        cx.ui.runtime.effect(move || told.set(Value::from(radius.get())))
+        cx.ui.runtime.effect(move || { told.set(Value::from(radius.get())); })
     });
     let keep = RefCell::new(Some((host, devtools, commands, corner)));
     cx.on_closed(move || {
