@@ -1245,16 +1245,20 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end)
 		)
 	end
-	-- Where a chevron isn't (the row has no side chats) but the unreachable
-	-- glyph is, its slot kept empty (the chevron's 22 wide), so the glyph
-	-- lines up from row to row.
+	-- Where a chevron isn't (the row has no side chats) but a status item is
+	-- (the subagents pill, the unreachable glyph), its slot kept empty (the
+	-- chevron's 22 wide), so every status item ends at one column, the
+	-- chevron's left edge, on every row.
 	local function side_fold_spacer(cur: () -> Session, off: boolean): Node?
 		if off or not details.side_chats then
 			return nil
 		end
 		return ui.show(function(): boolean
 			local row = cur()
-			return nesting() and #(row.side_chats or {}) == 0 and show_unreachable:get() and row.offline == true
+			if not nesting() or #(row.side_chats or {}) > 0 then
+				return false
+			end
+			return (row.subagents or 0) > 0 or (show_unreachable:get() and row.offline == true)
 		end, ui.div { shrink = 0, w = 22, h = 22 })
 	end
 	local function session_row(s: Session, by: Organize, place: Place?): Node
@@ -1447,43 +1451,45 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			words = ui.column {
 				w_full = true,
 				gap = "$zeron.space.hair",
-				line(
+				SessionRow.row_line(
 					title,
 					if s.pr then ui.show(details.pr, pr_badge(s.pr)) else nil,
-					-- (What comes and goes sits left of the chevron, so the chevron, a
-					-- click target, keeps its place: the subagents pill, then the
-					-- unreachable glyph, then the chevron (or its empty slot), then
-					-- the corner, of one width.)
-					subagents_pill(function(): number
-						return cur().subagents or 0
-					end),
-					SessionRow.unreachable(function(): Session
-						return cur()
-					end, function(): boolean
-						return show_unreachable:get()
-					end, function(): boolean
-						return nesting() and not side_open(s.id)
-					end),
-					side_fold_toggle(s, cur, in_flyout or shelved),
-					side_fold_spacer(cur, in_flyout or shelved),
-					-- Its state (or time) at rest; under the pointer, archive (on
-					-- the shelf, unarchive); ⌘ held alone, its jump's keys.
-					SessionRow.Corner {
-						cur = cur,
-						hovered = hovered,
-						jump = jump,
-						action = if shelved
-							then corner("ds.sidebar.unarchive", "inbox", function()
-								if props.on_unarchive then
-									props.on_unarchive(s.id)
-								end
-							end)
-							else corner("ds.sidebar.archive", "archive-minimalistic", function()
-								if props.on_archive then
-									props.on_archive(s.id)
-								end
-							end),
-					}
+					SessionRow.trailing(
+						-- (What comes and goes sits left of the chevron, so the chevron, a
+						-- click target, keeps its place: the subagents pill, then the
+						-- unreachable glyph, then the chevron (or its empty slot), then
+						-- the corner, of one width.)
+						subagents_pill(function(): number
+							return cur().subagents or 0
+						end),
+						SessionRow.unreachable(function(): Session
+							return cur()
+						end, function(): boolean
+							return show_unreachable:get()
+						end, function(): boolean
+							return nesting() and not side_open(s.id)
+						end),
+						side_fold_toggle(s, cur, in_flyout or shelved),
+						side_fold_spacer(cur, in_flyout or shelved),
+						-- Its state (or time) at rest; under the pointer, archive (on
+						-- the shelf, unarchive); ⌘ held alone, its jump's keys.
+						SessionRow.Corner {
+							cur = cur,
+							hovered = hovered,
+							jump = jump,
+							action = if shelved
+								then corner("ds.sidebar.unarchive", "inbox", function()
+									if props.on_unarchive then
+										props.on_unarchive(s.id)
+									end
+								end)
+								else corner("ds.sidebar.archive", "archive-minimalistic", function()
+									if props.on_archive then
+										props.on_archive(s.id)
+									end
+								end),
+						}
+					)
 				),
 				-- Pulled up under the title: the line's own inset is the row's.
 				ui.div { mt = ui.raw(-8, "up a row's inset, under the title"), second },

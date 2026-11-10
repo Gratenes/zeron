@@ -1,8 +1,9 @@
 -- A row's fold chevron (a click target) keeps one column: on rows with and
 -- without the subagents pill, as the pill comes and goes, with a time of
 -- "5m", "12h" or "104w" in the corner, with the pointer on the row and off
--- it, and with ⌘ held (its jump keys in the corner). What comes and goes
--- sits left of the chevron, and the corner has one fixed width. On the shell
+-- it. What comes and goes sits left of the chevron, and the corner has one
+-- width at rest. (⌘ held, its jump keys widen the corner: that moves the
+-- row's items, and isn't asked not to.) On the shell
 -- in ui/shell_fixture.luau (`row_columns`).
 
 local SIDE = "#shell-sidebar"
@@ -48,21 +49,17 @@ test("the chevron keeps its column whatever the time in the corner: 5m, 12h, 104
 	expect(chevron(app, "Tidy the tests")).to_be(x)
 end)
 
-test("the chevron stays put as the pointer arrives, and as ⌘ is held", function()
+test("the chevron stays put as the pointer arrives", function()
 	local app = open()
 	local x = chevron(app, "Write the docs")
 	app:hover(`{SIDE} >> role:button "Write the docs"`)
 	app:frames(20)
 	expect(chevron(app, "Write the docs")).to_be(x)
-	app:set_state("shell_jump_hints", true)
-	app:frames(4)
-	expect(chevron(app, "Write the docs")).to_be(x)
 	expect(chevron(app, "Tidy the tests")).to_be(x)
 end)
 
 -- Its time's left edge past the chevron's right edge, on a row, in points:
--- the line's own gap and no more, at the widest resting time ("104w"); the
--- jump keys (wider) are drawn over the row and add none.
+-- the line's own gap and no more, at the widest resting time ("104w").
 local function gap_to_time(app: any, title: string, time: string): number
 	local right = 0
 	local left = 0
@@ -79,8 +76,5 @@ end
 
 test("the corner takes the room of its widest resting time, no more: the gap past the chevron is the line's own", function()
 	local app = open()
-	expect(gap_to_time(app, "Tidy the tests", "104w") <= 8).to_be(true)
-	app:set_state("shell_jump_hints", true)
-	app:frames(4)
-	expect(gap_to_time(app, "Tidy the tests", "104w") <= 8).to_be(true)
+	expect(gap_to_time(app, "Tidy the tests", "104w") <= 4).to_be(true)
 end)
