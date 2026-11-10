@@ -6,7 +6,7 @@ import uniffi.zeron_core.ChatIndicator
 enum class AgentState { Working, NeedsInput, Failed, Done, Idle }
 
 fun ChatIndicator.agentState(): AgentState = when (this) {
-    ChatIndicator.WORKING -> AgentState.Working
+    ChatIndicator.WORKING, ChatIndicator.WAITING -> AgentState.Working
     ChatIndicator.AWAITING_INPUT -> AgentState.NeedsInput
     ChatIndicator.ERRORED -> AgentState.Failed
     ChatIndicator.COMPLETED -> AgentState.Done

@@ -99,6 +99,9 @@ export type Props = {
 	loading: () -> boolean,
 	-- What an empty scope says.
 	empty: (scope: string, query: string) -> string,
+	-- Why the list couldn't be had, said over what did come (and in place
+	-- of an empty scope's words).
+	failed: (() -> string?)?,
 	choose: (item: any) -> (),
 }
 
@@ -503,15 +506,18 @@ function M.Panel(props: Props): Node
 		legend(Kbd { keys = "tab" }, locale.s("ds.mention_launcher.switch_tab")),
 	})
 	-- What a scope with nothing in it (or nothing yet) says, a row's line.
-	local function note(words: any, id: string?): Node
+	local function note(words: any, id: string?, color: string?): Node
 		return ui.row {
 			id = id,
 			h = "$zeron.menu.row",
 			w_full = true,
 			px = "$space.2",
 			items = "center",
-			ui.text { words, text_size = "$font.size.sm", color = "$text.tertiary" },
+			ui.text { words, text_size = "$font.size.sm", color = color or "$text.tertiary" },
 		}
+	end
+	local function failed(): string?
+		return if props.failed then props.failed() else nil
 	end
 	return ui.column {
 		id = "mention-launcher",
@@ -528,7 +534,12 @@ function M.Panel(props: Props): Node
 			before = {
 				ui.show(props.loading, note(locale.t("ds.mention_launcher.loading"))),
 				ui.show(function(): boolean
-					return not props.loading() and #props.shown:get() == 0
+					return not props.loading() and failed() ~= nil
+				end, note(function(): string
+					return failed() or ""
+				end, "mention-failed", "$danger")),
+				ui.show(function(): boolean
+					return not props.loading() and #props.shown:get() == 0 and failed() == nil
 				end, note(function(): string
 					return props.empty(props.scope:get(), query())
 				end, "mention-empty")),
