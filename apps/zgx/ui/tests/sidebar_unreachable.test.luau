@@ -120,3 +120,20 @@ test("a folded group's tile says a chat in it is unreachable; unfolded, its chat
 	expect(count(app, GROUP_SAYS)).to_be(0)
 	expect(glyphs(app)).to_be(1)
 end)
+
+-- Where a row's glyph and its chevron stand: the unreachable glyph is left
+-- of the side chats' chevron.
+local function x_of(app: any, row: string, words: string): number
+	for line in app:tree(`{SIDE} >> role:button "{row}"`):gmatch("[^\n]+") do
+		if line:find(words, 1, true) then
+			return tonumber(line:match(" (%-?%d+),%-?%d+ %d+x%d+")) :: number
+		end
+	end
+	error(`no "{words}" on "{row}"`)
+end
+
+test("a row's unreachable glyph is left of its side chats' chevron", function()
+	local app = nested()
+	-- (Folded: the glyph says its side chat is away.)
+	expect(x_of(app, "Fix the build", SIDE_SAYS) < x_of(app, "Fix the build", "Show side chats")).to_be(true)
+end)
