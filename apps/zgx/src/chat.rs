@@ -462,14 +462,15 @@ struct Pending {
 impl Pending {
     fn value(&self) -> Value {
         // (Its passages as chips, as the sent message shows them.)
-        let (words, comments) = split_comments(&self.words);
+        let (words, chats) = split_chats(&self.words);
+        let (words, comments) = split_comments(&words);
         let (words, quotes) = split_quotes(&words);
         let (words, picks) = split_annotations(&words);
         Value::record([
             ("id", Value::from(self.id.as_str())),
             ("role", Value::from("user")),
             ("text", Value::from(words.as_str())),
-            ("attachments", carried_value(&self.paths, &quotes, &picks, &comments)),
+            ("attachments", carried_value(&self.paths, &quotes, &picks, &comments, &chats)),
             ("waiting", Value::from(self.waiting)),
             // (This device's own copy: its pictures are the files it was
             // sent from, here, which the chat's device never had. The
@@ -1748,28 +1749,9 @@ impl View {
     fn publish_draft(&self) {
         let value = {
             let open = self.open.borrow();
-            match open.as_ref().and_then(|o| o.entries.last()) {
-                Some(e) if e["status"].as_str() == Some("streaming") => {
-                    // The words being written: the reply's last text part
-                    // (its block, `part`), apart from the rest of the reply.
-                    let tail = e["parts"].as_array().and_then(|parts| {
-                        parts.iter().rev().find(|p| p["kind"].as_str() == Some("text"))
-                    });
-                    let id = e["id"].as_str().unwrap_or_default();
-                    let words = match tail {
-                        // (`text`, the tail's words too: the page reads the
-                        // block's, and of `text` only whether any are yet.)
-                        Some(tail) => Value::record([
-                            ("id", Value::from(id)),
-                            ("text", Value::from(tail["text"].as_str().unwrap_or_default())),
-                            ("part", Value::from(tail["id"].as_str().unwrap_or_default())),
-                            ("part_text", Value::from(tail["text"].as_str().unwrap_or_default())),
-                        ]),
-                        None => draft_value(id, &e.json.as_ref().map(entry_text).unwrap_or_default()),
-                    };
-                    with_thought(words, e["parts"].as_array())
-                }
-                _ => draft_value("", ""),
+            match open.as_ref().and_then(|o| o.entries.last()).and_then(|e| e.json.as_ref()) {
+                Some(json) => draft_of(json),
+                None => draft_value("", ""),
             }
         };
         self.draft.set(value);
@@ -3053,9 +3035,64 @@ fn annotation_chip(pick: &Pick) -> Value {
     ])
 }
 
+/// The block the composer adds for other chats attached (screens/chat/
+/// carried.luau `with_chats`): its header, then `- [title](zeron-chat:id)`.
+/// The links stay in the prompt (the engine reads each out to the agent);
+/// the sent message shows each as a card, as the composer did.
+const CHATS_HEADER: &str = "Chats attached:";
+
+/// A prompt's words apart from the chats attached to it (each its title and
+/// id): only a whole trailing block of chat links, as the other blocks.
+fn split_chats(words: &str) -> (String, Vec<(String, String)>) {
+    let (head, bullets) = split_block_raw(words, CHATS_HEADER);
+    if bullets.is_empty() {
+        return (words.to_owned(), Vec::new());
+    }
+    let mut chats = Vec::new();
+    for bullet in &bullets {
+        let links = zeron_proto::chat_mentions::chat_mention_links(bullet);
+        // Each line one canonical link and nothing else, or it's words.
+        match links.as_slice() {
+            [link] if link.range == (0..bullet.len()) => chats.push((link.title.clone(), link.chat_id.clone())),
+            _ => return (words.to_owned(), Vec::new()),
+        }
+    }
+    (head, chats)
+}
+
+/// An attached chat's card on the sent message: its title, its id (a press
+/// opens it) and its agent's mark, when this window knows the chat.
+fn chat_chip(title: &str, id: &str) -> Value {
+    let harness = CHATS
+        .try_with(|chats| {
+            chats
+                .chats
+                .try_borrow()
+                .ok()
+                .and_then(|known| known.get(id).and_then(|chat| chat["config"]["harness"].as_str().map(str::to_owned)))
+        })
+        .ok()
+        .flatten();
+    let mut fields = vec![
+        ("kind", Value::from("chat")),
+        ("name", Value::from(title)),
+        ("chat", Value::from(id)),
+    ];
+    if let Some(harness) = harness.filter(|h| !h.is_empty()) {
+        fields.push(("mark", Value::from(mark(&harness).as_str())));
+    }
+    Value::record(fields)
+}
+
 /// The chips a sent prompt carries: its files and pictures, then its
-/// passages, then the elements picked on a page.
-fn carried_value(paths: &[String], quotes: &[(String, String)], picks: &[Pick], comments: &[(String, String)]) -> Value {
+/// passages, then the elements picked on a page, then the chats attached.
+fn carried_value(
+    paths: &[String],
+    quotes: &[(String, String)],
+    picks: &[Pick],
+    comments: &[(String, String)],
+    chats: &[(String, String)],
+) -> Value {
     let Value::List(files) = attachments_value(paths) else { unreachable!() };
     let mut all: Vec<Value> = files.iter().cloned().collect();
     all.extend(quotes.iter().map(|(place, body)| quote_chip(place, body)));
@@ -3063,6 +3100,7 @@ fn carried_value(paths: &[String], quotes: &[(String, String)], picks: &[Pick], 
     if !comments.is_empty() {
         all.push(comments_chip(comments));
     }
+    all.extend(chats.iter().map(|(title, id)| chat_chip(title, id)));
     Value::List(all.into())
 }
 
@@ -3138,16 +3176,19 @@ fn build_context(open: &mut Open, chats: &Chats) -> Rc<RowContext> {
 }
 
 /// An entry as its row reads it.
-fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> Option<Value> {
+pub(crate) fn built_entry(entry: &Json, doc: &str, device: Option<&str>, model: Option<&str>) -> Option<Value> {
     // (One still being written is built again with its next change.)
     let settled = entry["status"].as_str() != Some("streaming");
     if settled {
         ROW_BUILD.set(Some(RowBuild::default()));
+    } else {
+        LIVE_PASS.set(Some(HashMap::new()));
     }
     let mut row = match with_host(entry, doc, device) {
         Some(entry) => message(&entry, model),
         None => message(entry, model),
     };
+    LIVE_PASS.set(None);
     if let Some(mut build) = ROW_BUILD.take()
         && let Some(row) = &mut row
     {
@@ -3215,7 +3256,19 @@ thread_local! {
     /// The settled row being built (`built_entry`): its tools so far, by the
     /// part each is of, each built once however many of its layouts show it.
     static ROW_BUILD: RefCell<Option<RowBuild>> = const { RefCell::new(None) };
+    /// The calls of replies being written, each as last built, by its id and
+    /// whether it was the part being written: its part as it was, and its
+    /// value (`tool_live`).
+    static LIVE_TOOLS: RefCell<HashMap<String, [Option<(Json, Option<Value>)>; 2]>> = RefCell::default();
+    /// The reply being written as it's built (`built_entry`): each of its
+    /// parts' tool by where the part is, as `LIVE_TOOLS` gave it, so the
+    /// layouts that show a part (its tools, its blocks, compact) look it up
+    /// once.
+    static LIVE_PASS: RefCell<Option<HashMap<(*const Json, bool), Option<Value>>>> = const { RefCell::new(None) };
 }
+
+/// The most calls `LIVE_TOOLS` keeps before it starts again.
+const LIVE_TOOLS_MOST: usize = 8192;
 
 #[derive(Default)]
 struct RowBuild {
@@ -3383,7 +3436,10 @@ fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
         }
         match kind.as_str() {
             // Words of the reply being written: the draft; of a finished
-            // one, its row.
+            // one, its row. A text part that had none (written empty, or
+            // blank) has no block in its row yet (`blocks_of`): its first
+            // words make it, as a thought's do.
+            "text" if streaming && was_empty && !more.trim().is_empty() => rows = true,
             "text" if streaming => words_changed = true,
             "text" => rows = true,
             // Thinking shows as a row once it has words; more of them, as
@@ -3522,6 +3578,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
             // (An Appshot's context isn't what the person said: its picture
             // says which app instead.)
             let (words, shots) = crate::appshots::split_appshots(&words);
+            let (words, chats) = split_chats(&words);
             let (words, comments) = split_comments(&words);
             let (words, quotes) = split_quotes(&words);
             let (words, picks) = split_annotations(&words);
@@ -3540,7 +3597,7 @@ pub(crate) fn message(entry: &Json, model: Option<&str>) -> Option<Value> {
                 ("id", Value::from(id)),
                 ("role", Value::from("user")),
                 ("text", Value::from(words.as_str())),
-                ("attachments", crate::appshots::tag_attachments(carried_value(&paths, &quotes, &picks, &comments), &shots)),
+                ("attachments", crate::appshots::tag_attachments(carried_value(&paths, &quotes, &picks, &comments, &chats), &shots)),
                 ("at", stamp(created as i64).map_or(Value::Nil, |at| Value::from(at.as_str()))),
                 ("copy", copy_value(&words)),
                 ("sender", sender),
@@ -4038,7 +4095,9 @@ fn group_summary(group: &[&Json]) -> String {
     if !calls.is_empty() {
         let (mut commands, mut reads, mut searches, mut fetches, mut todos, mut other, mut failed) =
             (0, 0, 0, 0, 0, 0, 0);
-        let mut edited: Vec<String> = Vec::new();
+        // (Each file once, however often it was edited: a set, so a long
+        // run of edits isn't counted against every one before it.)
+        let mut edited: std::collections::HashSet<String> = std::collections::HashSet::new();
         for p in &calls {
             if p["isError"].as_bool() == Some(true) {
                 failed += 1;
@@ -4047,16 +4106,10 @@ fn group_summary(group: &[&Json]) -> String {
             match call["kind"].as_str().unwrap_or_default() {
                 "exec" => commands += 1,
                 "writeFile" | "editFile" => {
-                    let path = call["path"].as_str().unwrap_or_default().to_owned();
-                    if !edited.contains(&path) {
-                        edited.push(path);
-                    }
+                    edited.insert(call["path"].as_str().unwrap_or_default().to_owned());
                 }
                 "applyPatch" => {
-                    let path = call["path"].as_str().unwrap_or("patch").to_owned();
-                    if !edited.contains(&path) {
-                        edited.push(path);
-                    }
+                    edited.insert(call["path"].as_str().unwrap_or("patch").to_owned());
                 }
                 "readFile" => reads += 1,
                 "search" | "glob" | "webSearch" => searches += 1,
@@ -4122,6 +4175,23 @@ fn tool_live(part: &Json, live: bool) -> Option<Value> {
     if let Some(built) = ROW_BUILD.with_borrow(|build| build.as_ref()?.tools.get(&at).cloned()) {
         return built;
     }
+    // A reply being written is built again with each change of it (a call
+    // arriving, one finishing), its other calls as they were: each of those
+    // is the very value it was (`LIVE_TOOLS`), so only what changed is built,
+    // and the page, given the same values, has nothing to do for them.
+    let settled = ROW_BUILD.with_borrow(Option::is_some);
+    if !settled && let Some(id) = part["id"].as_str() {
+        if let Some(built) = LIVE_PASS.with_borrow(|pass| pass.as_ref()?.get(&(at, live)).cloned()) {
+            return built;
+        }
+        let built = live_tool(id, part, live);
+        LIVE_PASS.with_borrow_mut(|pass| {
+            if let Some(pass) = pass {
+                pass.insert((at, live), built.clone());
+            }
+        });
+        return built;
+    }
     let mut built = tool_row(part, live);
     ROW_BUILD.with_borrow_mut(|build| {
         if let Some(build) = build {
@@ -4129,6 +4199,30 @@ fn tool_live(part: &Json, live: bool) -> Option<Value> {
                 share_parts(built, &mut build.seen);
             }
             build.tools.insert(at, built.clone());
+        }
+    });
+    built
+}
+
+/// The tool of a part of a reply being written: as `LIVE_TOOLS` has it if
+/// the part is as it was, else built and kept.
+fn live_tool(id: &str, part: &Json, live: bool) -> Option<Value> {
+    let kept = LIVE_TOOLS.with_borrow(|kept| {
+        kept.get(id)?[usize::from(live)].as_ref().filter(|(was, _)| was == part).map(|(_, built)| built.clone())
+    });
+    if let Some(built) = kept {
+        return built;
+    }
+    let built = tool_row(part, live);
+    LIVE_TOOLS.with_borrow_mut(|kept| {
+        if kept.len() >= LIVE_TOOLS_MOST {
+            kept.clear();
+        }
+        if !kept.contains_key(id) {
+            kept.insert(id.to_owned(), Default::default());
+        }
+        if let Some(slots) = kept.get_mut(id) {
+            slots[usize::from(live)] = Some((part.clone(), built.clone()));
         }
     });
     built
@@ -4565,6 +4659,29 @@ fn with_fields<const N: usize>(record: Value, extra: [(&str, Value); N]) -> Valu
     Value::record(all)
 }
 
+/// The draft for the transcript's last entry: while it streams, the words
+/// being written (the reply's last text part, its block `part`, apart from
+/// the rest of the reply) and the thought it is at; else none.
+pub(crate) fn draft_of(e: &Json) -> Value {
+    if e["status"].as_str() != Some("streaming") {
+        return draft_value("", "");
+    }
+    let tail = e["parts"].as_array().and_then(|parts| parts.iter().rev().find(|p| p["kind"].as_str() == Some("text")));
+    let id = e["id"].as_str().unwrap_or_default();
+    let words = match tail {
+        // (`text`, the tail's words too: the page reads the block's, and of
+        // `text` only whether any are yet.)
+        Some(tail) => Value::record([
+            ("id", Value::from(id)),
+            ("text", Value::from(tail["text"].as_str().unwrap_or_default())),
+            ("part", Value::from(tail["id"].as_str().unwrap_or_default())),
+            ("part_text", Value::from(tail["text"].as_str().unwrap_or_default())),
+        ]),
+        None => draft_value(id, &entry_text(e)),
+    };
+    with_thought(words, e["parts"].as_array())
+}
+
 fn draft_value(id: &str, text: &str) -> Value {
     Value::record([("id", Value::from(id)), ("text", Value::from(text))])
 }
@@ -4804,6 +4921,10 @@ fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[path = "chat_pending_tests.rs"]
 mod pending_tests;
+
+#[cfg(test)]
+#[path = "chat_stream_tests.rs"]
+mod stream_tests;
 
 #[cfg(test)]
 mod tests {
@@ -5606,6 +5727,26 @@ mod tests {
     }
 
     #[test]
+    fn a_text_part_s_first_words_make_its_block() {
+        let mut entries = Vec::new();
+        let mut reset = json!({ "reset": [
+            { "id": "a", "role": "assistant", "status": "streaming", "parts": [
+                { "kind": "reasoning", "id": "r", "text": "Hmm" },
+                { "kind": "text", "id": "t", "text": "" },
+            ] },
+        ] });
+        apply(&mut entries, &mut reset).unwrap();
+        let frame = |text: &str, len: usize| {
+            json!({ "upsert": [], "remove": [], "append": [{ "entry": "a", "part": "t", "text": text, "len": len }], "count": 1 })
+        };
+        // Blank still: nothing to show.
+        assert!(matches!(apply(&mut entries, &mut frame("\n", 1)), Ok(Change::Words)));
+        // Its first words: its row (the block it had none of); then the draft's.
+        assert!(matches!(apply(&mut entries, &mut frame("Hi", 3)), Ok(Change::Rows)));
+        assert!(matches!(apply(&mut entries, &mut frame(" there", 9)), Ok(Change::Words)));
+    }
+
+    #[test]
     fn the_draft_carries_the_thought_a_reply_is_at() {
         let draft = || draft_value("a", "");
         let thought = json!({ "kind": "reasoning", "id": "r", "text": "  Weighing it.\n" });
@@ -5681,6 +5822,42 @@ mod tests {
         assert!(is(m.field("text"), typed));
     }
 
+    /// Chats attached travel in a block after the words (carried.luau
+    /// `with_chats`): the sent message shows each as a card, with its
+    /// agent's mark when the chat is known, and the words without them. A
+    /// chat linked in the words themselves (an @ mention) stays there.
+    #[test]
+    fn attached_chats_are_cards_and_mentioned_ones_stay_in_the_words() {
+        let block = format!("{CHATS_HEADER}\n- [Fix the build](zeron-chat:c1)\n- [Write \\[docs\\]](zeron-chat:c2)");
+        let (words, chats) = split_chats(&format!("look at these\n\n{block}"));
+        assert_eq!(words, "look at these");
+        assert_eq!(
+            chats,
+            vec![("Fix the build".to_owned(), "c1".to_owned()), ("Write [docs]".to_owned(), "c2".to_owned())]
+        );
+        // Only the block: no words of its own.
+        let (words, chats) = split_chats(&block);
+        assert_eq!((words.as_str(), chats.len()), ("", 2));
+        // A chat mentioned in the words is left in them.
+        let mention = "ask [Fix the build](zeron-chat:c1) about it";
+        assert_eq!(split_chats(mention), (mention.to_owned(), Vec::new()));
+        // A block line that isn't one chat link alone: the words, untouched.
+        for odd in [
+            format!("hi\n\n{CHATS_HEADER}\n- see [Fix](zeron-chat:c1)"),
+            format!("hi\n\n{CHATS_HEADER}\n- [site](https://example.com)"),
+        ] {
+            assert_eq!(split_chats(&odd), (odd.clone(), Vec::new()), "{odd}");
+        }
+        // Its card: the title, the id, the agent's mark once the chat is known.
+        let card = chat_chip("Fix the build", "c1");
+        assert!(matches!(card.field("kind"), Some(Value::Str(s)) if s.as_ref() == "chat"));
+        assert!(matches!(card.field("chat"), Some(Value::Str(s)) if s.as_ref() == "c1"));
+        assert!(card.field("mark").is_none(), "an unknown chat has no mark");
+        CHATS.with(|c| c.chats.borrow_mut().insert("c1".into(), json!({ "id": "c1", "config": { "harness": "codex" } })));
+        let card = chat_chip("Fix the build", "c1");
+        assert!(matches!(card.field("mark"), Some(Value::Str(s)) if s.as_ref() == mark("codex")));
+        CHATS.with(|c| c.chats.borrow_mut().remove("c1"));
+    }
     #[test]
     fn a_prompts_attached_passages_show_as_chips_on_the_sent_message() {
         let text = "Why this one?\n\nSelected from this conversation:\n- GPT-5.5, Sep 8, 1:43 PM: Layout dominates.\n  Paint is second.\n- You: the first ask\n\nAttached images (local files — open them to view):\n- /tmp/shot.png";

@@ -278,6 +278,12 @@ struct Inner {
     /// Loopback IPC port this engine serves, once known (0 = not serving):
     /// what the injected `zeron mcp` server dials back into.
     ipc_port: std::sync::atomic::AtomicU16,
+    /// Rung as the port is recorded: what a run revived on boot, while the
+    /// engine is still being assembled, waits on ([`SessionsEngine::ipc_port_ready`]).
+    ipc_ready: tokio::sync::Notify,
+    /// Set when this engine will serve no port at all
+    /// ([`SessionsEngine::set_no_ipc_port`]): that wait ends at once.
+    ipc_none: std::sync::atomic::AtomicBool,
     /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
     /// handed to the injected `zeron mcp` as a PATH, never the token itself.
     ipc_token_file: Mutex<Option<std::path::PathBuf>>,
@@ -356,6 +362,8 @@ impl SessionsEngine {
                 cancelled_sends: Mutex::new(HashMap::new()),
                 user_stops: Mutex::new(HashMap::new()),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
+                ipc_ready: tokio::sync::Notify::new(),
+                ipc_none: std::sync::atomic::AtomicBool::new(false),
                 ipc_token_file: Mutex::new(None),
                 journal,
                 registry,
@@ -389,7 +397,48 @@ impl SessionsEngine {
     pub fn set_ipc_port(&self, port: u16) {
         self.inner
             .ipc_port
-            .store(port, std::sync::atomic::Ordering::Relaxed);
+            .store(port, std::sync::atomic::Ordering::Release);
+        self.inner.ipc_ready.notify_waiters();
+    }
+
+    /// Record that this engine serves no IPC port (it lost the bind): a run
+    /// revived on boot goes on at once without Zeron tools, rather than
+    /// waiting out [`Self::ipc_port_ready`]'s limit for a port never coming.
+    pub fn set_no_ipc_port(&self) {
+        self.inner
+            .ipc_none
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.inner.ipc_ready.notify_waiters();
+    }
+
+    /// Until the IPC port is recorded (or none is said to be coming), or
+    /// `limit` passes. Boot recovery revives cut-off turns while the engine is
+    /// still being assembled, before it serves its port: dispatched then, a
+    /// revived run went out with no Zeron tools (its agent read them as gone,
+    /// and a parent woken by its children's reports couldn't answer them).
+    async fn ipc_port_ready(&self, limit: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            // (Made before the check: `notify_waiters` reaches a `Notified`
+            // from its making, polled or not.)
+            let rung = self.inner.ipc_ready.notified();
+            // (Acquire: the bearer, recorded before the port, is seen too.)
+            let port = self
+                .inner
+                .ipc_port
+                .load(std::sync::atomic::Ordering::Acquire);
+            if port != 0
+                || self
+                    .inner
+                    .ipc_none
+                    .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            if tokio::time::timeout_at(deadline, rung).await.is_err() {
+                return;
+            }
+        }
     }
 
     /// Record where the served port's bearer lives (`{data_dir}/ipc-token`).
@@ -1049,11 +1098,7 @@ impl SessionsEngine {
                 .note_provider_switch(chat_id, harness_id, &handle);
             handle.write_user_message(&user_id, &request.prompt, now_ms())?;
         }
-        let credential = self
-            .inner
-            .registry
-            .run_credential(harness_id, Some(chat_id))
-            .await;
+        let credential = self.inner.registry.run_credential(harness_id, Some(chat_id)).await;
         let binary = {
             let harness = harness.clone();
             tokio::task::spawn_blocking(move || binary_identity(harness.as_ref()))
@@ -1284,12 +1329,7 @@ impl SessionsEngine {
         if self.turn_in_flight(chat_id) || self.holds_background_work(chat_id) {
             return false;
         }
-        match self
-            .inner
-            .registry
-            .run_credential(harness_id, Some(chat_id))
-            .await
-        {
+        match self.inner.registry.run_credential(harness_id, Some(chat_id)).await {
             Some(now) if Some(now.as_str()) != started_with => {
                 tracing::info!(chat = %chat_id, harness = ?harness_id,
                     "credential changed; replacing the parked session");
@@ -1999,6 +2039,12 @@ impl SessionsEngine {
                 let Some(host) = sessions.inner.doc_host() else {
                     return;
                 };
+                // Its Zeron tools need the port the engine is about to serve.
+                // (One serving none, its in-process transport alone, goes on
+                // without them after a moment, as any run of its does.)
+                sessions
+                    .ipc_port_ready(std::time::Duration::from_secs(10))
+                    .await;
                 // A message sent since boot owns the chat now: reviving the
                 // old turn into it would deliver the old request a second
                 // time (dispatch checks again as the run starts).
@@ -4095,11 +4141,20 @@ async fn drive_run(
                 );
                 // Host-resolved spawn env (a Cloud device's credential broker);
                 // `RunRequest::env` is serde-skipped, never persisted.
-                match inner
+                let prepared = inner
                     .registry
                     .prepare_run(harness_id, Some(&chat_id), &mut wire_request)
-                    .await
-                {
+                    .await;
+                if prepared.is_ok() {
+                    // Preparing can decide the chat's account (a plugin's
+                    // `run.preparing` pin): the session parks on what it
+                    // really started with, not on what dispatch read before.
+                    let now = inner.registry.run_credential(harness_id, Some(&chat_id)).await;
+                    if let Some(h) = lock(&inner.runs).get_mut(&chat_id).filter(|h| h.run_id == run_id) {
+                        h.credential = now;
+                    }
+                }
+                match prepared {
                     Ok(()) if resume_state.idle => harness.start_idle(wire_request, controls).await,
                     Ok(()) => harness.run(wire_request, controls).await,
                     Err(message) => Err(zeron_harness::HarnessError::NotSignedIn(message)),
@@ -7183,5 +7238,74 @@ mod tests {
         assert_eq!(s.status, SessionStatus::Idle);
         assert!(s.last_completed_turn.is_some(), "a wait never swallows the finish");
         rig.core.sessions.shutdown().await;
+    }
+
+    /// What a turn revived on boot waits on before it dispatches: the port its
+    /// Zeron tools dial. An engine serving none goes on at the limit.
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_for_the_port_gives_up_at_its_limit_wakes_as_it_is_recorded_and_is_over_after() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let limit = Duration::from_secs(10);
+
+        // No port, none coming: the whole limit, then on without one.
+        let start = Instant::now();
+        sessions.ipc_port_ready(limit).await;
+        assert_eq!(start.elapsed(), limit);
+
+        // The port recorded midway: the wait ends then, not at the limit.
+        let start = Instant::now();
+        let waiting = tokio::spawn({
+            let sessions = sessions.clone();
+            async move { sessions.ipc_port_ready(limit).await }
+        });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(!waiting.is_finished(), "no port yet: still waiting");
+        sessions.set_ipc_port(27699);
+        waiting.await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(3));
+
+        // Recorded already: no wait at all.
+        let start = Instant::now();
+        sessions.ipc_port_ready(limit).await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    /// An engine that knows it serves no port says so, and the wait for one
+    /// ends then rather than at its limit.
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_for_the_port_ends_when_none_is_coming() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).unwrap()),
+            Arc::new(HarnessRegistry::new()),
+        );
+        let limit = Duration::from_secs(10);
+
+        // Said midway: the wait ends then.
+        let start = Instant::now();
+        let waiting = tokio::spawn({
+            let sessions = sessions.clone();
+            async move { sessions.ipc_port_ready(limit).await }
+        });
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(!waiting.is_finished(), "not said yet: still waiting");
+        sessions.set_no_ipc_port();
+        waiting.await.unwrap();
+        assert_eq!(start.elapsed(), Duration::from_secs(2));
+
+        // Said already: no wait at all.
+        let start = Instant::now();
+        sessions.ipc_port_ready(limit).await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
     }
 }

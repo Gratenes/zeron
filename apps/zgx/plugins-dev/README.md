@@ -1,6 +1,6 @@
 # Example plugins
 
-Ten plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
+Thirteen plugins, each proving one thing Zeron's plugins can do. They are **not built in**: install one by copying its folder into a Zeron data dir's `plugins/`, then sign it or allow it (`install.sh` does both for a scratch engine).
 
 | Folder | Proves | Asks for | Who signs it |
 |---|---|---|---|
@@ -32,13 +32,15 @@ A plugin is a folder in `<data>/plugins/<id>/`:
 
 **Signing your own.** Use `zeron plugin new <id>` (or New plugin in Settings → Plugins, or an agent's `create_plugin` tool), or `zeron plugin sign <id>`. Either way, your plugins stay yours as you and your agents edit them.
 
+**Sharing your own.** `zeron plugin export <id>` (or an agent's `export_plugin` tool) signs it again and saves it as one `.zeron-plugin` file in Zeron's `plugin-exports` folder; `--to <path>` saves it elsewhere (agents can't choose). Attach that file to a GitHub release, or send it.
+
 **Installing someone else's.**
 - **The person:** Settings → Plugins → Install… takes a `.zeron-plugin` file or a link. The link can point to a package, a GitHub release that carries one, or a git repository (`owner/repo`, or `…/tree/<branch>/<folder>`).
 - **An agent:** uses `install_plugin`.
 - **Before it runs:** the signature is checked over every file first. Anyone else's waits until you allow what it asks; one signed by your own key turns on at once.
 - **Where it came from** is kept in its folder's `.source.json`. Zeron checks there for updates, when Settings → Plugins opens and every few hours.
 - **A row with an update** says what the update adds to or drops from what the plugin asks, and has Update.
-- **An update must be signed by the same key**, or it's refused. One that asks for something new waits for you again.
+- **An update must be signed by the same key**, or by another of your account's live keys (a new machine; it asks people again), or it's refused. One that asks for something new waits for you again.
 - **Removing it** takes away its folder, its storage and everything it placed.
 
 ## Templates: Zeron's whole interface, yours

@@ -5,17 +5,17 @@
 //! answer it.
 //!
 //! A plugin on another of your devices (Settings → Plugins' switcher) is
-//! shown here, named for that device, and can be allowed or turned down
-//! from here: the decision goes to its engine (`targetDeviceId`), and an
-//! Allow carries a review that engine minted for this device, asked for
-//! through your device room's relay (good from this device alone; its
-//! engine refuses signing from anywhere but its own app).
+//! shown here as that device's engine lists it, named for that device, and
+//! allowed or turned down from here: the review and the decision go to its
+//! engine (`targetDeviceId`), which mints the review for this device alone
+//! and allows it there alone (each device asks for itself). Signing ("It's
+//! mine") stays this device's: it's with this device's key.
 //!
 //! What a sheet shows is what's decided: its Allow carries a review the
-//! host mints from the plugin's engine (this one's or the other device's)
-//! for the plugin at the hash shown (`ReviewPlugin`), taken only once the
-//! sheet has shown a moment (`ARMED`), and a plugin's own words reach it
-//! bounded and plain (`bounded`).
+//! host mints from the engine for the plugin at the hash shown
+//! (`ReviewPlugin`), taken only once the sheet has shown a moment
+//! (`ARMED`), and a plugin's own words reach it bounded and plain
+//! (`bounded`).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -74,22 +74,10 @@ impl Consent {
     }
 }
 
-/// The plugin a sheet may show: one waiting for you (or changed since), or
-/// one you declined ("Not now": off, still asking), which the Plugins page
-/// offers to review again.
+/// The plugin a sheet may show: one waiting for you (or changed since).
 fn showable(bridge: &Bridge, id: &str, on: &On) -> Option<super::Item> {
     let device = on.as_ref().map(|(d, _)| d.as_str());
-    bridge.item_on(device, id).filter(reviewable)
-}
-
-/// Whether `item` is awaiting a decision: new or changed, or declined and
-/// asking still. (Off with nothing asked is a plugin you turned off.)
-fn reviewable(item: &super::Item) -> bool {
-    match item.status() {
-        "pending" | "tampered" => true,
-        "off" => item.json["ask"].as_array().is_some_and(|ask| !ask.is_empty()),
-        _ => false,
-    }
+    bridge.item_on(device, id).filter(|i| matches!(i.status(), "pending" | "tampered"))
 }
 
 /// Notes when the sheet started showing what it shows now (a new plugin,
@@ -172,13 +160,20 @@ fn bounded(item: &Json) -> Json {
     let local = |list: &Json| -> Json {
         json!(list.as_array().into_iter().flatten().filter_map(Json::as_str).filter(|h| *h != "*" && zeron_plugin_guard::net::risky(h)).collect::<Vec<_>>())
     };
+    // A host named exactly that doesn't read as local: nothing can tell from
+    // its name where it points, so the sheet says it might be near.
+    let named = |list: &Json| -> Json {
+        json!(list.as_array().into_iter().flatten().filter_map(Json::as_str).filter(|h| zeron_plugin_guard::net::names_exactly(h) && !zeron_plugin_guard::net::risky(h)).collect::<Vec<_>>())
+    };
     item["commands_anything"] = anything(&item["commands"]);
     item["commands_full_control"] = full(&item["commands"]);
     item["network_local"] = local(&item["network_hosts"]);
+    item["network_named"] = named(&item["network_hosts"]);
     if let Some(diff) = item.get_mut("digest_diff") {
         diff["commands_anything"] = anything(&diff["added_commands"]);
         diff["commands_full_control"] = full(&diff["added_commands"]);
         diff["network_local"] = local(&diff["network_added"]);
+        diff["network_named"] = named(&diff["network_added"]);
         tools(&mut diff["tools_added"]);
         for tool in diff["tools_changed"].as_array_mut().into_iter().flatten() {
             words(&mut tool["name"], NAME);
@@ -266,9 +261,10 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
     let window = cx.window.clone();
     host.action("close", move |_| window.close());
 
-    // Your answer: what was shown (its hash), allowed or not. The window
-    // closes once the engine has it. Only of the sheet shown now, as it
-    // is (`seen`), and an Allow only once it has shown a moment (`ARMED`).
+    // Your answer: what was shown (its hash), allowed or not, on the device
+    // it's on. The window closes once that engine has it. Only of the sheet
+    // shown now, as it is (`seen`), and an Allow only once it has shown a
+    // moment (`ARMED`).
     let (weak, window, out, ons, ids, seen_) = (Rc::downgrade(bridge), cx.window.clone(), shared.clone(), on.clone(), id.clone(), seen.clone());
     host.action("plugins.decide", move |arg| {
         let Some(b) = weak.upgrade() else { return };
@@ -280,18 +276,22 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
         let Some(item) = showable(&b, &id, &on).filter(|item| *ids.borrow() == id && item.hash() == hash) else {
             return;
         };
-        if allow && !may_allow(&seen_.borrow(), &key(&on, &item), Instant::now()) {
+        if allow && (item.status() == "tampered" || !may_allow(&seen_.borrow(), &key(&on, &item), Instant::now())) {
             return;
         }
-        eprintln!("zeron-zgx: plugins: {id} {}", if allow { "allowed" } else { "not allowed (Not now)" });
+        eprintln!(
+            "zeron-zgx: plugins: {id} {}{}",
+            if allow { "allowed" } else { "not allowed (Not now)" },
+            on.as_ref().map(|(d, _)| format!(" on {d}")).unwrap_or_default()
+        );
         out.set(shown(&b, &id, &on, true, None));
         let (weak, window, out) = (Rc::downgrade(&b), window.clone(), out.clone());
         engine::get().spawn(async move {
             let device = on.as_ref().map(|(d, _)| d.as_str());
-            // An Allow carries a review of what was shown, minted now by
-            // the plugin's engine, there for this device (single-use, for
-            // this plugin at this hash): only this window's host holds one,
-            // never a script.
+            // An Allow carries a review of what was shown, minted now by the
+            // engine of the device it's on (single-use, for this plugin at
+            // this hash, for this device): only this window's host holds
+            // one, never a script.
             let mut params = json!({ "id": id, "allow": allow, "hash": hash });
             if allow {
                 match mint_review(device, &id, &hash).await {
@@ -313,6 +313,47 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
                     out.set(shown(&b, &id, &on, false, Some(&said(&error, &on))));
                 }
             }
+        });
+    });
+    // A tampered plugin's answers (this device's alone, the one shown, as
+    // it is): removed, or installed again from where it came from, which
+    // asks again from its sheet.
+    let (weak, window, out, ons, ids) = (Rc::downgrade(bridge), cx.window.clone(), shared.clone(), on.clone(), id.clone());
+    host.action("plugins.remove_tampered", move |arg| {
+        let Some(b) = weak.upgrade() else { return };
+        let Some(id) = tampered_shown(&b, &arg, &ons.borrow(), &ids.borrow()) else { return };
+        eprintln!("zeron-zgx: plugins: {id} removed (changed since it was allowed)");
+        out.set(shown(&b, &id, &None, true, None));
+        let (weak, window, out) = (Rc::downgrade(&b), window.clone(), out.clone());
+        engine::get().spawn(async move {
+            let result = engine::get().call("RemovePlugin", json!({ "id": id })).await;
+            let Some(b) = weak.upgrade() else { return };
+            match result {
+                Ok(_) => {
+                    // Its settings go with it, as Settings → Plugins' Remove.
+                    b.settings.borrow_mut().forget(&id);
+                    window.close();
+                }
+                Err(error) => {
+                    out.set(shown(&b, &id, &None, false, Some(&said(&error, &None))));
+                }
+            }
+        });
+    });
+    let (weak, out, ons, ids) = (Rc::downgrade(bridge), shared.clone(), on.clone(), id.clone());
+    host.action("plugins.reinstall", move |arg| {
+        let Some(b) = weak.upgrade() else { return };
+        let Some(id) = tampered_shown(&b, &arg, &ons.borrow(), &ids.borrow()) else { return };
+        eprintln!("zeron-zgx: plugins: {id} installed again (changed since it was allowed)");
+        out.set(shown(&b, &id, &None, true, None));
+        let (weak, out) = (Rc::downgrade(&b), out.clone());
+        engine::get().spawn(async move {
+            let result = engine::get().call("InstallPlugin", json!({ "reinstall": id })).await;
+            let Some(b) = weak.upgrade() else { return };
+            // The sheet follows it: installed again, it waits for you as
+            // it is now (`follow`).
+            let error = result.err().map(|error| said(&error, &None));
+            out.set(shown(&b, &id, &None, false, error.as_deref()));
         });
     });
     // "It's mine": signed as yours, after which it asks only for what it
@@ -353,8 +394,21 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
     host
 }
 
+/// The tampered plugin `arg` names, if it's the one shown, as shown, on
+/// this device.
+fn tampered_shown(bridge: &Bridge, arg: &Value, on: &On, shown_id: &str) -> Option<String> {
+    if on.is_some() {
+        return None;
+    }
+    let id = arg.field("id").map(text).unwrap_or_default();
+    let hash = arg.field("hash").map(text).unwrap_or_default();
+    showable(bridge, &id, &None)
+        .filter(|item| shown_id == id && item.hash() == hash && item.status() == "tampered")
+        .map(|_| id)
+}
+
 /// Whether an Allow of the sheet `key` may be taken `now`: it's the sheet
-/// shown (on whichever device: `key` names it), and it has shown `ARMED`
+/// shown (on whichever device: the key names it), and it has shown `ARMED`
 /// at least.
 fn may_allow(seen: &Option<(String, Instant)>, key: &str, now: Instant) -> bool {
     seen.as_ref().is_some_and(|(shown, since)| shown == key && now.duration_since(*since) >= ARMED)
@@ -366,35 +420,26 @@ fn claimable(item: &super::Item) -> bool {
     item.status() == "pending" && item.json["author"]["kind"].as_str().is_none_or(|kind| kind == "unknown")
 }
 
-/// A review of plugin `id` at `hash`, from the engine that holds it
-/// (`device`: another of yours, through the relay; none, this one): what an
-/// Allow or a signing carries, so nothing but this window's host can make
-/// one.
+/// A review of plugin `id` at `hash`, from the engine of `device` (none:
+/// this one) where it's listed: what an Allow or a signing carries, so
+/// nothing but this window's host can make one.
 async fn mint_review(device: Option<&str>, id: &str, hash: &str) -> Result<String, String> {
-    let params = remote::addressed(device, json!({ "id": id, "hash": hash }));
-    let answer = engine::get().call("ReviewPlugin", params).await?;
+    let answer = engine::get().call("ReviewPlugin", review_params(device, id, hash)).await?;
     answer["review"].as_str().map(str::to_string).ok_or_else(|| "review: none given".to_string())
+}
+
+/// What asks `device`'s engine (none: this one's) for a review: the device
+/// that will be asked to allow it mints it.
+fn review_params(device: Option<&str>, id: &str, hash: &str) -> Json {
+    remote::addressed(device, json!({ "id": id, "hash": hash }))
 }
 
 fn said(error: &str, on: &On) -> String {
     match (error, on) {
         ("offline" | "closed", _) => "Zeron isn't running right now. Try again in a moment.".into(),
         (e, Some((_, name))) if remote::unreachable(e) => format!("Can't reach {name} right now. Try again once it's online."),
-        // A Zeron there from before another device could allow its plugins.
-        (e, Some((_, name))) if older_there(e) => {
-            format!("Zeron on {name} needs updating before it can be allowed from here.")
-        }
-        (e, _) if e.starts_with("review:") => "That answer didn't go through. Choose Allow again.".into(),
         (other, _) => other.to_string(),
     }
-}
-
-/// Whether `error` is an older engine refusing a review or an Allow from
-/// another device.
-fn older_there(error: &str) -> bool {
-    error.starts_with("ReviewPlugin is only answered over this device's local IPC")
-        || error.starts_with("DecidePlugin: only this device's own window can do that")
-        || error.starts_with("ReviewPlugin: only that device's own window")
 }
 
 #[cfg(test)]
@@ -438,36 +483,45 @@ mod tests {
         assert_eq!(shown["digest_diff"]["commands_anything"], json!(["rg"]));
     }
 
-    /// R27: Allow is taken only for the sheet shown, once it has shown a
-    /// moment; another device's too, as that device's sheet.
+    /// What the sheet says of a host: near, as its name reads, or named
+    /// exactly and so maybe near; `*.` and any site neither.
     #[test]
-    fn allow_waits_for_the_sheet_shown() {
+    fn the_sheet_is_told_how_each_host_reads() {
+        let shown = bounded(&json!({
+            "network_hosts": ["localhost:8080", "127.1", "box.tail1234.ts.net", "api.example.com", "*.example.org", "*"],
+            "digest_diff": { "network_added": ["rebind.example.com", "*.example.net"] },
+        }));
+        assert_eq!(shown["network_local"], json!(["localhost:8080", "127.1"]));
+        assert_eq!(shown["network_named"], json!(["box.tail1234.ts.net", "api.example.com"]));
+        assert_eq!(shown["digest_diff"]["network_named"], json!(["rebind.example.com"]));
+    }
+
+    /// R27: Allow is taken only for the sheet shown, once it has shown a
+    /// moment: this device's, or another of yours' (the key names which).
+    #[test]
+    fn allow_waits_for_the_sheet_shown_on_whichever_device() {
         let since = Instant::now();
         let seen = Some(("/focus@h1".to_string(), since));
         assert!(!may_allow(&seen, "/focus@h1", since + ARMED / 2));
         assert!(may_allow(&seen, "/focus@h1", since + ARMED));
         assert!(!may_allow(&seen, "/focus@h2", since + ARMED * 2), "changed while shown");
-        assert!(!may_allow(&seen, "dev-b/focus@h1", since + ARMED * 2), "another device's, not the one shown");
         assert!(!may_allow(&None, "/focus@h1", since + ARMED * 2));
-
-        let elsewhere = Some(("dev-b/focus@h1".to_string(), since));
-        assert!(!may_allow(&elsewhere, "dev-b/focus@h1", since + ARMED / 2));
-        assert!(may_allow(&elsewhere, "dev-b/focus@h1", since + ARMED));
+        // Another device's sheet: its own key; one for this device's isn't it.
+        let devbox = Some(("devbox/focus@h1".to_string(), since));
+        assert!(may_allow(&devbox, "devbox/focus@h1", since + ARMED), "another of yours");
+        assert!(!may_allow(&devbox, "/focus@h1", since + ARMED * 2), "a sheet switched device");
     }
 
-    /// Another device's engine from before this could allow: said plainly.
+    /// Beta users couldn't allow a plugin on another of their devices: the
+    /// review was minted by this device's engine, for this device's list.
+    /// It's asked of the device it's on.
     #[test]
-    fn an_older_zeron_there_and_a_lost_review_are_said_plainly() {
-        let on: On = Some(("dev-b".into(), "Devbox".into()));
+    fn another_device_s_plugin_is_reviewed_by_that_device() {
         assert_eq!(
-            said("ReviewPlugin is only answered over this device's local IPC", &on),
-            "Zeron on Devbox needs updating before it can be allowed from here."
+            review_params(Some("devbox"), "focus", "h1"),
+            json!({ "id": "focus", "hash": "h1", "targetDeviceId": "devbox" })
         );
-        assert_eq!(
-            said("review: Allowing a plugin needs Zeron's consent window (open the plugin again and decide there)", &on),
-            "That answer didn't go through. Choose Allow again."
-        );
-        assert_eq!(said("It changed while you were looking; review it again", &None), "It changed while you were looking; review it again");
+        assert_eq!(review_params(None, "focus", "h1"), json!({ "id": "focus", "hash": "h1" }));
     }
 
     #[test]
@@ -477,20 +531,5 @@ mod tests {
         assert!(!claimable(&item("tampered", "unknown")));
         assert!(!claimable(&item("pending", "verified")));
         assert!(!claimable(&item("pending", "you")));
-    }
-
-    /// A plugin you said "Not now" to (off, still asking) can be reviewed
-    /// again, here as for another device; one you turned off, or that runs,
-    /// has nothing waiting.
-    #[test]
-    fn a_declined_plugin_can_be_reviewed_again() {
-        let item = |status: &str, ask: Json| super::super::Item { json: json!({ "status": status, "ask": ask }) };
-        assert!(reviewable(&item("pending", json!(["ui.add"]))));
-        assert!(reviewable(&item("tampered", json!(["ui.add"]))));
-        assert!(reviewable(&item("off", json!(["ui.add"]))), "declined: off, asking still");
-        assert!(!reviewable(&item("off", json!([]))), "turned off by you, nothing asked");
-        assert!(!reviewable(&item("off", Json::Null)));
-        assert!(!reviewable(&item("on", json!([]))));
-        assert!(!reviewable(&item("broken", json!(["ui.add"]))));
     }
 }

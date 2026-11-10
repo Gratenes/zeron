@@ -34,6 +34,7 @@ pub mod status;
 pub mod template_packages;
 pub mod templates;
 pub mod themes;
+pub mod uploads;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -59,6 +60,35 @@ use status::{Author, State, Status};
 pub const PLUGINS_DIR: &str = "plugins";
 pub const TEMPLATES_DIR: &str = "templates";
 pub const REMOVED_DIR: &str = ".removed";
+
+/// Forget what plugin `id` kept under `plugins_dir/.storage`: `zeron.store`
+/// (the app's and its service's), its settings, and its database with
+/// SQLite's files beside it. A plugin installed later under the id starts
+/// with none of it.
+pub(crate) fn forget_storage(plugins_dir: &Path, id: &str) {
+    let storage = plugins_dir.join(".storage");
+    for end in ["json", "settings.json", "sqlite3", "sqlite3-wal", "sqlite3-shm"] {
+        let _ = std::fs::remove_file(storage.join(format!("{id}.{end}")));
+    }
+    let _ = std::fs::remove_file(Services::store_path(&storage, id));
+}
+
+/// Take away what removing plugins left in `plugins_dir/.removed` (each is
+/// moved there first, so it's gone from the list at once, then deleted).
+pub(crate) fn sweep_removed(plugins_dir: &Path) {
+    let removed = plugins_dir.join(REMOVED_DIR);
+    let Ok(listed) = std::fs::read_dir(&removed) else { return };
+    for entry in listed.flatten() {
+        let path = entry.path();
+        let gone = match entry.file_type() {
+            Ok(t) if t.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+        if let Err(error) = gone {
+            tracing::debug!(path = %path.display(), %error, "plugins: couldn't delete a removed plugin yet");
+        }
+    }
+}
 /// `PluginSend`'s `data`, serialized (checked again where it lands).
 pub const MAX_SEND_BYTES: usize = 64 * 1024;
 /// A service call's `args` from another device, serialized.
@@ -237,6 +267,9 @@ struct Inner {
     /// One-time capabilities for Zeron's consent window (`ReviewPlugin`,
     /// `ReviewTemplate`): what allowing and signing need.
     reviews: Mutex<reviews::Reviews>,
+    /// Plugin files on their way here from another of your devices
+    /// (`StagePluginPackage`).
+    uploads: Mutex<uploads::Uploads>,
     /// The ticket of the sign-in just made (`Auth::step_up`), which
     /// registering a new key needs.
     step_up: Mutex<Option<StepUpFn>>,
@@ -267,9 +300,6 @@ struct DecideParams {
     /// `ReviewPlugin`'s capability: needed to allow.
     #[serde(default)]
     review: Option<String>,
-    /// The device a forwarding engine says it is (`zeron_rpc::CALLER_DEVICE_PARAM`).
-    #[serde(default, rename = "callerDeviceId")]
-    caller_device: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -279,9 +309,6 @@ struct ReviewParams {
     #[serde(default)]
     pending: Option<String>,
     hash: String,
-    /// The device a forwarding engine says it is (`zeron_rpc::CALLER_DEVICE_PARAM`).
-    #[serde(default, rename = "callerDeviceId")]
-    caller_device: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -497,6 +524,7 @@ impl Plugins {
                 sweep_scheduled: AtomicBool::new(false),
                 written: Mutex::new(HashMap::new()),
                 reviews: Mutex::new(reviews::Reviews::default()),
+                uploads: Mutex::new(uploads::Uploads::default()),
                 tools: Arc::new(ToolBroker::default()),
                 channel: Arc::new(Slot::default()),
                 themes: Arc::new(Slot::default()),
@@ -670,6 +698,8 @@ impl Plugins {
         let worker = runtime.spawn(Self::worker(Arc::downgrade(&self.inner), rx));
         let this = self.clone();
         let setup = runtime.spawn(async move {
+            let plugins_dir = this.inner.plugins_dir.clone();
+            let _ = tokio::task::spawn_blocking(move || sweep_removed(&plugins_dir)).await;
             let watcher = this.clone();
             let _ = tokio::task::spawn_blocking(move || watcher.install_watch(tx)).await;
             this.register_key().await;
@@ -1467,10 +1497,36 @@ impl Plugins {
         }
     }
 
+    /// Whether `new` is another live key of the account that signed with
+    /// `old` ([`keys::same_account`]), asked of the edge now (never the
+    /// cache: a key revoked a minute ago mustn't take a plugin over).
+    /// Offline, signed out or slow: no.
+    pub(super) async fn same_account(&self, old: &str, new: &str) -> bool {
+        if old == new {
+            return false;
+        }
+        let (Some(directory), Some(account)) = (self.directory(), self.account()) else {
+            return false;
+        };
+        let look = |key: &str| {
+            let (directory, account, key) = (directory.clone(), account.clone(), key.to_owned());
+            async move { tokio::time::timeout(LOOKUP_NOW_TIMEOUT, self.look_up(directory.as_ref(), &key, &account)).await.ok().flatten() }
+        };
+        let (Some(old), Some(new)) = (look(old).await, look(new).await) else {
+            return false;
+        };
+        keys::same_account(&old, &new)
+    }
+
+    /// The plugin `id`: Zeron's own when a folder of yours squats its id
+    /// (that folder is listed Broken beside it, and what's kept under the id
+    /// is the built-in's).
     fn entry(&self, id: &str) -> Option<Entry> {
-        lock(&self.inner.entries)
+        let entries = lock(&self.inner.entries);
+        entries
             .iter()
-            .find(|e| e.item.id == id)
+            .find(|e| e.item.id == id && e.item.builtin)
+            .or_else(|| entries.iter().find(|e| e.item.id == id))
             .cloned()
     }
 
@@ -1522,39 +1578,27 @@ impl Plugins {
             .collect()
     }
 
-    /// Who asks for a review of `kind`, or brings one: this device's app
-    /// (`None`), or, for allowing a plugin, another of your devices through
-    /// your device room's relay (its consent window, showing this device's
-    /// plugin), by the device the edge verified on the link, else the one
-    /// its engine says it is (`claimed`), else any peer alike. Refused to
-    /// an agent, and to another device for a template.
-    fn reviewer(kind: reviews::Kind, claimed: Option<&str>) -> Result<Option<String>, RpcError> {
-        match (zeron_rpc::caller(), kind) {
-            (zeron_rpc::Caller::Local, _) => Ok(None),
-            (zeron_rpc::Caller::Peer { device }, reviews::Kind::Plugin) => Ok(Some(
-                device
-                    .or_else(|| claimed.map(str::trim).filter(|c| !c.is_empty()).map(str::to_owned))
-                    .unwrap_or_else(|| "peer".to_owned()),
-            )),
-            _ => Err(reviews::needed(match kind {
-                reviews::Kind::Plugin => "Allowing a plugin",
-                reviews::Kind::Template => "Allowing a template",
-            })),
-        }
-    }
-
-    /// Use up a consent-window review for `subject` as shown (`hash`),
-    /// brought by whoever minted it ([`Self::reviewer`]).
+    /// Use up a consent-window review for `subject` as shown (`hash`):
+    /// only by whom it was minted for (`reviews::Origin`): this device's own
+    /// app, or (a plugin's) the verified device that asked for it over the
+    /// link. Never an agent's token, never an unverified dial; a template's
+    /// and a signing are this device's app's alone.
     fn redeem_review(
         &self,
         kind: reviews::Kind,
         subject: &str,
         hash: &str,
         review: Option<&str>,
-        claimed: Option<&str>,
     ) -> Result<(), RpcError> {
-        let by = Self::reviewer(kind, claimed)?;
-        lock(&self.inner.reviews).redeem(kind, subject, hash, review, by.as_deref())
+        let what = match kind {
+            reviews::Kind::Plugin => "Allowing a plugin",
+            reviews::Kind::Template => "Allowing a template",
+        };
+        let origin = reviews::Origin::of(&zeron_rpc::caller()).ok_or_else(|| reviews::needed(what))?;
+        if kind == reviews::Kind::Template && origin != reviews::Origin::Local {
+            return Err(reviews::needed(what));
+        }
+        lock(&self.inner.reviews).redeem(kind, &origin, subject, hash, review)
     }
 
     /// `SignPlugin`'s review: for the plugin `id` names, or `path` when it's
@@ -1580,14 +1624,13 @@ impl Plugins {
         let Some(id) = id else {
             return Err(failed("Only a plugin in your plugins folder can be signed, by its id"));
         };
-        // Signing is with this device's key: this device's app alone
-        // (another device's window allows, never signs).
+        // Signing is with this device's key: its own app's alone.
         if !zeron_rpc::caller().is_local() {
             return Err(reviews::needed("Signing a plugin"));
         }
         self.rescan().await;
         let hash = self.entry(&id).map(|e| e.item.hash).unwrap_or_default();
-        self.redeem_review(reviews::Kind::Plugin, &id, &hash, review, None)
+        self.redeem_review(reviews::Kind::Plugin, &id, &hash, review)
     }
 
     // ── Methods ─────────────────────────────────────────────────────────────
@@ -1609,15 +1652,13 @@ impl Plugins {
             }
             methods::REVIEW_PLUGIN | methods::REVIEW_TEMPLATE => {
                 let p: ReviewParams = parse_params(params)?;
-                // This device's consent window, or (a plugin only) another
-                // of your verified devices' showing this device's plugin.
-                let kind = if method == methods::REVIEW_PLUGIN {
-                    reviews::Kind::Plugin
-                } else {
-                    reviews::Kind::Template
-                };
-                let by = Self::reviewer(kind, p.caller_device.as_deref())
-                    .map_err(|_| reviews::needed("A review"))?;
+                // This device's app, or (a plugin's) another of the
+                // account's devices as the edge verified the link: its
+                // consent window shows this plugin as listed here. The
+                // review is good only to whoever asked for it.
+                let origin = reviews::Origin::of(&zeron_rpc::caller())
+                    .filter(|origin| method == methods::REVIEW_PLUGIN || *origin == reviews::Origin::Local)
+                    .ok_or_else(|| reviews::needed("A review"))?;
                 let review = if method == methods::REVIEW_PLUGIN {
                     let id = p.id.unwrap_or_default();
                     self.rescan().await;
@@ -1627,10 +1668,10 @@ impl Plugins {
                     if entry.item.hash != p.hash {
                         return Err(failed("It changed while you were looking; review it again"));
                     }
-                    lock(&self.inner.reviews).mint(kind, &id, &p.hash, by.as_deref())?
+                    lock(&self.inner.reviews).mint(reviews::Kind::Plugin, origin, &id, &p.hash)?
                 } else {
                     let pending = p.pending.unwrap_or_default();
-                    lock(&self.inner.reviews).mint(kind, pending.trim(), &p.hash, by.as_deref())?
+                    lock(&self.inner.reviews).mint(reviews::Kind::Template, origin, pending.trim(), &p.hash)?
                 };
                 RpcReply::value(&serde_json::json!({ "review": review }))
             }
@@ -1643,21 +1684,16 @@ impl Plugins {
             methods::DECIDE_PLUGIN => {
                 let p: DecideParams = parse_params(params)?;
                 // Allowing is Zeron's consent window's alone: this device's
-                // app, or another of your devices' showing this plugin, with
-                // a review minted here for this plugin as shown, for it.
+                // app's, or another of the account's devices' (its Settings →
+                // Plugins), with a review minted for this plugin as shown,
+                // for whoever decides.
                 if p.allow {
                     // (Changed since it was shown: say so, keeping the review.)
                     self.rescan().await;
                     if self.entry(&p.id).is_some_and(|e| e.item.hash != p.hash) {
                         return Err(failed("It changed while you were looking; review it again"));
                     }
-                    self.redeem_review(
-                        reviews::Kind::Plugin,
-                        &p.id,
-                        &p.hash,
-                        p.review.as_deref(),
-                        p.caller_device.as_deref(),
-                    )?;
+                    self.redeem_review(reviews::Kind::Plugin, &p.id, &p.hash, p.review.as_deref())?;
                 }
                 self.rescan().await;
                 let entry = self
@@ -1665,6 +1701,14 @@ impl Plugins {
                     .ok_or_else(|| failed(format!("There's no plugin {}", p.id)))?;
                 if entry.item.hash != p.hash {
                     return Err(failed("It changed while you were looking; review it again"));
+                }
+                // Changed since you allowed it: it's removed or installed
+                // again, never allowed as it is now.
+                if p.allow && entry.item.status == Status::Tampered {
+                    return Err(failed(format!(
+                        "{} changed after you allowed it. Remove it, or install it again from where it came from",
+                        entry.item.name
+                    )));
                 }
                 if entry.item.status == Status::Broken {
                     return Err(failed(
@@ -1742,9 +1786,10 @@ impl Plugins {
             }
             methods::REMOVE_PLUGIN => {
                 let p: IdParams = parse_params(params)?;
-                if self.entry(&p.id).is_some_and(|e| e.item.builtin) {
-                    return Err(failed("Built-in plugins can be turned off, but not removed"));
-                }
+                // A folder of yours under a built-in's id is taken away, but
+                // what's kept under the id (its decision, storage) is the
+                // built-in's, and stays.
+                let builtin = self.entry(&p.id).is_some_and(|e| e.item.builtin);
                 // (One plain name, joined so it stays in the plugins folder on
                 // every system: never `C:`, a device name or a trailing dot.)
                 let dir = match zeron_plugin_guard::path::join(&self.inner.plugins_dir, &p.id) {
@@ -1752,26 +1797,31 @@ impl Plugins {
                     _ => return Err(failed(format!("There's no plugin {}", p.id))),
                 };
                 if std::fs::symlink_metadata(&dir).is_err() {
-                    return Err(failed(format!("There's no plugin {}", p.id)));
+                    return Err(failed(if builtin {
+                        "Built-in plugins can be turned off, but not removed".to_string()
+                    } else {
+                        format!("There's no plugin {}", p.id)
+                    }));
                 }
                 let removed = self.inner.plugins_dir.join(REMOVED_DIR);
                 std::fs::create_dir_all(&removed).map_err(|_| failed("Couldn't remove it"))?;
                 std::fs::rename(&dir, removed.join(format!("{}-{}", p.id, now_secs())))
                     .map_err(|_| failed("Couldn't remove it"))?;
+                // Gone from the list now; its files go with it (what can't
+                // be deleted yet goes when the engine next starts).
+                let plugins_dir = self.inner.plugins_dir.clone();
+                let _ = tokio::task::spawn_blocking(move || sweep_removed(&plugins_dir)).await;
+                if builtin {
+                    self.rescan().await;
+                    return RpcReply::value(&serde_json::json!({}));
+                }
                 self.update_state(|state| {
                     state.decisions.remove(&p.id);
                     state.own.remove(&p.id);
                 })?;
-                // What it kept (`zeron.store`, the app's) goes with it.
-                let _ = std::fs::remove_file(self.inner.plugins_dir.join(".storage").join(format!("{}.json", p.id)));
-                // And its settings (the app's: what you set on its page).
-                let _ = std::fs::remove_file(self.inner.plugins_dir.join(".storage").join(format!("{}.settings.json", p.id)));
-                // Its service's (`zeron.store` in service.luau).
-                let _ = std::fs::remove_file(Services::store_path(&self.inner.plugins_dir.join(".storage"), &p.id));
-                // Its database (`zeron.db`), and SQLite's files beside it.
-                for end in ["sqlite3", "sqlite3-wal", "sqlite3-shm"] {
-                    let _ = std::fs::remove_file(self.inner.plugins_dir.join(".storage").join(format!("{}.{end}", p.id)));
-                }
+                // What it kept (`zeron.store`, its settings, its database)
+                // goes with it.
+                forget_storage(&self.inner.plugins_dir, &p.id);
                 install::forget_found(&self.inner.plugins_dir, &p.id);
                 self.rescan().await;
                 RpcReply::value(&serde_json::json!({}))
@@ -2148,7 +2198,6 @@ impl Plugins {
                         pending,
                         p.hash.as_deref().unwrap_or_default(),
                         p.review.as_deref(),
-                        None,
                     )?;
                 }
                 // R29: an agent exports to Zeron's exports folder only; a

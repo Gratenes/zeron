@@ -5,26 +5,26 @@
 //! true}`) each need a `review`: a random 32-byte capability minted by
 //! `ReviewPlugin {id, hash}` / `ReviewTemplate {pending, hash}` for exactly
 //! that plugin or package as shown, used up by the decision it was minted
-//! for, gone after [`TTL`]. Only a consent window's own host asks for one,
-//! and the window's Luau never sees it: this device's app, or, for allowing
-//! a plugin, the app on another of your devices showing this device's
-//! plugin (Settings → Plugins' device switcher), through your device room's
-//! relay. A review remembers who minted it ([`Reviews::mint`]'s `by`: the
-//! device the edge verified on the link, else the one the forwarding engine
-//! says it is) and is good only from them, so one minted for another
-//! device's window decides from there alone and never signs. The methods
-//! are refused to agents' scoped token ([`zeron_rpc::agent_allowed`]);
-//! signing and templates stay this device's ([`zeron_rpc::peer_refused`]).
+//! for, gone after [`TTL`]. Only a consent window's own host asks for one:
+//! the methods are refused to agents' scoped token
+//! ([`zeron_rpc::agent_allowed`]), and the window's Luau never sees it.
 //!
-//! What this holds against: an agent through its MCP server (on this device
-//! or another: its token never reaches a review, here or forwarded), a
-//! plugin or a template (which have no IPC token at all; they reach the
-//! engine only through the app's host actions, none of which mints a review
-//! outside the consent window), anything that can't reach your device room
-//! (it takes your account's sign-in), and a stale or replayed decision for
-//! something other than what was shown. Not against code running as the
-//! user that reads the app's full token from the data dir (here, or on
-//! another of your devices): that code can rewrite the data dir itself.
+//! A plugin's may also be asked for by another of the account's devices
+//! over the device link (Settings → Plugins' device switcher: that device's
+//! consent window shows this device's plugin as this engine lists it). A
+//! review is bound to who asked for it ([`Origin`]): one minted for this
+//! device's app is good only to this device's app, one minted for a peer
+//! only to that same peer, as the edge verified it (`fromDevice`). A dial
+//! the edge didn't verify gets none. Templates' stay this device's.
+//!
+//! What this holds against: an agent through its MCP server (here or on
+//! another device: its token can't mint, and its engine forwards a mint
+//! only for its own app), a plugin or a template (which have no IPC token
+//! at all; they reach the engine only through the app's host actions, none
+//! of which mints a review outside the consent window), another account,
+//! and a stale or replayed decision for something other than what was
+//! shown. Not against code running as the user that reads the app's full
+//! token from the data dir: that code can rewrite the data dir itself.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -44,11 +44,31 @@ pub enum Kind {
     Template,
 }
 
+/// Who a review was minted for, and so the only one who may use it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Origin {
+    /// This device's own app (full-token local IPC).
+    Local,
+    /// Another of the account's devices, as the edge verified the link.
+    Peer(String),
+}
+
+impl Origin {
+    /// The origin of the call being served, if it may hold a review at all:
+    /// this device's app, or a verified peer. An agent's token or an
+    /// unverified dial may not.
+    pub fn of(caller: &zeron_rpc::Caller) -> Option<Origin> {
+        match caller {
+            zeron_rpc::Caller::Local => Some(Origin::Local),
+            zeron_rpc::Caller::Peer { device: Some(device) } if !device.is_empty() => Some(Origin::Peer(device.clone())),
+            zeron_rpc::Caller::Peer { device: _ } | zeron_rpc::Caller::Agent { .. } => None,
+        }
+    }
+}
+
 struct Review {
     kind: Kind,
-    /// Who minted it: none for this device's app, else the verified device
-    /// whose window asked.
-    by: Option<String>,
+    origin: Origin,
     subject: String,
     hash: String,
     at: Instant,
@@ -63,21 +83,13 @@ pub struct Reviews {
 /// mints a fresh one and tries again.
 pub fn needed(what: &str) -> RpcError {
     RpcError::Failed(format!(
-        "review: {what} needs Zeron's consent window (open the plugin again and decide there)"
+        "review: {what} needs Zeron's own consent window (open it there and decide again)"
     ))
 }
 
 impl Reviews {
-    /// A fresh review for `subject` as shown (`hash`), asked for by `by`
-    /// (none: this device's app; else the verified device whose window
-    /// asked).
-    pub fn mint(
-        &mut self,
-        kind: Kind,
-        subject: &str,
-        hash: &str,
-        by: Option<&str>,
-    ) -> Result<String, RpcError> {
+    /// A fresh review for `subject` as shown (`hash`), good only to `origin`.
+    pub fn mint(&mut self, kind: Kind, origin: Origin, subject: &str, hash: &str) -> Result<String, RpcError> {
         self.prune();
         while self.open.len() >= MAX {
             let Some(oldest) = self
@@ -96,7 +108,7 @@ impl Reviews {
             token.clone(),
             Review {
                 kind,
-                by: by.map(str::to_owned),
+                origin,
                 subject: subject.to_owned(),
                 hash: hash.to_owned(),
                 at: Instant::now(),
@@ -105,17 +117,17 @@ impl Reviews {
         Ok(token)
     }
 
-    /// Use up `token` for `subject` as shown (`hash`), brought by `by`: good
-    /// only once, only for what it was minted for, only from who minted it,
-    /// only within [`TTL`]. A token presented for something else, or by
-    /// someone else, is used up too (it was leaked or misused).
+    /// Use up `token` for `subject` as shown (`hash`): good only once, only
+    /// for what it was minted for, only to whom it was minted for
+    /// (`origin`), only within [`TTL`]. A token presented for something
+    /// else, or by someone else, is used up too (it was leaked or misused).
     pub fn redeem(
         &mut self,
         kind: Kind,
+        origin: &Origin,
         subject: &str,
         hash: &str,
         token: Option<&str>,
-        by: Option<&str>,
     ) -> Result<(), RpcError> {
         self.prune();
         let what = match kind {
@@ -128,11 +140,7 @@ impl Reviews {
         let Some(review) = self.open.remove(token) else {
             return Err(needed(what));
         };
-        if review.kind != kind
-            || review.subject != subject
-            || review.hash != hash
-            || review.by.as_deref() != by
-        {
+        if review.kind != kind || review.origin != *origin || review.subject != subject || review.hash != hash {
             return Err(needed(what));
         }
         Ok(())
@@ -150,13 +158,14 @@ mod tests {
     #[test]
     fn a_review_is_good_once_and_only_for_what_was_shown() {
         let mut reviews = Reviews::default();
-        let token = reviews.mint(Kind::Plugin, "focus", "h1", None).unwrap();
+        let here = Origin::Local;
+        let token = reviews.mint(Kind::Plugin, here.clone(), "focus", "h1").unwrap();
         assert_eq!(token.len(), 64);
-        assert!(reviews.redeem(Kind::Plugin, "focus", "h1", None, None).is_err());
-        assert!(reviews.redeem(Kind::Plugin, "focus", "h1", Some(""), None).is_err());
-        reviews.redeem(Kind::Plugin, "focus", "h1", Some(&token), None).unwrap();
+        assert!(reviews.redeem(Kind::Plugin, &here, "focus", "h1", None).is_err());
+        assert!(reviews.redeem(Kind::Plugin, &here, "focus", "h1", Some("")).is_err());
+        reviews.redeem(Kind::Plugin, &here, "focus", "h1", Some(&token)).unwrap();
         assert!(
-            reviews.redeem(Kind::Plugin, "focus", "h1", Some(&token), None).is_err(),
+            reviews.redeem(Kind::Plugin, &here, "focus", "h1", Some(&token)).is_err(),
             "used up"
         );
 
@@ -166,41 +175,46 @@ mod tests {
             (Kind::Plugin, "focus", "h2"),
             (Kind::Template, "focus", "h1"),
         ] {
-            let token = reviews.mint(Kind::Plugin, "focus", "h1", None).unwrap();
-            assert!(reviews.redeem(kind, subject, hash, Some(&token), None).is_err());
-            assert!(reviews.redeem(Kind::Plugin, "focus", "h1", Some(&token), None).is_err());
+            let token = reviews.mint(Kind::Plugin, here.clone(), "focus", "h1").unwrap();
+            assert!(reviews.redeem(kind, &here, subject, hash, Some(&token)).is_err());
+            assert!(reviews.redeem(Kind::Plugin, &here, "focus", "h1", Some(&token)).is_err());
         }
     }
 
-    /// One minted for another device's window is good from that device
-    /// alone: not from this device's app, not from a third device; and one
-    /// minted for this device's app is good from no other device.
+    /// A review is good only to whom it was minted for: this device's app,
+    /// or the very device that asked over the link.
     #[test]
-    fn a_review_is_good_only_from_who_asked_for_it() {
+    fn a_review_is_good_only_to_whom_it_was_minted_for() {
         let mut reviews = Reviews::default();
-        let token = reviews.mint(Kind::Plugin, "focus", "h1", Some("dev-a")).unwrap();
-        reviews.redeem(Kind::Plugin, "focus", "h1", Some(&token), Some("dev-a")).unwrap();
-
-        for by in [None, Some("dev-b")] {
-            let token = reviews.mint(Kind::Plugin, "focus", "h1", Some("dev-a")).unwrap();
-            assert!(reviews.redeem(Kind::Plugin, "focus", "h1", Some(&token), by).is_err(), "{by:?}");
-            assert!(
-                reviews.redeem(Kind::Plugin, "focus", "h1", Some(&token), Some("dev-a")).is_err(),
-                "used up by the misuse"
-            );
+        let laptop = Origin::Peer("laptop".into());
+        let desk = Origin::Peer("desk".into());
+        for (minted, presented) in [(&laptop, &Origin::Local), (&laptop, &desk), (&Origin::Local, &laptop)] {
+            let token = reviews.mint(Kind::Plugin, minted.clone(), "focus", "h1").unwrap();
+            assert!(reviews.redeem(Kind::Plugin, presented, "focus", "h1", Some(&token)).is_err());
+            assert!(reviews.redeem(Kind::Plugin, minted, "focus", "h1", Some(&token)).is_err(), "used up");
         }
-        let token = reviews.mint(Kind::Plugin, "focus", "h1", None).unwrap();
-        assert!(reviews.redeem(Kind::Plugin, "focus", "h1", Some(&token), Some("dev-a")).is_err());
+        let token = reviews.mint(Kind::Plugin, laptop.clone(), "focus", "h1").unwrap();
+        reviews.redeem(Kind::Plugin, &laptop, "focus", "h1", Some(&token)).unwrap();
+    }
+
+    #[test]
+    fn only_the_app_and_verified_devices_may_hold_one() {
+        use zeron_rpc::Caller;
+        assert_eq!(Origin::of(&Caller::Local), Some(Origin::Local));
+        assert_eq!(Origin::of(&Caller::Peer { device: Some("laptop".into()) }), Some(Origin::Peer("laptop".into())));
+        assert_eq!(Origin::of(&Caller::Peer { device: None }), None);
+        assert_eq!(Origin::of(&Caller::Peer { device: Some(String::new()) }), None);
+        assert_eq!(Origin::of(&Caller::Agent { chat: Some("c".into()) }), None);
     }
 
     #[test]
     fn outstanding_reviews_are_bounded() {
         let mut reviews = Reviews::default();
-        let first = reviews.mint(Kind::Plugin, "a", "h", None).unwrap();
+        let first = reviews.mint(Kind::Plugin, Origin::Local, "a", "h").unwrap();
         for i in 0..MAX {
-            reviews.mint(Kind::Plugin, &format!("p{i}"), "h", None).unwrap();
+            reviews.mint(Kind::Plugin, Origin::Local, &format!("p{i}"), "h").unwrap();
         }
         assert!(reviews.open.len() <= MAX);
-        assert!(reviews.redeem(Kind::Plugin, "a", "h", Some(&first), None).is_err());
+        assert!(reviews.redeem(Kind::Plugin, &Origin::Local, "a", "h", Some(&first)).is_err());
     }
 }

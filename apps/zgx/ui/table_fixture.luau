@@ -24,9 +24,9 @@ local TABLES: { [string]: string } = {
 	running = [[
 | Chat | Doing |
 | --- | --- |
-| **bd116421**, engine hang | Getting function names into the hang capture, which lock froze and whose code holds it, then a fix in a separate worktree. It won't deploy, restart the engine or push. It will say whether threadripper should go back to the rotation-only build until there's a fix. |
-| **1f88cdc9**, personal CI builds | The first full build on GitHub passed: Linux in 17m and Windows in 43m29s. It's rerunning to measure how fast a second build is once cached. |
-| **9fb86b6f**, sidebar offline icon | Building it. |
+| **a1b2c3d4**, engine hang | Getting function names into the hang capture, which lock froze and whose code holds it, then a fix in a separate worktree. It won't deploy, restart the engine or push. It will say whether the build should go back to the previous release until there's a fix. |
+| **e5f6a7b8**, nightly CI builds | The first full build on GitHub passed: Linux in 17m and Windows in 43m29s. It's rerunning to measure how fast a second build is once cached. |
+| **c9d0e1f2**, sidebar icon | Building it. |
 ]],
 	-- Short labels and numbers beside a column of prose.
 	mixed = [[
@@ -50,6 +50,15 @@ local TABLES: { [string]: string } = {
 | ---: | --- |
 | Free | Yours to keep |
 | Team of many | Billed by seat |
+]],
+	-- A column of prose short of a wrap beside numbers: the table is
+	-- narrower than the reply until its prose column takes what's left.
+	loose = [[
+| Changes | Frames |
+| --- | --- |
+| layout box easing | 3 |
+| sideways wheel and drift latch | 12 |
+| `~~` only | 1 |
 ]],
 	-- A cell whose code can't break anywhere.
 	code = [[
@@ -136,6 +145,7 @@ return ui.column {
 			shown("many"),
 			shown("code"),
 			shown("said"),
+			shown("loose"),
 			ui.show(function(): boolean
 				return only:get() == "all" or only:get() == "data"
 			end, ui.column {

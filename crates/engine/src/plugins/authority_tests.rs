@@ -162,8 +162,8 @@ async fn a_review_allows_once() {
     assert_eq!(status(&f.plugins, "focus").await, Status::Off);
 }
 
-/// R6: an agent (its MCP server's scoped token) can't mint a review; it and
-/// another device can't use one minted for the app, nor sign: the engine
+/// R6: an agent (its MCP server's scoped token) or another device can't
+/// mint a review, nor use one minted for the app, nor sign: the engine
 /// checks who asked even past the transport guards.
 #[tokio::test]
 async fn agents_and_other_devices_cannot_review_allow_or_sign() {
@@ -175,9 +175,7 @@ async fn agents_and_other_devices_cannot_review_allow_or_sign() {
             call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "evil", "hash": hash })),
         )
         .await;
-        if matches!(caller, Caller::Agent { .. }) {
-            assert!(minted.is_err(), "{caller:?} minted a review: {minted:?}");
-        }
+        assert!(minted.is_err(), "{caller:?} minted a review: {minted:?}");
 
         // Even holding one (say, read off the app's connection).
         let review = call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "evil", "hash": hash }))
@@ -208,116 +206,6 @@ async fn agents_and_other_devices_cannot_review_allow_or_sign() {
         assert_eq!(status(&f.plugins, "evil").await, Status::Pending);
         assert!(!f.plugins.entry("evil").unwrap().item.own, "not made yours");
     }
-}
-
-/// Another of your devices (its consent window showing this device's
-/// plugin) mints a review here and allows with it: good from that device
-/// alone (not this device's app, not a third device), once, never for
-/// signing; templates stay this device's.
-#[tokio::test]
-async fn a_verified_device_of_yours_can_review_and_allow_here() {
-    let f = fixture();
-    let hash = waiting(&f.plugins, "focus").await;
-    let peer = |device: &str| Caller::Peer { device: Some(device.into()) };
-    let mint = |caller: Caller| {
-        let plugins = &f.plugins;
-        let hash = hash.clone();
-        async move {
-            with_caller(caller, call(plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash })))
-                .await
-                .unwrap()["review"]
-                .clone()
-        }
-    };
-    let decide = |review: Value| json!({ "id": "focus", "allow": true, "hash": hash, "review": review });
-
-    // Minted for device A: refused from this device's app and from device B
-    // (and used up by the try).
-    for caller in [Caller::Local, peer("dev-b")] {
-        let review = mint(peer("dev-a")).await;
-        let refused = with_caller(caller.clone(), call(&f.plugins, methods::DECIDE_PLUGIN, decide(review.clone()))).await;
-        assert!(refused.as_ref().is_err_and(|e| e.starts_with("review:")), "{caller:?}: {refused:?}");
-        let used = with_caller(peer("dev-a"), call(&f.plugins, methods::DECIDE_PLUGIN, decide(review))).await;
-        assert!(used.is_err(), "{used:?}");
-        assert_eq!(status(&f.plugins, "focus").await, Status::Pending);
-    }
-    // Minted for this device's app: refused from device A.
-    let review = mint(Caller::Local).await;
-    let refused = with_caller(peer("dev-a"), call(&f.plugins, methods::DECIDE_PLUGIN, decide(review))).await;
-    assert!(refused.is_err(), "{refused:?}");
-
-    // Never signs, even with a review it minted.
-    let review = mint(peer("dev-a")).await;
-    let signed = with_caller(peer("dev-a"), call(&f.plugins, methods::SIGN_PLUGIN, json!({ "id": "focus", "review": review }))).await;
-    assert!(signed.is_err(), "{signed:?}");
-    assert!(!f.plugins.entry("focus").unwrap().item.own, "not made yours");
-
-    // A template's review stays this device's.
-    let template = with_caller(
-        peer("dev-a"),
-        call(&f.plugins, methods::REVIEW_TEMPLATE, json!({ "pending": "midnight-1", "hash": "h" })),
-    )
-    .await;
-    assert!(template.is_err(), "{template:?}");
-
-    // Device A's window: its own review, once.
-    let review = mint(peer("dev-a")).await;
-    let allowed = with_caller(peer("dev-a"), call(&f.plugins, methods::DECIDE_PLUGIN, decide(review.clone())))
-        .await
-        .unwrap();
-    assert_eq!(allowed["status"], "on", "{allowed}");
-    with_caller(peer("dev-a"), call(&f.plugins, methods::DECIDE_PLUGIN, json!({ "id": "focus", "allow": false, "hash": hash })))
-        .await
-        .unwrap();
-    let replayed = with_caller(peer("dev-a"), call(&f.plugins, methods::DECIDE_PLUGIN, decide(review))).await;
-    assert!(replayed.is_err(), "{replayed:?}");
-    assert_eq!(status(&f.plugins, "focus").await, Status::Off);
-}
-
-/// A relay dial the edge didn't verify reviews and allows too, bound to the
-/// device its engine says it is (`callerDeviceId`): not good from another
-/// claim, nor from a verified device, nor from this device's app.
-#[tokio::test]
-async fn an_unverified_device_reviews_and_allows_bound_to_its_claim() {
-    let f = fixture();
-    let hash = waiting(&f.plugins, "focus").await;
-    let unverified = || Caller::Peer { device: None };
-    let mint = |claim: &'static str| {
-        let plugins = &f.plugins;
-        let hash = hash.clone();
-        async move {
-            with_caller(
-                Caller::Peer { device: None },
-                call(plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash, "callerDeviceId": claim })),
-            )
-            .await
-            .unwrap()["review"]
-            .clone()
-        }
-    };
-    let decide = |review: &Value, claim: &str| {
-        json!({ "id": "focus", "allow": true, "hash": hash, "review": review, "callerDeviceId": claim })
-    };
-
-    for (caller, claim) in [(unverified(), "dev-b"), (Caller::Peer { device: Some("dev-b".into()) }, "dev-x"), (Caller::Local, "dev-a")] {
-        let review = mint("dev-a").await;
-        let refused = with_caller(caller.clone(), call(&f.plugins, methods::DECIDE_PLUGIN, decide(&review, claim))).await;
-        assert!(refused.as_ref().is_err_and(|e| e.starts_with("review:")), "{caller:?} {claim}: {refused:?}");
-        assert_eq!(status(&f.plugins, "focus").await, Status::Pending);
-    }
-    // No claim at all: any unverified peer alike, still once.
-    let review = with_caller(unverified(), call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash })))
-        .await
-        .unwrap()["review"]
-        .clone();
-    let claimed = with_caller(unverified(), call(&f.plugins, methods::DECIDE_PLUGIN, decide(&review, "dev-a"))).await;
-    assert!(claimed.is_err(), "{claimed:?}");
-
-    let review = mint("dev-a").await;
-    let allowed = with_caller(unverified(), call(&f.plugins, methods::DECIDE_PLUGIN, decide(&review, "dev-a")))
-        .await
-        .unwrap();
-    assert_eq!(allowed["status"], "on", "{allowed}");
 }
 
 /// R4/R6: SignPlugin (which makes a plugin yours) needs the consent
@@ -478,6 +366,31 @@ async fn an_agent_cannot_choose_where_a_template_is_exported() {
         assert!(refused.as_ref().is_err_and(|e| e.contains("exports folder")), "{refused:?}");
     }
     assert!(!path.exists());
+}
+
+/// R29 for plugins: an agent's export goes to Zeron's plugin-exports folder,
+/// never a path of its choosing.
+#[tokio::test]
+async fn an_agent_exports_a_plugin_only_to_the_exports_folder() {
+    let f = fixture();
+    call(&f.plugins, methods::NEW_PLUGIN, json!({ "id": "hello", "name": "Hello" })).await.unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let path = outside.path().join("x.zeron-plugin");
+    for caller in [Caller::Agent { chat: None }, Caller::Peer { device: None }] {
+        let refused = with_caller(
+            caller,
+            call(&f.plugins, methods::EXPORT_PLUGIN, json!({ "id": "hello", "to": path.display().to_string() })),
+        )
+        .await;
+        assert!(refused.as_ref().is_err_and(|e| e.contains("plugin-exports folder")), "{refused:?}");
+    }
+    assert!(!path.exists());
+    let exported = with_caller(Caller::Agent { chat: None }, call(&f.plugins, methods::EXPORT_PLUGIN, json!({ "id": "hello" })))
+        .await
+        .unwrap();
+    let saved = Path::new(exported["path"].as_str().unwrap());
+    assert_eq!(saved, f._dir.path().join("plugin-exports").join("hello-0.1.0.zeron-plugin"));
+    assert_eq!(exported["bytes"].as_u64().unwrap(), std::fs::metadata(saved).unwrap().len());
 }
 
 /// R14: a device-room dial's proof is this device's registered key over the

@@ -17,6 +17,7 @@
 -- it lays itself out.
 
 local ds = require("@ds")
+local Dictation = require("@app/screens/chat/dictation")
 local motion = require("@ds/motion")
 local T = require("@ds/transcript")
 local Quote = require("@ds/quote")
@@ -773,6 +774,33 @@ local function Composer(): Node
 		shared.show(key)
 	end)
 
+	-- Arriving on a chat (another session or a new chat shown: a sidebar or
+	-- Activity row, Back or Forward, ⌘N, the palette; a split's pane taking
+	-- the focus; back from Settings): the composer takes the keys. Once
+	-- what brought it here is done (a palette closing
+	-- puts focus back where it was first), so this comes last; a field
+	-- that takes the keys after (a rename) has them. (Kept: a reload, or
+	-- the window opening, isn't an arrival.)
+	local arrived = ui.state("chat_composer_arrived", "?")
+	ui.effect(function()
+		local now = route.current:get()
+		local pane = route.chat:get().session
+		local chat = now.name == "session" or now.name == "home"
+		local at = `{now.name}|{now.session or ""}|{now.project or ""}|{pane or ""}`
+		local was = arrived:peek()
+		if was == at then
+			return
+		end
+		arrived:set(at)
+		-- (A tab strip's arrows keep the keys on the tab they chose.)
+		if route.take_keys_kept() or was == "?" or not chat then
+			return
+		end
+		ui.after(0, function()
+			shared.focus:add(1)
+		end)
+	end)
+
 	local function send(text: string)
 		-- Editing a queued message: Send saves it.
 		if editing:peek() then
@@ -1016,9 +1044,8 @@ local function Composer(): Node
 			end
 		end, function() end)
 	end)
-	local accounts = shared.model_accounts(function(): string?
-		return device:get()
-	end)
+	-- (The catalog's device, a new chat's project's host included.)
+	local accounts = shared.model_accounts(run_device)
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then
@@ -1049,8 +1076,15 @@ local function Composer(): Node
 		}
 	end
 
+	local dictation = Dictation.bind(shared.text, function(): string
+		return `{session_id:get() or ""}|{if editing:get() then editing:get().item else ""}|{route.current:get().name}`
+	end, function(): boolean
+		return question:get() ~= nil or approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin"
+	end, "main")
+
 	local function composer(): Node
 		return ds.Composer {
+			dictation = dictation,
 			-- Its measures, fold and open tray kept across a reload, so it
 			-- is laid out as it was from the first frame.
 			keep = "chat",
@@ -1350,6 +1384,10 @@ local function Composer(): Node
 				end
 				return Invocations.failed(catalog, "command")
 					or (if prefs.completion(agent()).separate then nil else Invocations.failed(catalog, "skill"))
+			end,
+			-- (Whose draft it shows: a mention list put away is that chat's.)
+			draft_key = function(): any
+				return session_id:get() or ""
 			end,
 		}
 	end

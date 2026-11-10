@@ -15,9 +15,10 @@
 //!                 updated, created, harness?, agent?, model?,
 //!                 running_subagents, side_chats, working_side_chats } },
 //!     children = { [parent id] = { { id, parent, kind?, title, device, project?,
-//!                 branch?, status?, updated, created, harness?, agent? } } }
-//!                 (its side chats, newest first; `kind`: "side" or
-//!                 "subagent", as newer engines say, else nil),
+//!                 branch?, status?, updated, created, harness?, agent?,
+//!                 child_kind? } } } (its
+//!                 side chats, newest first; `child_kind` "subagent" or
+//!                 "side" for one a Zeron chat started, none for the person's),
 //!     places = { pinned = { id }, sections = { { id, name, sessions = { id },
 //!                collapsed } } },
 //!     archived = { chat, … } (as `chats`, the most recently moved first),
@@ -690,6 +691,9 @@ impl Sessions {
                 ("agent", harness.and_then(crate::agents::glyph).map_or(Value::Nil, |g| Value::from(g.as_str()))),
                 // An agent from the ACP registry: its icon, as listed.
                 ("agent_icon", with.agent_icon.as_deref().map_or(Value::Nil, Value::from)),
+                // Started by a Zeron chat through Zeron's tools ("subagent" or
+                // "side"); none for a side chat the person started.
+                ("child_kind", opt(c["childKind"].as_str())),
             ]);
             let row = (updated as f64, value.clone());
             rows.insert(id.to_owned(), Row { moved: moved(c), updated: updated as f64, marks: seen_marks(c), with, value });
@@ -1740,8 +1744,9 @@ mod tests {
         let s = super::Sessions::default();
         *s.chats.borrow_mut() = serde_json::json!([
             { "id": "p", "title": "Parent", "deviceId": "d", "createdAt": "2026-11-01T10:00:00Z", "config": { "harness": "claude-code" } },
-            { "id": "a", "parentChatId": "p", "childKind": "side", "branch": "side-work", "title": "", "lastMessagePreview": "Looking at the tests", "deviceId": "d",
-              "createdAt": "2026-11-01T10:05:00Z", "lastMessageAt": "2026-11-01T10:06:00Z", "config": { "harness": "codex" } },
+            { "id": "a", "parentChatId": "p", "branch": "side-work", "title": "", "lastMessagePreview": "Looking at the tests", "deviceId": "d",
+              "createdAt": "2026-11-01T10:05:00Z", "lastMessageAt": "2026-11-01T10:06:00Z", "config": { "harness": "codex" },
+              "childKind": "subagent" },
             { "id": "b", "parentChatId": "p", "deviceId": "d", "createdAt": "2026-11-01T10:07:00Z" },
             { "id": "gone", "parentChatId": "p", "archived": true, "deviceId": "d", "createdAt": "2026-11-01T10:08:00Z" },
         ]);
@@ -1771,8 +1776,11 @@ mod tests {
         assert_eq!(kids[0].field("title").map(crate::auth::text).as_deref(), Some("New side chat"));
         assert_eq!(kids[1].field("status").map(crate::auth::text).as_deref(), Some("working"));
         assert_eq!(kids[1].field("parent").map(crate::auth::text).as_deref(), Some("p"));
-        // What kind it is, where the engine says (else nil), and its branch.
-        assert_eq!(kids[1].field("kind").map(crate::auth::text).as_deref(), Some("side"));
+        // Started by a Zeron chat, which kind; the person's, none.
+        assert_eq!(kids[1].field("child_kind").map(crate::auth::text).as_deref(), Some("subagent"));
+        assert!(kids[0].field("child_kind").is_none_or(|k| matches!(k, zgx_script::Value::Nil)));
+        // The sidebar's nesting reads it as `kind` too, and the branch.
+        assert_eq!(kids[1].field("kind").map(crate::auth::text).as_deref(), Some("subagent"));
         assert!(matches!(kids[0].field("kind"), None | Some(zgx_script::Value::Nil)));
         assert_eq!(kids[1].field("branch").map(crate::auth::text).as_deref(), Some("side-work"));
         let p = chat(&v, "p");

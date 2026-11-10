@@ -292,5 +292,5 @@ test("a side chat sent from another computer reads that computer's accounts, not
 	app:frames(30)
 	local row = app:tree("#model-picker-account")
 	expect(row).to_contain("box@example.test")
-	expect(string.find(row, "mine@example.test", 1, true)).to_be(nil)
+	expect((string.find(row, "mine@example.test", 1, true))).to_be(nil)
 end)

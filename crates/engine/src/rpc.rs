@@ -61,6 +61,7 @@
 //! whose checkout always lives on the routed target device.
 
 mod agent_gate;
+mod remote_plugins;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -2489,13 +2490,12 @@ fn forwardable(method: &str) -> bool {
             | methods::DISMISS_HARNESS_UPDATE
             | methods::SET_HARNESS_UPDATE_POLICY
             // Plugins are per device (what it runs, what it allowed): Settings
-            // → Plugins' device switcher lists, declines, turns off, installs
-            // (from a link; it lands waiting there) and removes them on
-            // another of your devices from this one, and allows them: its
-            // consent window asks that device for a review of the plugin
-            // shown (minted there, for this device alone: it names itself,
-            // `zeron_rpc::CALLER_DEVICE_PARAM`) and brings it back with the
-            // Allow.
+            // → Plugins' device switcher lists, reviews, allows, declines,
+            // turns off, installs (from a link, or a file it sends there)
+            // and removes them on another of your devices from this one.
+            // What the consent window sends goes only for this device's app
+            // (`zeron_rpc::app_forward_only`), and there it's held to a
+            // review minted for this device (plugins/reviews.rs).
             | methods::LIST_PLUGINS
             | methods::WATCH_PLUGINS
             | methods::REVIEW_PLUGIN
@@ -2503,6 +2503,7 @@ fn forwardable(method: &str) -> bool {
             | methods::SET_PLUGIN_OFF
             | methods::REMOVE_PLUGIN
             | methods::INSTALL_PLUGIN
+            | methods::STAGE_PLUGIN_PACKAGE
             | methods::CHECK_PLUGIN_UPDATES
             | methods::UPDATE_PLUGIN
             | methods::PLUGIN_STATUS
@@ -2701,6 +2702,61 @@ fn doc_messages_stream(
         },
     )
     .boxed()
+}
+
+/// A slice of the transcript as frames, for a reader that isn't showing the
+/// chat (an agent reading or waiting on it): a `reset` of the slice, then
+/// deltas of the slice, each with its `window` facts.
+async fn windowed_doc_messages_stream(
+    host: crate::doc_host::DocHost,
+    chat_id: String,
+    window: zeron_doc::TranscriptWindow,
+) -> Result<BoxStream<'static, serde_json::Value>, RpcError> {
+    use zeron_doc::transcript_delta::{TranscriptFrame, diff_transcript};
+    // Opening a whale and building its mirror mustn't stall the RPC task.
+    let (rx, doc) = tokio::task::spawn_blocking(move || {
+        let handle = host.open(&chat_id)?;
+        Ok::<_, crate::EngineError>((handle.watch_messages(), handle.doc_arc()))
+    })
+    .await
+    .map_err(|e| RpcError::Failed(e.to_string()))?
+    .map_err(|e| RpcError::Failed(e.to_string()))?;
+    Ok(futures::stream::unfold(
+        (rx, doc, window, None, None, None),
+        |(mut rx, doc, window, mut prev, mut prev_info, mut prev_usage)| async move {
+            loop {
+                let prev_slice: Option<&Vec<zeron_doc::SessionMessageEntry>> = prev.as_ref();
+                if prev_slice.is_some() {
+                    rx.changed().await.ok()?;
+                }
+                let current = rx.borrow_and_update().clone();
+                let (slice, info) = window.apply(&current.entries);
+                let frame = match prev.as_ref() {
+                    None => TranscriptFrame::reset(slice),
+                    Some(prev) => diff_transcript(prev, slice),
+                };
+                let usage = doc.context_usage();
+                let unchanged = frame.is_empty_delta()
+                    && prev_info.as_ref() == Some(&info)
+                    && prev_usage == Some(usage);
+                prev = Some(slice.to_vec());
+                if unchanged {
+                    continue;
+                }
+                let mut value = serde_json::to_value(zeron_doc::TranscriptUpdate {
+                    frame,
+                    context_usage: usage,
+                    replay_baseline: None,
+                })
+                .ok()?;
+                value["window"] = serde_json::to_value(&info).ok()?;
+                prev_info = Some(info);
+                prev_usage = Some(usage);
+                return Some((value, (rx, doc, window, prev, prev_info, prev_usage)));
+            }
+        },
+    )
+    .boxed())
 }
 
 /// First paint reads only the local tail; full history is deferred until the
@@ -2936,18 +2992,6 @@ impl RpcService for EngineRpc {
             && target != self.doc_host.device_id()
         {
             let target = target.to_string();
-            // A review there is bound to who asked for it: this device says
-            // which it is (the edge's verified device wins, when it stamps
-            // one).
-            let mut params = params;
-            if matches!(method, methods::REVIEW_PLUGIN | methods::DECIDE_PLUGIN)
-                && let Some(object) = params.as_object_mut()
-            {
-                object.insert(
-                    zeron_rpc::CALLER_DEVICE_PARAM.into(),
-                    serde_json::json!(self.doc_host.device_id()),
-                );
-            }
             // A file on this device can't be read there: another device
             // installs from a link.
             if method == methods::INSTALL_PLUGIN && params.get("path").is_some_and(|p| !p.is_null()) {
@@ -2955,13 +2999,22 @@ impl RpcService for EngineRpc {
                     "Another device installs a plugin from a link (url), not a file on this one".into(),
                 ));
             }
-            // What only that device's own app may do there (signing,
-            // templates, credentials; the receiving side refuses it too:
-            // `zeron_rpc::peer_refused`).
+            // What only that device may answer for itself (credentials,
+            // signing, templates' consent), refused there too.
             if zeron_rpc::peer_refused(method, &params) {
                 return Err(RpcError::Failed(format!(
                     "{method}: only that device's own window can do that. It's waiting for you there."
                 )));
+            }
+            // A review, an allow and a file sent there are Zeron's consent
+            // window's and Settings → Plugins': this device's app, never an
+            // agent's token (which can't call them here either).
+            if zeron_rpc::app_forward_only(method, &params) {
+                if !zeron_rpc::caller().is_local() {
+                    return Err(crate::plugins::reviews::needed("Allowing a plugin on another device"));
+                }
+                let reply = self.forward(&target, method, params).await;
+                return reply.map_err(|error| remote_plugins::older_engine(&target, method, error));
             }
             // Settings → Providers' Cloud: its logins live in the vault.
             if crate::cloud_accounts::is_cloud_accounts_target(&target)
@@ -3442,7 +3495,18 @@ impl RpcService for EngineRpc {
                     .get("openingTail")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let window = params
+                    .get("window")
+                    .filter(|v| !v.is_null())
+                    .map(|v| serde_json::from_value::<zeron_doc::TranscriptWindow>(v.clone()))
+                    .transpose()
+                    .map_err(|e| RpcError::BadParams(e.to_string()))?;
                 let p: ChatParams = parse_params(params)?;
+                if let Some(window) = window {
+                    return windowed_doc_messages_stream(self.doc_host.clone(), p.chat_id, window)
+                        .await
+                        .map(RpcReply::Stream);
+                }
                 // An open transcript keeps its chat's checkout diff live (and
                 // discardable) even when the chat is archived; the guard lives
                 // exactly as long as the stream.
@@ -6119,14 +6183,6 @@ mod tests {
         assert!(!forwardable(methods::ENGINE_READY));
         // The bearer is for local clients only, never a remote device's ask.
         assert!(!forwardable(methods::ACCESS_TOKEN));
-        // Another device's consent window asks the plugin's device for the
-        // review and brings it back with the Allow; signing and templates
-        // stay this device's.
-        assert!(forwardable(methods::REVIEW_PLUGIN));
-        assert!(forwardable(methods::DECIDE_PLUGIN));
-        assert!(!forwardable(methods::SIGN_PLUGIN));
-        assert!(!forwardable(methods::REVIEW_TEMPLATE));
-        assert!(!forwardable(methods::DECIDE_TEMPLATE));
         assert!(forwardable(methods::QUEUE_COMMAND));
         assert!(forwardable(methods::SEARCH_FILES));
         assert!(forwardable(methods::SEARCH_GIT_HISTORY));

@@ -400,7 +400,7 @@ return function(): Node
 		end,
 		id = "shell",
 		-- The mouse's back and forward buttons, anywhere not taken by a
-		-- node with its own (a trackpad's swipe: the pages').
+		-- node with its own (a session's tab, which hands them on).
 		on_aux_click = route.aux_click,
 		-- The accent chosen (Settings → Appearance, setup's Make it yours), as
 		-- setup's frame wears it, and the interface's text size (ds.look):
@@ -643,13 +643,6 @@ return function(): Node
 						return true
 					end
 					return false
-				end,
-				on_navigate = function(e)
-					if e.direction == "back" then
-						route.back()
-					else
-						route.forward()
-					end
 				end,
 				boundary.screen(boundary.named("shell.boundary.screen.settings"), "@app/screens/shell/settings", function(settings): Node
 					return settings.View()

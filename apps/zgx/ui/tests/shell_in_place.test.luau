@@ -838,6 +838,26 @@ test("the project filter narrows the list to one project, and put away shows the
 	expect(app:state("shell_sidebar_project")).to_be(nil)
 end)
 
+test("a new chat starts in the project the sidebar's filter narrows to, else the one chosen last", function()
+	local app = open()
+	app:set_state("shell_project", "atlas")
+	app:set_state("screens/shell/sidebar.luau::shell_sidebar_show_project_filter", true)
+	app:set_state("screens/shell/sidebar.luau::shell_sidebar_project", "borealis")
+	app:frames(20)
+	app:command("shell.new_chat")
+	app:frames(20)
+	expect(app:state("shell_route_path")).to_be("/")
+	expect(app:state("shell_project")).to_be("borealis")
+
+	-- under "All projects", the last choice stands
+	app:set_state("shell_project", "atlas")
+	app:set_state("screens/shell/sidebar.luau::shell_sidebar_project", nil)
+	app:frames(20)
+	app:command("shell.new_chat")
+	app:frames(20)
+	expect(app:state("shell_project")).to_be("atlas")
+end)
+
 test("New chat, and cmd+n, start in the project the list is narrowed to", function()
 	local app = open()
 	app:set_state("screens/shell/route.luau::shell_project", nil)
