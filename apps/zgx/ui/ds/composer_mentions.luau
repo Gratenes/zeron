@@ -540,6 +540,7 @@ function M.use(opts: Use)
 				sections = ((opts.sections or {}) :: any)["@"] or {},
 				counts = counts,
 				loading = loading,
+				failed = failed,
 				empty = function(which: string, q: string): string
 					return locale.s(
 						if q == "" then `ds.mention_launcher.empty.{which}` else `ds.mention_launcher.none.{which}`,
