@@ -238,10 +238,19 @@ export type CornerProps = {
 
 -- The corner as a row wears it: its state (or time) at rest; under the
 -- pointer, its action, its glyph on the state's own centre; ⌘ held alone,
--- its jump's keys in its place (as Zeron's). The two share one box as wide
--- as the wider (what's at rest stays, unseen, so its width holds): ⌘1 fits
--- where a time stood and nothing moves, and a wider Ctrl+1 widens the
--- corner, the badges before it giving way, never drawn over.
+-- its jump's keys in its place (as Zeron's). All share one box of a fixed
+-- width (`corner_width`), their content to its right, so nothing before it
+-- moves as a time ticks, a state comes, the pointer arrives or ⌘ is held.
+-- One width for every corner, so what sits before it (the fold chevron)
+-- keeps its column on every row and in every state: the widest of a time
+-- ("104w", 26 points at the small size), the archive button (22) and the
+-- jump hint (⌘1; Ctrl+1 on Windows and Linux, about 6.7 a character).
+local CORNER_MIN = 26
+function M.corner_width(): number
+	local hint = math.ceil(6.7 * (utf8.len(ui.shortcut_text("cmd+1")) or 2))
+	return math.max(CORNER_MIN, 22, hint)
+end
+
 function M.Corner(props: CornerProps): Node
 	local hovered = props.hovered
 	local jump = props.jump or function(): number?
@@ -251,7 +260,7 @@ function M.Corner(props: CornerProps): Node
 	return ui.overlay {
 		shrink = 0,
 		relative = true,
-		min_w = 16,
+		w = M.corner_width(),
 		h = 16,
 		items = "end",
 		justify = "center",
