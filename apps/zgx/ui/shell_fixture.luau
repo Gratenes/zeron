@@ -1175,6 +1175,36 @@ ui.command {
 		publish()
 	end,
 }
+-- The sidebar's status items (the subagents pill, the unreachable glyph)
+-- and the fold chevron's column, on rows with and without a chevron (a
+-- side chat): Fix the build has a pill and a chevron; Write the docs a pill,
+-- no chevron; Tidy the tests is on devbox with a chevron, Answer the review
+-- on devbox with none (devbox away with `fixture.devbox_offline`); Ship
+-- the release, on devbox too, has a pill and a chevron (tests/
+-- sidebar_status_column).
+ui.command {
+	id = "status_column",
+	title = "Atlas and Borealis: pills, chevrons and chats on devbox",
+	run = function()
+		for _, c in model.chats do
+			if c.id == "a1" then
+				c.running_subagents = 1
+			elseif c.id == "a2" then
+				c.running_subagents = 1
+			elseif c.id == "a3" then
+				c.device = "box"
+			elseif c.id == "b1" then
+				c.running_subagents = 1
+				c.status = nil
+			end
+		end
+		local function side(parent: string, id: string)
+			return { id = id, parent = parent, kind = "side", title = `Side of {parent}`, device = "mac", updated = NOW - 30, created = NOW - HOUR, agent = "claude" }
+		end
+		;(model :: any).children = { a1 = { side("a1", "s1") }, a3 = { side("a3", "s3") }, b1 = { side("b1", "s4") } }
+		publish()
+	end,
+}
 -- One side chat of Fix the build, hosted on devbox (with
 -- `fixture.devbox_offline`, one that's away): the sidebar's unreachable glyph
 -- on nested side chats (tests/sidebar_unreachable).
