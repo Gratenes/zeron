@@ -1781,6 +1781,33 @@ mod tests {
         assert_eq!(p.field("running_subagents").and_then(|n| n.as_f64()), Some(2.));
     }
 
+    /// A side chat or subagent on a device that has gone quiet (its engine
+    /// heartbeats its live row; none for 45 s) is not working any more: its
+    /// row's status goes, the parent stops counting it, and so does its own
+    /// subagents' count: a "working" left behind by a dead engine doesn't
+    /// show on the parent's pill.
+    #[test]
+    fn a_working_side_chat_on_a_device_gone_quiet_isn_t_counted() {
+        let s = with_children("2099-01-01T00:00:00Z");
+        // (Its live row last updated long ago.)
+        *s.live.borrow_mut() = serde_json::json!([
+            { "chatId": "p", "deviceId": "d", "status": "working", "updatedAt": "2099-01-01T00:00:00Z", "runningSubagents": 2 },
+            { "chatId": "a", "deviceId": "d", "status": "working", "updatedAt": "2001-01-01T00:00:00Z" },
+        ]);
+        let v = s.value();
+        let kids = v.field("children").unwrap().field("p").unwrap().list();
+        let a = kids.iter().find(|c| c.field("id").map(crate::auth::text).as_deref() == Some("a")).unwrap();
+        assert!(matches!(a.field("status"), None | Some(zgx_script::Value::Nil)));
+        assert_eq!(chat(&v, "p").field("working_side_chats").and_then(|n| n.as_f64()), Some(0.));
+        // And the parent's own, gone quiet, counts no subagents.
+        *s.live.borrow_mut() = serde_json::json!([
+            { "chatId": "p", "deviceId": "d", "status": "working", "updatedAt": "2001-01-01T00:00:00Z", "runningSubagents": 2 },
+        ]);
+        let v = s.value();
+        assert_eq!(chat(&v, "p").field("running_subagents").and_then(|n| n.as_f64()), Some(0.));
+        assert!(matches!(chat(&v, "p").field("status"), None | Some(zgx_script::Value::Nil)));
+    }
+
     #[test]
     fn a_chat_s_row_is_built_again_only_as_it_changes() {
         let s = with_children("2099-01-01T00:00:00Z");
