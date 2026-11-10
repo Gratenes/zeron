@@ -59,3 +59,28 @@ test("the chevron stays put as the pointer arrives, and as ⌘ is held", functio
 	expect(chevron(app, "Write the docs")).to_be(x)
 	expect(chevron(app, "Tidy the tests")).to_be(x)
 end)
+
+-- Its time's left edge past the chevron's right edge, on a row, in points:
+-- the line's own gap and no more, at the widest resting time ("104w"); the
+-- jump keys (wider) are drawn over the row and add none.
+local function gap_to_time(app: any, title: string, time: string): number
+	local right = 0
+	local left = 0
+	for line in app:tree(`{SIDE} >> role:button "{title}"`):gmatch("[^\n]+") do
+		local x, w = line:match(" (%-?%d+),%-?%d+ (%d+)x%d+")
+		if line:find('button "Show side chats"', 1, true) then
+			right = tonumber(x) + tonumber(w)
+		elseif line:find(` text "{time}"`, 1, true) then
+			left = tonumber(x) :: number
+		end
+	end
+	return left - right
+end
+
+test("the corner takes the room of its widest resting time, no more: the gap past the chevron is the line's own", function()
+	local app = open()
+	expect(gap_to_time(app, "Tidy the tests", "104w") <= 8).to_be(true)
+	app:set_state("shell_jump_hints", true)
+	app:frames(4)
+	expect(gap_to_time(app, "Tidy the tests", "104w") <= 8).to_be(true)
+end)
