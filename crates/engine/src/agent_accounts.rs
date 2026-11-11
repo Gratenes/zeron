@@ -110,6 +110,7 @@ pub struct RelayedCallback {
 }
 
 mod muse;
+mod identity;
 mod logins;
 mod pins;
 mod oauth;
@@ -120,6 +121,7 @@ mod proxy;
 pub use muse::MuseRunEnvironment;
 mod rotation;
 pub use pins::{ChatPin, PinHook, PinRunEnvironment};
+#[cfg(test)]
 pub(crate) use rotation::LIVE as LIVE_CREDENTIAL;
 pub use rotation::{
     AccountsRunEnvironment, Lease, RotationMechanism, default_rotation_mechanism,
@@ -804,6 +806,8 @@ struct Inner {
     /// (commonly single-use) refresh token would revoke the family.
     inflight_refreshes: Mutex<std::collections::HashSet<String>>,
     claude_credentials: Mutex<Option<CachedClaudeCredentials>>,
+    /// What the last look at the live Claude login found (see [`identity`]).
+    claude_live: Mutex<identity::LiveClaude>,
     /// Callback ports of logins run for another device (see module docs).
     callback_routes: zeron_preview::login::CallbackRoutes,
     /// Who an opaque live token belongs to (Pi's Claude login, a Copilot
@@ -922,6 +926,7 @@ impl AgentAccounts {
                 inflight_probes: Mutex::new(std::collections::HashSet::new()),
                 inflight_refreshes: Mutex::new(std::collections::HashSet::new()),
                 claude_credentials: Mutex::new(None),
+                claude_live: Mutex::new(identity::LiveClaude::default()),
                 callback_routes,
                 identities: Mutex::new(HashMap::new()),
                 cli_overrides: Mutex::new(HashMap::new()),
@@ -1052,9 +1057,9 @@ impl AgentAccounts {
         // (signed in by a terminal, say, after it had a folder) never does.
         self.migrate_login_dirs(live_claude.as_deref());
         if let Some(key) = &live_claude {
-            self.retire_login_dir(&slot_id_for(HarnessId::ClaudeCode, key), true, "is the live login")
-                .await;
+            self.retire_live_login_dir(key).await;
         }
+        warnings.extend(self.duplicate_login_warnings());
         self.migrate_codex_slot_keys()?;
         if let Some(detected) = self.detect_codex() {
             live(HarnessId::Codex, &detected);
@@ -1444,8 +1449,9 @@ impl AgentAccounts {
         write_file_atomic(&self.inner.config.codex_auth_file(), json.as_bytes(), true)
     }
 
-    /// The live login's account key, from the identity alone (no secret read
-    /// for Claude). `store_key` names the entry for agents that keep one
+    /// The live login's account key, from the identity (for Claude, checked
+    /// against the secret it sits beside). `store_key` names the entry for
+    /// agents that keep one
     /// login per model provider (OpenCode, Pi); an entry that is there but
     /// can't be identified has no key.
     async fn live_account_key(
@@ -1457,7 +1463,17 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => {
                 let cfg = read_json(&self.inner.config.claude_config_file)?;
                 let oauth = cfg.get("oauthAccount")?;
-                str_field(oauth, "accountUuid").or_else(|| str_field(oauth, "emailAddress"))
+                let claimed =
+                    str_field(oauth, "accountUuid").or_else(|| str_field(oauth, "emailAddress"));
+                // The file's claim stands only beside the secret it was
+                // paired with (see [`identity`]).
+                let (creds, warning) = self
+                    .read_claude_credentials_cached(claimed.as_deref().unwrap_or_default())
+                    .await;
+                match creds.filter(|_| warning.is_none()) {
+                    Some(creds) => self.live_claude_key_for(&creds, claimed),
+                    None => claimed,
+                }
             }
             HarnessId::Codex => self.detect_codex().map(|d| d.account_key),
             HarnessId::Cursor => self.detect_cursor().map(|d| d.account_key),
@@ -2850,19 +2866,27 @@ impl AgentAccounts {
 
     async fn detect_claude(&self) -> (Option<Detected>, Option<String>) {
         let cfg = read_json(&self.inner.config.claude_config_file);
-        let Some(oauth) = cfg.as_ref().and_then(|c| c.get("oauthAccount")).cloned() else {
+        let Some(claimed) = cfg.as_ref().and_then(|c| c.get("oauthAccount")).cloned() else {
             return (None, None);
         };
-        let Some(email) = str_field(&oauth, "emailAddress") else {
+        let Some(claimed_email) = str_field(&claimed, "emailAddress") else {
             return (None, None);
         };
-        let account_key = str_field(&oauth, "accountUuid").unwrap_or_else(|| email.clone());
-        let (credentials, warning) = self.read_claude_credentials_cached(&account_key).await;
+        let claimed_key =
+            str_field(&claimed, "accountUuid").unwrap_or_else(|| claimed_email.clone());
+        let (credentials, warning) = self.read_claude_credentials_cached(&claimed_key).await;
         // A read that came with a warning (the Keychain refused or didn't
         // answer) fell back to the credentials file, which may be days stale:
         // never snapshot it as this account's login — switching back to it
         // would install a spent refresh token. The row stays, unswitchable.
         let credentials = credentials.filter(|_| warning.is_none());
+        // The identity file is written by every chat's CLI, not only by a
+        // sign-in: the secret decides whose login this is (see [`identity`]).
+        let oauth = self.settle_claude_identity(claimed, credentials.as_ref());
+        let Some(email) = str_field(&oauth, "emailAddress") else {
+            return (None, None);
+        };
+        let account_key = str_field(&oauth, "accountUuid").unwrap_or_else(|| email.clone());
         let user_id = cfg.as_ref().and_then(|c| c.get("userID")).cloned();
         let mut claude_config = serde_json::json!({ "oauthAccount": oauth });
         if let (Some(uid), Some(map)) = (user_id, claude_config.as_object_mut())
@@ -2956,6 +2980,12 @@ impl AgentAccounts {
             return Ok(());
         };
         let id = slot_id_for(harness, &d.account_key);
+        // Another saved account already holds this very login: it is not
+        // this one's (see [`identity`]), and saving it would overwrite
+        // this account's own refresh token.
+        if harness == HarnessId::ClaudeCode && !self.claude_live_may_be_saved(&id, credentials) {
+            return Ok(());
+        }
         if harness == HarnessId::ClaudeCode
             && let Some(existing) = self.read_slot(harness, &id)
             && claude_login_is_older(credentials, &existing.credentials)
@@ -3570,17 +3600,24 @@ impl AgentAccounts {
         if cfg.is_none() && file.exists() {
             return false;
         }
-        let live_key = cfg.as_ref().and_then(|cfg| {
+        let claimed = cfg.as_ref().and_then(|cfg| {
             let oauth = cfg.get("oauthAccount")?;
             str_field(oauth, "accountUuid").or_else(|| str_field(oauth, "emailAddress"))
         });
-        if live_key.as_deref() == Some(slot.account_key.as_str()) {
-            return false;
-        }
         let (live, warning) = self
-            .read_claude_credentials_cached(live_key.as_deref().unwrap_or_default())
+            .read_claude_credentials_cached(claimed.as_deref().unwrap_or_default())
             .await;
         if live.is_none() && warning.is_some() {
+            return false;
+        }
+        // Whose login the live secret is, not whom the identity file names
+        // (see [`identity`]): refreshing the live account's token under its
+        // CLI would revoke it.
+        let live_key = match &live {
+            Some(creds) => self.live_claude_key_for(creds, claimed),
+            None => claimed,
+        };
+        if live_key.as_deref() == Some(slot.account_key.as_str()) {
             return false;
         }
         let refresh = |creds: &serde_json::Value| {

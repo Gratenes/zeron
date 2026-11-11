@@ -3888,23 +3888,30 @@ const AUTH_RELAUNCH_PROMPT: &str = "Your Claude sign-in was refused part-way thr
     renewed. Carry on with what you were doing.";
 
 /// Whether a run that just ended with an error is owed the one relaunch:
-/// it was a Claude run on an account of its own (rotated or pinned: a login
-/// the CLI holds apart from the live one, which can be refreshed under it),
-/// and its login was refused (`authentication_failed`).
-fn auth_relaunch_due(
-    harness: HarnessId,
-    credential: Option<&str>,
-    saw_auth_error: bool,
-    done_error: Option<&str>,
-) -> bool {
+/// it was a Claude run, and its login was refused (`authentication_failed`).
+/// That holds for a run on an account of its own (a login the CLI keeps
+/// apart from the live one, whose folder can go or whose token can be
+/// refreshed under it) and for a run on the live login too: its CLI holds
+/// the token it started with, which another CLI's refresh of the single-use
+/// refresh token, or a re-login, leaves refused; a relaunch reads the login
+/// as it is now. A login that is dead for good is refused again and the turn
+/// ends with that error: the relaunch is once.
+fn auth_relaunch_due(harness: HarnessId, saw_auth_error: bool, done_error: Option<&str>) -> bool {
     use zeron_proto::run_errors::{ProviderProblem, provider_problem};
     harness == HarnessId::ClaudeCode
-        && credential.is_some_and(|c| {
-            let live = crate::agent_accounts::LIVE_CREDENTIAL;
-            c != live && !c.ends_with(&format!(":{live}"))
-        })
         && (saw_auth_error
             || done_error.and_then(provider_problem) == Some(ProviderProblem::SignedOut))
+}
+
+/// The user entry a run's turn answers, when the run was started parked
+/// (idle): it carries no message of its own, and what it was last asked is
+/// the transcript's latest user entry.
+fn latest_user_entry_id(entries: &[zeron_doc::SessionMessageEntry]) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .find(|entry| entry.role == MessageRole::User)
+        .map(|entry| entry.id.clone())
 }
 
 /// Resume bookkeeping for one run task: which user entry the run answers (so
@@ -5337,22 +5344,22 @@ async fn drive_run(
         // moved): relaunch it ONCE on the credential a run would get now,
         // resumed, and carry on. See `auth_relaunch_due`.
         if !resume_state.startup_retry
-            && !resume_state.idle
             && !interrupted
             && let AgentEvent::Done {
                 status: DoneStatus::Errored,
                 error,
                 ..
             } = &event
+            && auth_relaunch_due(harness_id, saw_auth_error, error.as_deref())
             && let started_with = inner.run_credential(&chat_id)
-            && auth_relaunch_due(harness_id, started_with.as_deref(), saw_auth_error, error.as_deref())
             && let Some(mut retry) = retry_request.take()
         {
             // The run's first prompt is only still the right one while its
             // first turn is what failed, before it said anything; after
             // that (a later turn, a wake turn, work already done) the
-            // session carries on from where it was.
-            if dones_seen > 0 || self_continued_turn || !folded.is_empty() {
+            // session carries on from where it was. A run started parked
+            // (idle) has no first prompt at all.
+            if resume_state.idle || dones_seen > 0 || self_continued_turn || !folded.is_empty() {
                 retry.prompt = AUTH_RELAUNCH_PROMPT.into();
             }
             tracing::warn!(chat = %chat_id, credential = ?started_with,
@@ -5360,8 +5367,16 @@ async fn drive_run(
             inner.remove_run(&chat_id, &run_id);
             let engine = SessionsEngine { inner: inner.clone() };
             let chat = chat_id.clone();
-            let message_id = resume_state.user_message_id.clone();
-            let stops_seen = resume_state.stops_seen;
+            let message_id = if resume_state.idle {
+                latest_user_entry_id(&doc.read_entries().unwrap_or_default())
+                    .unwrap_or_else(|| resume_state.user_message_id.clone())
+            } else {
+                resume_state.user_message_id.clone()
+            };
+            // A Stop the user made since this run STARTED (an earlier turn's,
+            // in a run that goes on across turns) is not one of this
+            // relaunch: only a Stop from here on abandons it.
+            let stops_seen = inner.user_stop_count(&chat_id);
             tokio::spawn(async move {
                 if let Err(err) = engine
                     .dispatch_with(&chat, harness_id, retry, Some(message_id), true, 0, Some(stops_seen))
@@ -6442,6 +6457,8 @@ mod tests {
     /// not hold the `runs` lock, or the run task deadlocks on itself.
     struct RefusedLoginFixture {
         runs: Arc<std::sync::atomic::AtomicUsize>,
+        /// How long its first run takes to be refused.
+        delay_ms: u64,
     }
     #[async_trait::async_trait]
     impl zeron_harness::Harness for RefusedLoginFixture {
@@ -6501,13 +6518,20 @@ mod tests {
                     session_id: None,
                 }]
             };
-            Ok(futures::stream::iter(std::iter::once(started).chain(rest).map(Ok))
+            let delay = std::time::Duration::from_millis(if attempt == 0 { self.delay_ms } else { 0 });
+            let rest = futures::stream::iter(rest).then(move |event| async move {
+                tokio::time::sleep(delay).await;
+                Ok(event)
+            });
+            Ok(futures::stream::iter([Ok(started)])
+                .chain(rest)
                 .chain(futures::stream::pending())
                 .boxed())
         }
     }
 
-    struct OwnLoginEnvironment;
+    /// Runs on the credential it names.
+    struct OwnLoginEnvironment(&'static str);
     #[async_trait::async_trait]
     impl crate::registry::RunEnvironment for OwnLoginEnvironment {
         async fn prepare(
@@ -6519,12 +6543,19 @@ mod tests {
             Ok(())
         }
         async fn credential(&self, _harness: HarnessId, _chat_id: Option<&str>) -> Option<String> {
-            Some("login:abc".into())
+            Some(self.0.into())
         }
     }
 
-    #[test]
-    fn a_refused_login_relaunch_does_not_deadlock_on_the_runs_lock() {
+    /// Dispatches a run whose login is refused after `delay_ms`; with
+    /// `stop_after_ms`, the user's Stop count rises that long into it (an
+    /// earlier turn's Stop, in a run that goes on across turns). Whether the
+    /// run was relaunched.
+    fn refused_run_is_relaunched(
+        credential: &'static str,
+        delay_ms: u64,
+        stop_after_ms: Option<u64>,
+    ) -> bool {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -6535,8 +6566,8 @@ mod tests {
         let relaunched = runtime.block_on(async move {
             let temp = tempfile::tempdir().unwrap();
             let registry = crate::HarnessRegistry::new();
-            registry.register(Arc::new(RefusedLoginFixture { runs }));
-            registry.set_run_environment(Arc::new(OwnLoginEnvironment));
+            registry.register(Arc::new(RefusedLoginFixture { runs, delay_ms }));
+            registry.set_run_environment(Arc::new(OwnLoginEnvironment(credential)));
             let core = crate::EngineCore::assemble_with_profile(
                 crate::EngineProfile::local(temp.path()).unwrap(),
                 Arc::new(registry),
@@ -6551,18 +6582,43 @@ mod tests {
                 .dispatch("c1", HarnessId::ClaudeCode, request(), None)
                 .await
                 .unwrap();
-            let ok = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            if let Some(after) = stop_after_ms {
+                tokio::time::sleep(std::time::Duration::from_millis(after)).await;
+                core.sessions.note_user_stop("c1");
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 while seen.load(std::sync::atomic::Ordering::SeqCst) < 2 {
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
             })
             .await
-            .is_ok();
-            ok
+            .is_ok()
         });
         // A deadlocked run task would block runtime teardown too.
         runtime.shutdown_background();
-        assert!(relaunched, "the refused login was never relaunched: the run task is wedged");
+        relaunched
+    }
+
+    #[test]
+    fn a_refused_login_relaunch_does_not_deadlock_on_the_runs_lock() {
+        assert!(
+            refused_run_is_relaunched("login:abc", 0, None),
+            "the refused login was never relaunched: the run task is wedged"
+        );
+    }
+
+    #[test]
+    fn a_refused_run_on_the_live_login_is_relaunched_too() {
+        assert!(refused_run_is_relaunched(crate::agent_accounts::LIVE_CREDENTIAL, 0, None));
+    }
+
+    #[test]
+    fn a_stop_made_since_the_run_started_does_not_abandon_its_login_relaunch() {
+        // The Stop is an earlier turn's; this turn's login is refused after.
+        assert!(
+            refused_run_is_relaunched("login:abc", 600, Some(150)),
+            "the relaunch was abandoned over a Stop the user made before the refusal"
+        );
     }
 
     #[tokio::test]
@@ -7064,19 +7120,41 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_login_relaunches_only_runs_on_an_account_of_their_own() {
+    fn a_refused_claude_login_is_relaunched_once_whatever_credential_it_ran_on() {
         let refused = "Authentication failed — sign in to Claude again.";
-        // A rotated or pinned Claude run whose login was refused: once.
-        assert!(auth_relaunch_due(HarnessId::ClaudeCode, Some("login:abc"), true, None));
-        assert!(auth_relaunch_due(HarnessId::ClaudeCode, Some("rotation:abc:1f2e"), false, Some(refused)));
-        // The live login, a run with no known credential, another provider,
-        // or an error that isn't a refused login: never.
-        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, Some("live"), true, Some(refused)));
-        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, Some("rotation:abc:live"), true, Some(refused)));
-        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, None, true, Some(refused)));
-        assert!(!auth_relaunch_due(HarnessId::Codex, Some("login:abc"), true, Some(refused)));
-        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, Some("login:abc"), false, Some("Claude usage limit reached")));
-        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, Some("login:abc"), false, None));
+        // A Claude run whose login was refused: once (the live login and the
+        // accounts of their own alike).
+        assert!(auth_relaunch_due(HarnessId::ClaudeCode, true, None));
+        assert!(auth_relaunch_due(HarnessId::ClaudeCode, false, Some(refused)));
+        // Another provider, or an error that isn't a refused login: never.
+        assert!(!auth_relaunch_due(HarnessId::Codex, true, Some(refused)));
+        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, false, Some("Claude usage limit reached")));
+        assert!(!auth_relaunch_due(HarnessId::ClaudeCode, false, None));
+    }
+
+    #[test]
+    fn a_parked_run_relaunches_on_the_message_it_was_last_asked() {
+        let entry = |id: &str, role: MessageRole, text: &str| SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![MessagePart::Text {
+                id: "t0".into(),
+                text: text.into(),
+            }],
+            created_at: 0,
+            device_id: "d".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let entries = [
+            entry("u1", MessageRole::User, "first"),
+            entry("a1", MessageRole::Assistant, "done"),
+            entry("u2", MessageRole::User, "the one that was refused"),
+            entry("a2", MessageRole::Assistant, ""),
+        ];
+        assert_eq!(latest_user_entry_id(&entries).as_deref(), Some("u2"));
+        assert_eq!(latest_user_entry_id(&[]), None);
     }
 
     #[test]
