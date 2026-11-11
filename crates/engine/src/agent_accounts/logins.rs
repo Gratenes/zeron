@@ -80,18 +80,18 @@ pub(crate) fn claude_mechanism() -> &'static str {
     }
 }
 
-fn oauth(credentials: &Value) -> Option<&Value> {
+pub(super) fn oauth(credentials: &Value) -> Option<&Value> {
     credentials.get("claudeAiOauth")
 }
 
-fn expires_at(credentials: &Value) -> Option<i64> {
+pub(super) fn expires_at(credentials: &Value) -> Option<i64> {
     oauth(credentials)?
         .get("expiresAt")
         .and_then(Value::as_i64)
         .filter(|ms| *ms > 0)
 }
 
-fn refresh_token(credentials: &Value) -> Option<String> {
+pub(super) fn refresh_token(credentials: &Value) -> Option<String> {
     str_field(oauth(credentials)?, "refreshToken")
 }
 
@@ -105,7 +105,7 @@ impl AgentAccounts {
     }
 
     /// What the folder holds now (`None`: no folder, or the CLI wiped it).
-    fn read_login(&self, slot_id: &str) -> Option<Value> {
+    pub(super) fn read_login(&self, slot_id: &str) -> Option<Value> {
         let creds = read_json(&self.login_file(slot_id))?;
         (oauth(&creds).is_some_and(|o| str_field(o, "accessToken").is_some())).then_some(creds)
     }
