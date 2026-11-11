@@ -4,8 +4,14 @@
 //! - A chat it creates never runs with more access than its own: the new
 //!   chat's sandbox and access mode are capped at the creating chat's,
 //!   silently (Zeron's MCP tool says so in its reply). Cloud children too.
-//! - Of `Mutate`, only what its tools do: create, rename and archive chats.
+//! - Of `Mutate`, only what its tools do: create, rename and archive chats,
+//!   and schedule messages (below).
 //!   Never `setChatConfig` (raising a chat's access) or deleting.
+//! - It may schedule a message into any chat it could message now (the
+//!   message carries Zeron's "scheduled" header naming the scheduling chat,
+//!   built when it's sent, so it can't claim another), and cancel the
+//!   schedules it made or that go into its own chat. At most
+//!   [`MAX_PENDING_PER_AGENT`] pending at once, so a loop can't flood.
 //! - A run it starts in a chat runs as that chat is set (its harness,
 //!   sandbox, access, plan mode and folder), never as the request says.
 //! - Approving a question another chat asks (an approval to run a command,
@@ -25,6 +31,9 @@ use zeron_proto::{AccessMode, Chat, SandboxLevel, agent_messages, cap_access};
 use zeron_rpc::{Caller, RpcError, methods};
 
 use super::EngineRpc;
+
+/// The pending schedules one chat's agent may have at once.
+pub(super) const MAX_PENDING_PER_AGENT: usize = 50;
 
 /// The calling chat, as the engine knows it.
 pub(super) struct Calling {
@@ -115,8 +124,40 @@ impl EngineRpc {
                     Ok(params)
                 }
                 "renameChat" | "setChatArchived" | "markChatSeen" => Ok(params),
+                // Who set it is the calling chat, whatever the request says
+                // (no calling chat: nobody an agent could name).
+                "createSchedule" => {
+                    let schedules = self.workspace.read_schedules();
+                    if let Some(me) = calling.as_ref() {
+                        let mine = schedules
+                            .iter()
+                            .filter(|s| s.is_pending() && s.created_by.as_deref() == Some(me.id.as_str()))
+                            .count();
+                        if mine >= MAX_PENDING_PER_AGENT {
+                            return Err(refused(format!(
+                                "This chat already has {MAX_PENDING_PER_AGENT} scheduled messages pending: cancel one first"
+                            )));
+                        }
+                    }
+                    params["createdBy"] = calling.as_ref().map_or(Value::Null, |c| json!(c.id));
+                    Ok(params)
+                }
+                "cancelSchedule" => {
+                    let id = params["scheduleId"].as_str().unwrap_or_default();
+                    let schedule = self.workspace.read_schedules().into_iter().find(|s| s.id == id);
+                    let allowed = match (calling.as_ref(), schedule) {
+                        (Some(me), Some(s)) => s.created_by.as_deref() == Some(me.id.as_str()) || s.chat_id == me.id,
+                        _ => false,
+                    };
+                    if !allowed {
+                        return Err(refused(
+                            "An agent can only cancel a scheduled message it set, or one going into its own chat",
+                        ));
+                    }
+                    Ok(params)
+                }
                 op => Err(refused(format!(
-                    "An agent can't {op}: only create, rename or archive chats (the person changes the rest in Zeron)"
+                    "An agent can't {op}: only create, rename or archive chats, and schedule messages (the person changes the rest in Zeron)"
                 ))),
             },
             methods::QUEUE_MESSAGE => {
@@ -424,6 +465,111 @@ mod tests {
         })
         .await;
         assert!(sleep.is_err(), "sleep is the person's to set");
+        core.sessions.shutdown().await;
+    }
+
+    async fn schedule_of(core: &crate::EngineCore, caller: Caller, chat: &str, forged_by: Option<&str>) -> Result<Value, zeron_rpc::RpcError> {
+        let rpc = core.rpc_service();
+        let fire_at = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        let mut params = json!({"op":"createSchedule", "chatId":chat, "text":"ping", "fireAt":fire_at});
+        if let Some(by) = forged_by {
+            params["createdBy"] = json!(by);
+        }
+        let gated = with_caller(caller, async { rpc.agent_gate(methods::MUTATE, params) }).await?;
+        let reply = rpc.handle(methods::MUTATE, gated).await?;
+        match reply {
+            zeron_rpc::RpcReply::Value(v) => Ok(v),
+            _ => unreachable!(),
+        }
+    }
+
+    /// An agent schedules into any chat it could message, as itself: who set
+    /// it is the calling chat whatever the request says, and with no calling
+    /// chat nobody an agent could name. The person's own are theirs.
+    #[tokio::test]
+    async fn an_agent_schedules_as_itself_into_chats_it_can_message() {
+        let (_temp, core) = core().await;
+        chat(&core, "mine", "Mine", "workspace-write", "supervised").await;
+        chat(&core, "other", "Other", "workspace-write", "supervised").await;
+        let own = schedule_of(&core, agent("mine"), "mine", Some("other")).await.unwrap();
+        assert_eq!(own["schedule"]["createdBy"], "mine", "a forged setter is replaced");
+        let elsewhere = schedule_of(&core, agent("mine"), "other", None).await.unwrap();
+        assert_eq!(elsewhere["schedule"]["chatId"], "other");
+        assert_eq!(elsewhere["schedule"]["createdBy"], "mine");
+        let nameless = schedule_of(&core, Caller::Agent { chat: None }, "other", Some("mine")).await.unwrap();
+        assert!(nameless["schedule"].get("createdBy").is_none(), "{nameless}");
+        let person = schedule_of(&core, Caller::Local, "other", None).await.unwrap();
+        assert!(person["schedule"].get("createdBy").is_none());
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_agent_cancels_only_what_it_set_or_what_goes_into_its_own_chat() {
+        let (_temp, core) = core().await;
+        chat(&core, "mine", "Mine", "workspace-write", "supervised").await;
+        chat(&core, "other", "Other", "workspace-write", "supervised").await;
+        let rpc = core.rpc_service();
+        let cancel = |caller: Caller, id: String| {
+            let rpc = rpc.clone();
+            async move {
+                with_caller(caller, async { rpc.agent_gate(methods::MUTATE, json!({"op":"cancelSchedule", "scheduleId": id})) }).await
+            }
+        };
+        let id = |v: &Value| v["schedule"]["id"].as_str().unwrap().to_owned();
+        let by_me_elsewhere = id(&schedule_of(&core, agent("mine"), "other", None).await.unwrap());
+        let by_other_into_mine = id(&schedule_of(&core, agent("other"), "mine", None).await.unwrap());
+        let by_other_into_other = id(&schedule_of(&core, agent("other"), "other", None).await.unwrap());
+        let by_person = id(&schedule_of(&core, Caller::Local, "other", None).await.unwrap());
+
+        cancel(agent("mine"), by_me_elsewhere).await.unwrap();
+        cancel(agent("mine"), by_other_into_mine).await.unwrap();
+        assert!(cancel(agent("mine"), by_other_into_other.clone()).await.is_err(), "someone else's, into someone else's");
+        assert!(cancel(agent("mine"), by_person.clone()).await.is_err(), "the person's");
+        assert!(cancel(Caller::Agent { chat: None }, by_other_into_other).await.is_err());
+        assert!(cancel(agent("mine"), "no-such".into()).await.is_err());
+        cancel(Caller::Local, by_person).await.unwrap();
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_flood_with_schedules_and_bad_ones_are_refused() {
+        let (_temp, core) = core().await;
+        chat(&core, "mine", "Mine", "workspace-write", "supervised").await;
+        for _ in 0..super::MAX_PENDING_PER_AGENT {
+            schedule_of(&core, agent("mine"), "mine", None).await.unwrap();
+        }
+        assert!(schedule_of(&core, agent("mine"), "mine", None).await.is_err(), "over the cap");
+        // The cap is per chat: the person and other chats still can.
+        schedule_of(&core, Caller::Local, "mine", None).await.unwrap();
+
+        let rpc = core.rpc_service();
+        let now = chrono::Utc::now().timestamp_millis();
+        for bad in [
+            json!({"op":"createSchedule", "chatId":"mine", "text":"  ", "fireAt": now + 60_000}),
+            json!({"op":"createSchedule", "chatId":"mine", "text":"late", "fireAt": now - 3_600_000}),
+            json!({"op":"createSchedule", "chatId":"nobody", "text":"x", "fireAt": now + 60_000}),
+        ] {
+            assert!(rpc.handle(methods::MUTATE, bad).await.is_err());
+        }
+        core.sessions.shutdown().await;
+    }
+
+    /// What an agent's `list_schedules` reads: the engine's own stream, as
+    /// the proto rows (times as RFC 3339), open to agents.
+    #[tokio::test]
+    async fn schedules_are_watchable_by_agents_as_proto_rows() {
+        let (_temp, core) = core().await;
+        chat(&core, "mine", "Mine", "workspace-write", "supervised").await;
+        schedule_of(&core, agent("mine"), "mine", None).await.unwrap();
+        assert!(zeron_rpc::agent_allowed(methods::WATCH_SCHEDULES));
+        let rpc = core.rpc_service();
+        let zeron_rpc::RpcReply::Stream(mut rows) = rpc.handle(methods::WATCH_SCHEDULES, json!({})).await.unwrap() else {
+            panic!("a stream")
+        };
+        use futures::StreamExt as _;
+        let first = rows.next().await.unwrap();
+        let parsed: Vec<zeron_proto::Schedule> = serde_json::from_value(first).unwrap();
+        assert_eq!((parsed.len(), parsed[0].created_by.as_deref()), (1, Some("mine")));
         core.sessions.shutdown().await;
     }
 }

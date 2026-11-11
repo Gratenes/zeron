@@ -322,6 +322,11 @@ impl Zeron {
         self.snapshot_as(methods::WATCH_CHATS, json!({})).await
     }
 
+    /// Every scheduled message, soonest due first.
+    pub async fn schedules(&self) -> anyhow::Result<Vec<zeron_proto::Schedule>> {
+        self.snapshot_as(methods::WATCH_SCHEDULES, json!({})).await
+    }
+
     pub async fn sessions(&self) -> anyhow::Result<Vec<Session>> {
         self.snapshot_as(methods::WATCH_SESSIONS, json!({})).await
     }

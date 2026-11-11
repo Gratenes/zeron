@@ -2547,3 +2547,65 @@ fn a_wait_replicates_and_an_unreadable_one_costs_only_the_wait() {
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].waiting, None);
 }
+
+fn schedule(id: &str, chat: &str, fire_ms: i64) -> zeron_proto::Schedule {
+    zeron_proto::Schedule {
+        id: id.into(),
+        chat_id: chat.into(),
+        text: "check the deploy".into(),
+        fire_at: ts(fire_ms),
+        created_by: Some("other".into()),
+        created_at: ts(1_000),
+        fired_at: None,
+        cancelled_at: None,
+        missed_at: None,
+    }
+}
+
+#[test]
+fn a_schedule_is_created_read_and_settled_once() {
+    use zeron_proto::ScheduleState;
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.create_schedule(&schedule("s2", "c", 9_000)).unwrap();
+    ws.create_schedule(&schedule("s1", "c", 5_000)).unwrap();
+    let all = ws.read_schedules();
+    assert_eq!(all.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s1", "s2"], "soonest first");
+    assert_eq!(all[0], schedule("s1", "c", 5_000));
+
+    assert!(ws.fire_schedule("s1", ts(5_100)).unwrap());
+    assert!(!ws.fire_schedule("s1", ts(5_200)).unwrap(), "fires once");
+    assert!(!ws.cancel_schedule("s1", ts(5_300)).unwrap(), "too late to cancel");
+    assert!(!ws.miss_schedule("s1", ts(5_300)).unwrap());
+    assert_eq!(ws.schedule("s1").unwrap().state(), ScheduleState::Fired);
+
+    assert!(ws.cancel_schedule("s2", ts(2_000)).unwrap());
+    assert!(!ws.fire_schedule("s2", ts(9_000)).unwrap(), "a cancelled one never fires");
+    assert_eq!(ws.schedule("s2").unwrap().state(), ScheduleState::Cancelled);
+
+    ws.create_schedule(&schedule("s3", "c", 100)).unwrap();
+    assert!(ws.miss_schedule("s3", ts(999_999)).unwrap());
+    assert!(!ws.fire_schedule("s3", ts(1_000_000)).unwrap());
+    assert_eq!(ws.schedule("s3").unwrap().state(), ScheduleState::Missed);
+    assert!(!ws.cancel_schedule("nope", ts(1)).unwrap());
+}
+
+#[test]
+fn a_schedule_replicates_and_a_cancel_and_a_fire_read_as_a_cancel() {
+    use zeron_proto::ScheduleState;
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    viewer.create_schedule(&schedule("s", "c", 9_000)).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert_eq!(host.schedule("s").unwrap(), schedule("s", "c", 9_000));
+    // Both devices settle it before they hear from each other.
+    assert!(host.fire_schedule("s", ts(9_000)).unwrap());
+    assert!(viewer.cancel_schedule("s", ts(8_000)).unwrap());
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    for doc in [&host, &viewer] {
+        let s = doc.schedule("s").unwrap();
+        assert_eq!((s.fired_at, s.cancelled_at), (Some(ts(9_000)), Some(ts(8_000))));
+        assert_eq!(s.state(), ScheduleState::Cancelled);
+    }
+}

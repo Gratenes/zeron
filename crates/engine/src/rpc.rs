@@ -830,6 +830,20 @@ enum MutateParams {
         #[serde(default)]
         at: Option<i64>,
     },
+    /// Schedule `text` into `chat_id` at `fireAt` (epoch ms). `createdBy`
+    /// names the scheduling chat (the agent gate pins it to the caller's own;
+    /// absent: the person). Reply: the schedule.
+    #[serde(rename_all = "camelCase")]
+    CreateSchedule {
+        chat_id: String,
+        text: String,
+        fire_at: i64,
+        #[serde(default)]
+        created_by: Option<String>,
+    },
+    /// Cancel a pending schedule. Reply `{ cancelled }`.
+    #[serde(rename_all = "camelCase")]
+    CancelSchedule { schedule_id: String },
     /// The person puts a chat to sleep until `until` (epoch ms), or wakes it
     /// (`until` absent). Synced; its host wakes it early when it asks.
     #[serde(rename_all = "camelCase")]
@@ -839,6 +853,10 @@ enum MutateParams {
         until: Option<i64>,
     },
 }
+
+/// The most text a scheduled message holds (its registry row is one op, and
+/// an op has a 16 KiB budget).
+const MAX_SCHEDULED_TEXT: usize = 8 * 1024;
 
 #[derive(Clone)]
 pub struct EngineRpc {
@@ -1919,6 +1937,40 @@ impl EngineRpc {
             .ok_or(VoiceRejection::Unsupported)
     }
 
+    /// `CreateSchedule` and `CancelSchedule`: a schedule's text and time are
+    /// checked here, whoever asks (the agent gate has already pinned who set
+    /// it and what an agent may cancel).
+    fn mutate_schedule(&self, params: MutateParams) -> Result<RpcReply, RpcError> {
+        let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
+        match params {
+            MutateParams::CreateSchedule { chat_id, text, fire_at, created_by } => {
+                if text.trim().is_empty() {
+                    return Err(RpcError::BadParams("a scheduled message needs text".into()));
+                }
+                if text.len() > MAX_SCHEDULED_TEXT {
+                    return Err(RpcError::BadParams(format!(
+                        "a scheduled message is at most {MAX_SCHEDULED_TEXT} bytes"
+                    )));
+                }
+                let fire_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(fire_at)
+                    .ok_or_else(|| RpcError::BadParams("fireAt is no time".into()))?;
+                if fire_at < chrono::Utc::now() - chrono::Duration::seconds(60) {
+                    return Err(RpcError::BadParams("that time has already passed".into()));
+                }
+                let schedule = self
+                    .workspace
+                    .create_schedule(&chat_id, &text, fire_at, created_by.as_deref())
+                    .map_err(failed)?;
+                RpcReply::value(&serde_json::json!({ "ok": true, "schedule": schedule }))
+            }
+            MutateParams::CancelSchedule { schedule_id } => {
+                let cancelled = self.workspace.cancel_schedule(&schedule_id).map_err(failed)?;
+                RpcReply::value(&serde_json::json!({ "ok": true, "cancelled": cancelled }))
+            }
+            _ => Err(RpcError::Failed("not a schedule".into())),
+        }
+    }
+
     fn mutate(&self, params: MutateParams) -> Result<(), RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
         match params {
@@ -2152,6 +2204,11 @@ impl EngineRpc {
                 .rename_device(&device_id, &name)
                 .map_err(failed)
                 .map(drop),
+            // Replied to with their schedule, so `Mutate` answers them itself
+            // ([`Self::mutate_schedule`]).
+            MutateParams::CreateSchedule { .. } | MutateParams::CancelSchedule { .. } => {
+                Err(RpcError::Failed("schedules are answered by Mutate".into()))
+            }
             MutateParams::SetChatSleep { chat_id, until } => {
                 let until = match until {
                     Some(ms) => Some(
@@ -3735,6 +3792,9 @@ impl RpcService for EngineRpc {
             methods::WATCH_CHATS => {
                 Ok(RpcReply::Stream(watch_stream(self.workspace.watch_chats())))
             }
+            methods::WATCH_SCHEDULES => Ok(RpcReply::Stream(watch_stream(
+                self.workspace.watch_schedules(),
+            ))),
             methods::WATCH_SIDEBAR_PREFERENCES => Ok(RpcReply::Stream(watch_stream(
                 self.workspace.watch_sidebar_preferences(),
             ))),
@@ -3913,6 +3973,9 @@ impl RpcService for EngineRpc {
                     return RpcReply::value(&serde_json::json!({
                         "ok": true, "deviceId": host.device_id, "cwd": cwd,
                     }));
+                }
+                if let MutateParams::CreateSchedule { .. } | MutateParams::CancelSchedule { .. } = &p {
+                    return self.mutate_schedule(p);
                 }
                 let sidebar_pins = matches!(&p, MutateParams::ChangeSidebarPin { .. });
                 self.mutate(p)?;

@@ -43,6 +43,8 @@ pub const KIND_PREFERENCES: &str = "preferences";
 /// Readiness only; membership and order live on individual pins.
 pub const SIDEBAR_PINS_STATE_ID: &str = "sidebarPins";
 pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
+pub const KIND_SCHEDULES: &str = "schedules";
+mod schedules;
 mod sidebar_pins;
 mod sidebar_sections;
 

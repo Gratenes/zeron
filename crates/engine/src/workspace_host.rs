@@ -190,6 +190,7 @@ struct WorkspaceHostInner {
     config: WorkspaceHostConfig,
     reg: Arc<Mutex<RegistryDoc>>,
     chats_tx: watch::Sender<Vec<Chat>>,
+    schedules_tx: watch::Sender<Vec<zeron_proto::Schedule>>,
     devices_tx: watch::Sender<Vec<Device>>,
     sessions_tx: watch::Sender<Vec<Session>>,
     spaces_tx: watch::Sender<Vec<Space>>,
@@ -332,6 +333,7 @@ impl WorkspaceHost {
 
         let state = doc.read_all()?;
         let (chats_tx, _) = watch::channel(state.chats);
+        let (schedules_tx, _) = watch::channel(doc.read_schedules());
         let (devices_tx, _) = watch::channel(state.devices);
         let (sessions_tx, _) = watch::channel(state.sessions);
         let (spaces_tx, _) = watch::channel(state.spaces);
@@ -356,6 +358,7 @@ impl WorkspaceHost {
                 config,
                 reg: Arc::new(Mutex::new(doc)),
                 chats_tx,
+                schedules_tx,
                 devices_tx,
                 sessions_tx,
                 spaces_tx,
@@ -768,6 +771,14 @@ impl WorkspaceHost {
     }
 
     // ── watches (WatchChats / WatchDevices / merged WatchSessions) ──────────
+
+    /// Every schedule (soonest due first), republished as the registry changes.
+    /// Brought up to date first: the lists are republished on a task, and a
+    /// schedule made a moment ago must be in what a watcher reads first.
+    pub fn watch_schedules(&self) -> watch::Receiver<Vec<zeron_proto::Schedule>> {
+        publish_if_changed(&self.inner.schedules_tx, self.read_schedules());
+        self.inner.schedules_tx.subscribe()
+    }
 
     pub fn watch_chats(&self) -> watch::Receiver<Vec<Chat>> {
         self.inner.chats_tx.subscribe()
@@ -1239,6 +1250,77 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.delete_space(space_id))?)
     }
 
+    /// Whether this device hosts `chat_id`'s row. Unlike [`Self::is_host`], a
+    /// chat this registry has no row for isn't ours: a schedule fires only
+    /// for a chat it can see is hosted here.
+    pub fn hosts_chat_row(&self, chat_id: &str) -> bool {
+        matches!(
+            self.read(|doc| doc.chat(chat_id)),
+            Ok(Some(chat)) if chat.device_id == self.inner.config.device_id
+        )
+    }
+
+    pub fn read_schedules(&self) -> Vec<zeron_proto::Schedule> {
+        self.read(|doc| doc.read_schedules())
+    }
+
+    /// Schedule `text` for `chat_id` at `fire_at`; `created_by` is the
+    /// scheduling chat (`None`: the person). `Err` when the chat is unknown.
+    pub fn create_schedule(
+        &self,
+        chat_id: &str,
+        text: &str,
+        fire_at: chrono::DateTime<Utc>,
+        created_by: Option<&str>,
+    ) -> Result<zeron_proto::Schedule, EngineError> {
+        if !matches!(self.chat(chat_id), Ok(Some(_))) {
+            return Err(EngineError::Other(format!("no chat {chat_id}")));
+        }
+        let schedule = zeron_proto::Schedule {
+            id: uuid::Uuid::new_v4().to_string(),
+            chat_id: chat_id.to_owned(),
+            text: text.to_owned(),
+            fire_at,
+            created_by: created_by.map(str::to_owned),
+            created_at: Utc::now(),
+            fired_at: None,
+            cancelled_at: None,
+            missed_at: None,
+        };
+        self.mutate(|doc| doc.create_schedule(&schedule))?;
+        // Durable on return: a schedule lost to a crash would never fire.
+        self.inner.persist_snapshot()?;
+        Ok(schedule)
+    }
+
+    /// Cancel a pending schedule (any device). `false` when it isn't pending.
+    pub fn cancel_schedule(&self, id: &str) -> Result<bool, EngineError> {
+        let cancelled = self.mutate(|doc| doc.cancel_schedule(id, Utc::now()))?;
+        if cancelled {
+            self.inner.persist_snapshot()?;
+        }
+        Ok(cancelled)
+    }
+
+    /// The host takes a pending schedule to send it, durably (the stamp is on
+    /// disk before this returns, so an engine restarting right after the send
+    /// can't send it again).
+    pub fn fire_schedule(&self, id: &str, at: chrono::DateTime<Utc>) -> Result<bool, EngineError> {
+        let took = self.mutate(|doc| doc.fire_schedule(id, at))?;
+        if took {
+            self.inner.persist_snapshot()?;
+        }
+        Ok(took)
+    }
+
+    pub fn miss_schedule(&self, id: &str, at: chrono::DateTime<Utc>) -> Result<bool, EngineError> {
+        let missed = self.mutate(|doc| doc.miss_schedule(id, at))?;
+        if missed {
+            self.inner.persist_snapshot()?;
+        }
+        Ok(missed)
+    }
+
     /// A chat put to sleep until `until` (any device; `None` wakes it).
     pub fn set_chat_sleep(
         &self,
@@ -1504,14 +1586,16 @@ impl WorkspaceHostInner {
                 Err(error) => tracing::warn!(%error, "sidebar pin cleanup failed"),
             }
             self.publish_sidebar_preferences(&doc, registry_synced);
-            doc.read_all()
+            (doc.read_all(), doc.read_schedules())
         };
+        let (snapshot, schedules) = snapshot;
         match snapshot {
             Ok(mut state) => {
                 self.overlay_presence(&mut state.devices);
                 // Retain the latest value even with no subscribers, but don't
                 // wake every list for unrelated registry/presence changes.
                 publish_if_changed(&self.chats_tx, state.chats);
+                publish_if_changed(&self.schedules_tx, schedules);
                 // The periodic presence tick also drives time-based expiry.
                 // Unrelated registry writes need no synthetic device event.
                 if clock_tick {
