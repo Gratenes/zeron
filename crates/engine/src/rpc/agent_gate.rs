@@ -622,14 +622,16 @@ mod tests {
 
         for (repeat, want) in [
             (json!({"cron": "0 9 * * *"}), "timezone"),
-            (json!({"cron": "* * * * *", "timezone": "UTC"}), "288"),
-            (json!({"everySeconds": 60}), "288"),
+            (json!({"everySeconds": 59}), "60 to"),
             (json!({"cron": "0 9 * * *", "timezone": "UTC", "everySeconds": 3600}), "not both"),
             (json!({"bogus": 1}), "bogus"),
         ] {
             let err = recurring_of(&core, Caller::Local, "mine", repeat, json!({})).await.unwrap_err().to_string();
             assert!(err.contains(want), "{want}: {err}");
         }
+        // Every minute is allowed, by cron or by interval.
+        recurring_of(&core, Caller::Local, "mine", json!({"cron": "* * * * *", "timezone": "UTC"}), json!({})).await.unwrap();
+        recurring_of(&core, Caller::Local, "mine", json!({"everySeconds": 60}), json!({})).await.unwrap();
         core.sessions.shutdown().await;
     }
 

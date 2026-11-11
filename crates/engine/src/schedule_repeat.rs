@@ -25,9 +25,6 @@ use zeron_proto::Repeat;
 pub const MIN_EVERY_SECONDS: u64 = 60;
 /// ... and at most a year.
 pub const MAX_EVERY_SECONDS: u64 = 366 * 24 * 3600;
-/// The most times one schedule may fire in any 24 hours (every 5 minutes), so
-/// `* * * * *` or an `every_seconds` of 60 can't flood a chat.
-pub const MAX_FIRES_PER_DAY: usize = 288;
 /// The most sends a `max_runs` may ask for.
 pub const MAX_RUNS_LIMIT: u32 = 10_000;
 /// The largest `every_n_weeks` / `every_n_days`.
@@ -256,29 +253,6 @@ pub fn upcoming(
     fires
 }
 
-fn count_in(
-    repeat: &Repeat,
-    first: DateTime<Utc>,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
-    limit: usize,
-) -> usize {
-    let mut count = 0;
-    let mut cur = first;
-    loop {
-        if cur >= to || count > limit {
-            return count;
-        }
-        if cur >= from {
-            count += 1;
-        }
-        match next_after(repeat, cur, cur) {
-            Some(next) => cur = next,
-            None => return count,
-        }
-    }
-}
-
 /// Check a new schedule made at `now` and fix its repeat rule and first fire.
 /// `fire_at` is the `at`/`in_seconds` time (a one-shot's due time, or the
 /// first fire of `every_seconds`); a cron works its own out.
@@ -388,17 +362,6 @@ pub fn plan(
             "'until' is before the first fire ({})",
             first.to_rfc3339()
         ));
-    }
-    // The busiest any two consecutive days can be: the next 48 hours, split.
-    for (from, to) in [
-        (first, first + Duration::hours(24)),
-        (first + Duration::hours(24), first + Duration::hours(48)),
-    ] {
-        if count_in(&repeat, first, from, to, MAX_FIRES_PER_DAY) > MAX_FIRES_PER_DAY {
-            return Err(format!(
-                "that fires more than {MAX_FIRES_PER_DAY} times a day (at most one every 5 minutes): ask for a longer interval"
-            ));
-        }
     }
     Ok(Plan {
         repeat: Some(repeat),
@@ -965,59 +928,34 @@ mod tests {
         assert!(refused(None, Some("2020-01-01T00:00:00Z"), None, None).contains("already passed"));
     }
 
+    /// The only floor is a minute: `* * * * *` and `every_seconds: 60` work.
     #[test]
-    fn a_schedule_that_would_flood_is_refused() {
-        for expr in ["* * * * *", "*/2 * * * *", "*/4 * * * *"] {
-            let err = plan(
-                Some(&cron(expr, "UTC")),
-                None,
-                None,
-                None,
-                utc("2026-11-11T12:00:00Z"),
-            )
-            .unwrap_err();
-            assert!(err.contains("more than 288 times a day"), "{expr}: {err}");
-        }
+    fn the_only_floor_is_one_minute() {
+        let now = utc("2026-11-11T12:00:00Z");
         let every = |s| RepeatSpec {
             every_seconds: Some(s),
             ..Default::default()
         };
-        assert!(
-            plan(
-                Some(&every(60)),
-                None,
-                None,
-                None,
-                utc("2026-11-11T12:00:00Z")
-            )
-            .unwrap_err()
-            .contains("288")
+        assert!(plan(Some(&every(59)), None, None, None, now).is_err());
+        assert_eq!(
+            plan(Some(&every(60)), None, None, None, now).unwrap().first,
+            utc("2026-11-11T12:01:00Z")
         );
-        assert!(
-            plan(
-                Some(&every(299)),
-                None,
-                None,
-                None,
-                utc("2026-11-11T12:00:00Z")
-            )
-            .is_err()
+        let each_minute = fires(&cron("* * * * *", "UTC"), "2026-11-11T12:00:30Z", 3);
+        assert_eq!(
+            each_minute,
+            [
+                "2026-11-11T12:01Z",
+                "2026-11-11T12:02Z",
+                "2026-11-11T12:03Z"
+            ]
         );
-        // Every 5 minutes is the busiest allowed.
         plan(
-            Some(&every(300)),
+            Some(&cron("*/2 * * * *", "America/New_York")),
             None,
             None,
             None,
-            utc("2026-11-11T12:00:00Z"),
-        )
-        .unwrap();
-        plan(
-            Some(&cron("*/5 * * * *", "UTC")),
-            None,
-            None,
-            None,
-            utc("2026-11-11T12:00:00Z"),
+            now,
         )
         .unwrap();
     }
