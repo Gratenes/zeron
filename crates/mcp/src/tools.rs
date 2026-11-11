@@ -29,6 +29,14 @@ pub(crate) use plugins::is_plugin_tool_name;
 
 /// Default and ceiling for the blocking waits.
 const MAX_BATCH: usize = 32;
+/// `schedule_message`'s description: what it does, then the recurring forms
+/// (the wording was chosen by an agent-facing eval: option D, plus the engine's
+/// exact DST behaviour for patterns with wildcards or steps).
+const SCHEDULE_MESSAGE_DESCRIPTION: &str = "Send a message into a chat at a later time. 'chat' (default: your own chat) gets 'text' as a new message when the time comes, starting a turn if it is idle (or arriving after the turn it is in). Zeron's own engine on the chat's device delivers it, so it fires even if the chat's agent has stopped and survives Zeron restarting; if that device was off at the time it is still sent on start within an hour, else it is skipped. The message arrives marked as scheduled, naming your chat. One-shot: give exactly one of 'at' (RFC 3339 time with UTC offset, e.g. 2026-11-12T09:00:00-05:00) or 'in_seconds'. Recurring: see below. 'until' (RFC 3339) ends a recurring schedule after that time and 'max_runs' ends it after that many fires. Returns the schedule id, a summary of the repeat in words, and the next 3 fire times in the schedule's zone. Unknown arguments are rejected. Use list_schedules and cancel_schedule to see and cancel. Limits: no more than one fire per 5 minutes on average; 10 recurring schedules per agent chat, 25 per target chat, 50 pending in all. \
+Recurring, option 1: 'cron' + 'timezone'. 'cron' is 5 fields 'minute hour day-of-month month day-of-week' (no seconds, no year); supports *, lists (1,15), ranges (9-17), steps (*/15), names (MON-FRI, JAN), 'L' for the last day of the month (day-of-month field), 'FRI#2' for the 2nd Friday and 'FRI#L' for the last Friday (day-of-week field; Sunday=0). If both day-of-month and day-of-week are restricted a day matching either fires, unless the day-of-week is prefixed with '+' (then both must match, e.g. '0 9 13 * +FRI' is Friday the 13th). Steps restart at the start of each period ('*/2' in day-of-month is the odd days, not 'every other day'; use every_n_days for that). The fields are read as wall-clock time in 'timezone' (DST aware): a fixed time that does not exist that day (spring forward) fires just after the gap, and one that happens twice (fall back) fires once, at the first; patterns with * or steps in the minute or hour field instead skip the gap and fire on every occurrence in the repeated hour. The first fire is the next match after now: do not give 'at' or 'in_seconds' with cron. Example: {\"cron\":\"15 22 * * SUN\",\"timezone\":\"America/Chicago\"} is every Sunday 22:15 Chicago time. \
+Recurring, option 2: 'every_seconds' (min 60): a fixed interval in real elapsed seconds (so 86400 drifts against the wall clock across DST); first fire at 'at'/'in_seconds' if given, else one interval from now. Give either cron or every_seconds, not both. \
+Also with 'cron': 'every_n_weeks' or 'every_n_days' (integer >= 2) keep only every Nth week / every Nth day of the cron matches, counting from the first matching day on or after 'start_date' (default: today); weeks run Monday-Sunday in 'timezone'. Example: {\"cron\":\"0 10 * * TUE\",\"every_n_weeks\":2,\"timezone\":\"America/Chicago\"} is every other Tuesday 10:00, beginning with the next Tuesday. 'start_date' ('YYYY-MM-DD', local date in 'timezone') also works with plain cron: nothing fires before it.";
+
 /// The farthest ahead a message may be scheduled (a year, in seconds).
 const MAX_SCHEDULE_SECS: i64 = 366 * 24 * 3600;
 /// Cloud runs these agents (Codex and Claude Code): a Cloud chat's harness.
@@ -211,14 +219,23 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "schedule_message",
-            description: "Send a message into a chat at a later time, once: 'chat' (default: your own chat) gets 'text' as a new message when the time comes, starting a turn if it is idle (or arriving after the turn it is in). Give exactly one of 'at' (an RFC 3339 time with its UTC offset, e.g. 2026-11-12T09:00:00-05:00) or 'in_seconds'. Zeron's own engine on the chat's device sends it, so it fires even if the chat's agent has stopped, and it survives Zeron restarting: if that device was off at the time it is still sent on start within an hour (see 'grace'), else it is dropped as missed. The message arrives marked as scheduled, naming your chat. Returns the schedule id: use list_schedules to see them and cancel_schedule to cancel. At most 50 pending per chat.",
+            description: SCHEDULE_MESSAGE_DESCRIPTION,
             input_schema: json!({
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
                     "chat": { "type": "string", "description": "Chat id, unique id prefix, or exact title. Default: your own chat." },
                     "text": { "type": "string", "description": "The message to send." },
-                    "at": { "type": "string", "description": "When to send it: an RFC 3339 time with an offset (Z or +hh:mm)." },
-                    "in_seconds": { "type": "integer", "minimum": 1, "maximum": MAX_SCHEDULE_SECS, "description": "Or: this many seconds from now (6 hours is 21600)." }
+                    "at": { "type": "string", "description": "One-shot time, or the first fire of an every_seconds repeat: RFC 3339 with offset." },
+                    "in_seconds": { "type": "integer", "minimum": 1, "description": "Or: this many seconds from now." },
+                    "cron": { "type": "string", "description": "Recurring: 5-field cron (minute hour day-of-month month day-of-week), read in 'timezone'. See the tool description for the dialect." },
+                    "timezone": { "type": "string", "description": "IANA zone name (e.g. America/New_York). Required with cron." },
+                    "every_n_weeks": { "type": "integer", "minimum": 2, "description": "With cron: only every Nth week (weeks run Mon-Sun in 'timezone')." },
+                    "every_n_days": { "type": "integer", "minimum": 2, "description": "With cron: only every Nth day." },
+                    "start_date": { "type": "string", "description": "With cron: local 'YYYY-MM-DD' in 'timezone'. Nothing fires before it; every_n_* counting starts from the first match on or after it (default: today)." },
+                    "every_seconds": { "type": "integer", "minimum": 60, "description": "Recurring: fixed interval in real elapsed seconds. First fire at 'at'/'in_seconds' if given, else one interval from now." },
+                    "until": { "type": "string", "description": "Recurring: no fires after this RFC 3339 time." },
+                    "max_runs": { "type": "integer", "minimum": 1, "description": "Recurring: stop after this many fires." }
                 },
                 "required": ["text"]
             }),
@@ -733,11 +750,20 @@ struct WaitArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScheduleArgs {
     chat: Option<String>,
     text: String,
     at: Option<String>,
     in_seconds: Option<i64>,
+    cron: Option<String>,
+    timezone: Option<String>,
+    every_n_weeks: Option<u32>,
+    every_n_days: Option<u32>,
+    start_date: Option<String>,
+    every_seconds: Option<u64>,
+    until: Option<String>,
+    max_runs: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -1581,45 +1607,88 @@ impl Tools {
             anyhow::bail!("text is empty");
         }
         let now = chrono::Utc::now();
+        let max_ahead = now + chrono::Duration::seconds(MAX_SCHEDULE_SECS);
+        let repeating = args.cron.is_some() || args.every_seconds.is_some();
+        if !repeating
+            && (args.timezone.is_some()
+                || args.every_n_weeks.is_some()
+                || args.every_n_days.is_some()
+                || args.start_date.is_some()
+                || args.until.is_some()
+                || args.max_runs.is_some())
+        {
+            anyhow::bail!(
+                "'timezone', 'every_n_weeks', 'every_n_days', 'start_date', 'until' and 'max_runs' go with a recurring schedule ('cron' or 'every_seconds')"
+            );
+        }
         let fire_at = match (args.at.as_deref(), args.in_seconds) {
-            (Some(_), Some(_)) | (None, None) => anyhow::bail!("give exactly one of 'at' or 'in_seconds'"),
-            (Some(at), None) => chrono::DateTime::parse_from_rfc3339(at.trim())
-                .map_err(|e| anyhow::anyhow!("'at' is not an RFC 3339 time with an offset (like 2026-11-12T09:00:00-05:00): {e}"))?
-                .with_timezone(&chrono::Utc),
+            (Some(_), Some(_)) => anyhow::bail!("give 'at' or 'in_seconds', not both"),
+            (None, None) if !repeating => anyhow::bail!("give one of 'at', 'in_seconds', 'cron' or 'every_seconds'"),
+            (None, None) => None,
+            (Some(at), None) => Some(
+                chrono::DateTime::parse_from_rfc3339(at.trim())
+                    .map_err(|e| anyhow::anyhow!("'at' is not an RFC 3339 time with an offset (like 2026-11-12T09:00:00-05:00): {e}"))?
+                    .with_timezone(&chrono::Utc),
+            ),
             (None, Some(secs)) => {
                 if !(1..=MAX_SCHEDULE_SECS).contains(&secs) {
                     anyhow::bail!("'in_seconds' is 1 to {MAX_SCHEDULE_SECS}");
                 }
-                now + chrono::Duration::seconds(secs)
+                Some(now + chrono::Duration::seconds(secs))
             }
         };
-        if fire_at <= now {
-            anyhow::bail!("that time has already passed");
+        if let Some(fire_at) = fire_at {
+            if fire_at <= now {
+                anyhow::bail!("that time has already passed");
+            }
+            if fire_at > max_ahead {
+                anyhow::bail!("at most a year ahead");
+            }
         }
-        if fire_at > now + chrono::Duration::seconds(MAX_SCHEDULE_SECS) {
-            anyhow::bail!("at most a year ahead");
-        }
+        let until = match args.until.as_deref() {
+            Some(text) => Some(
+                chrono::DateTime::parse_from_rfc3339(text.trim())
+                    .map_err(|e| anyhow::anyhow!("'until' is not an RFC 3339 time with an offset: {e}"))?
+                    .with_timezone(&chrono::Utc),
+            ),
+            None => None,
+        };
         let own = self.zeron.origin().chat_id.clone();
         let key = args
             .chat
             .or_else(|| own.clone())
             .context("chat is required (you are not running in a chat)")?;
         let chat = self.zeron.resolve_chat(&key).await?;
-        let reply = self
-            .zeron
-            .mutate(json!({
-                "op": "createSchedule",
-                "chatId": chat.id,
-                "text": text,
-                "fireAt": fire_at.timestamp_millis(),
-                "createdBy": own,
-            }))
-            .await?;
+        let mut request = json!({
+            "op": "createSchedule",
+            "chatId": chat.id,
+            "text": text,
+            "createdBy": own,
+        });
+        if let Some(fire_at) = fire_at {
+            request["fireAt"] = json!(fire_at.timestamp_millis());
+        }
+        if repeating {
+            request["repeat"] = json!({
+                "cron": args.cron,
+                "timezone": args.timezone,
+                "everyNWeeks": args.every_n_weeks,
+                "everyNDays": args.every_n_days,
+                "startDate": args.start_date,
+                "everySeconds": args.every_seconds,
+            });
+            request["until"] = json!(until.map(|u| u.timestamp_millis()));
+            request["maxRuns"] = json!(args.max_runs);
+        }
+        let reply = self.zeron.mutate(request).await?;
+        let schedule = reply.get("schedule").cloned().unwrap_or(Value::Null);
         Ok(json!({
-            "scheduled": reply.get("schedule").cloned().unwrap_or(Value::Null),
+            "id": schedule.get("id").cloned().unwrap_or(Value::Null),
+            "repeat": reply.get("summary").cloned().unwrap_or(Value::Null),
+            "next_fires": reply.get("nextFires").cloned().unwrap_or(json!([])),
             "chatId": chat.id,
             "title": chat.title,
-            "fireAt": fire_at.to_rfc3339(),
+            "scheduled": schedule,
         }))
     }
 
@@ -1645,6 +1714,10 @@ impl Tools {
                     "fireAt": s.fire_at.to_rfc3339(),
                     "text": s.text,
                     "createdBy": s.created_by,
+                    "repeat": s.repeat,
+                    "runs": s.runs,
+                    "maxRuns": s.max_runs,
+                    "until": s.until.map(|u| u.to_rfc3339()),
                 })
             })
             .collect();
@@ -2289,6 +2362,7 @@ mod tests {
                     if method == methods::MUTATE && params_op_is(&self.writes, "createSchedule") {
                         return Ok(RpcReply::Value(json!({
                             "ok": true, "schedule": {"id": "sched-new-1"},
+                            "summary": "once", "nextFires": ["Thu 2026-11-12 14:00 UTC"],
                         })));
                     }
                     if method == methods::QUEUE_COMMAND
@@ -3880,5 +3954,64 @@ mod tests {
         assert!(t.call("cancel_schedule", json!({"id": "sched-bbbb-2"})).await.is_err(), "already sent");
         assert!(t.call("cancel_schedule", json!({"id": "sched-"})).await.is_err(), "ambiguous");
         assert!(t.call("cancel_schedule", json!({"id": "nope"})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn schedule_message_sends_recurring_forms_to_the_engine_and_returns_its_summary() {
+        let world = Arc::new(World::default());
+        let t = tools(world.clone(), Origin { chat_id: Some("chat-alpha-1".into()), ..Default::default() });
+
+        let done = t
+            .call("schedule_message", json!({
+                "text": "standup", "cron": "0 10 * * TUE", "timezone": "America/Chicago",
+                "every_n_weeks": 2, "start_date": "2026-11-17", "until": "2027-01-01T00:00:00Z", "max_runs": 6
+            }))
+            .await
+            .unwrap();
+        assert_eq!(done["id"], "sched-new-1");
+        assert_eq!(done["repeat"], "once", "the engine's words, passed on");
+        assert_eq!(done["next_fires"][0], "Thu 2026-11-12 14:00 UTC");
+        let w = last_write(&world);
+        assert_eq!(w["repeat"], json!({"cron": "0 10 * * TUE", "timezone": "America/Chicago", "everyNWeeks": 2,
+            "everyNDays": null, "startDate": "2026-11-17", "everySeconds": null}));
+        assert_eq!((w["maxRuns"].as_i64(), w["until"].as_i64()), (Some(6), Some(1_798_761_600_000)));
+        assert!(w.get("fireAt").is_none(), "a cron works out its own first fire");
+
+        // every_seconds, with and without a first time.
+        t.call("schedule_message", json!({"text": "x", "every_seconds": 3600})).await.unwrap();
+        assert!(last_write(&world).get("fireAt").is_none());
+        t.call("schedule_message", json!({"text": "x", "every_seconds": 3600, "in_seconds": 120})).await.unwrap();
+        assert!(last_write(&world)["fireAt"].as_i64().unwrap() > chrono::Utc::now().timestamp_millis());
+
+        for bad in [
+            json!({"text": "x", "timezone": "UTC", "in_seconds": 60}),
+            json!({"text": "x", "until": "2027-01-01T00:00:00Z", "in_seconds": 60}),
+            json!({"text": "x", "max_runs": 2, "in_seconds": 60}),
+            json!({"text": "x", "cron": "0 9 * * *", "timezone": "UTC", "until": "next year"}),
+            json!({"text": "x", "in_seconds": 60, "at": "2030-01-01T00:00:00Z"}),
+            json!({"text": "x", "cron": "0 9 * * *", "timezone": "UTC", "every_week": 2}),
+        ] {
+            assert!(t.call("schedule_message", bad.clone()).await.is_err(), "{bad}");
+        }
+        // Rejected before anything was written.
+        let writes = world.writes.lock().unwrap().len();
+        assert!(t.call("schedule_message", json!({"text": "x"})).await.is_err());
+        assert_eq!(world.writes.lock().unwrap().len(), writes);
+    }
+
+    #[test]
+    fn the_schedule_tool_names_the_dialect_the_dst_policy_and_the_drift() {
+        let def = catalog().into_iter().find(|d| d.name == "schedule_message").unwrap();
+        for needle in ["FRI#L", "FRI#2", "'L'", "'+'", "restart", "just after the gap", "fires once", "drifts against the wall clock", "every_n_weeks", "IANA", "Unknown arguments are rejected"] {
+            assert!(def.description.contains(needle) || needle == "IANA", "{needle}");
+        }
+        assert_eq!(def.input_schema["additionalProperties"], false);
+        let props = def.input_schema["properties"].as_object().unwrap();
+        for k in ["cron", "timezone", "every_n_weeks", "every_n_days", "start_date", "every_seconds", "until", "max_runs", "at", "in_seconds", "chat", "text"] {
+            assert!(props.contains_key(k), "{k}");
+        }
+        assert_eq!(props["every_seconds"]["minimum"], 60);
+        assert_eq!(props["every_n_weeks"]["minimum"], 2);
+        assert!(props["timezone"]["description"].as_str().unwrap().contains("IANA"));
     }
 }

@@ -139,6 +139,22 @@ impl EngineRpc {
                             )));
                         }
                     }
+                    // A repeating one counts against its own, lower, cap.
+                    if params.get("repeat").is_some_and(|r| !r.is_null())
+                        && let Some(me) = calling.as_ref()
+                        && schedules
+                            .iter()
+                            .filter(|s| {
+                                s.is_pending() && s.repeat.is_some() && s.created_by.as_deref() == Some(me.id.as_str())
+                            })
+                            .count()
+                            >= crate::schedule_repeat::MAX_RECURRING_PER_AGENT
+                    {
+                        return Err(refused(format!(
+                            "This chat already has {} recurring schedules: cancel one first",
+                            crate::schedule_repeat::MAX_RECURRING_PER_AGENT
+                        )));
+                    }
                     params["createdBy"] = calling.as_ref().map_or(Value::Null, |c| json!(c.id));
                     Ok(params)
                 }
@@ -570,6 +586,73 @@ mod tests {
         let first = rows.next().await.unwrap();
         let parsed: Vec<zeron_proto::Schedule> = serde_json::from_value(first).unwrap();
         assert_eq!((parsed.len(), parsed[0].created_by.as_deref()), (1, Some("mine")));
+        core.sessions.shutdown().await;
+    }
+
+    async fn recurring_of(core: &crate::EngineCore, caller: Caller, chat: &str, repeat: Value, extra: Value) -> Result<Value, zeron_rpc::RpcError> {
+        let rpc = core.rpc_service();
+        let mut params = json!({"op":"createSchedule", "chatId":chat, "text":"ping", "repeat": repeat});
+        for (k, v) in extra.as_object().into_iter().flatten() {
+            params[k] = v.clone();
+        }
+        let gated = with_caller(caller, async { rpc.agent_gate(methods::MUTATE, params) }).await?;
+        match rpc.handle(methods::MUTATE, gated).await? {
+            zeron_rpc::RpcReply::Value(v) => Ok(v),
+            _ => unreachable!(),
+        }
+    }
+
+    /// A repeating schedule answers with its id, a summary in words and the
+    /// next three fires in its own zone; loud errors for bad ones.
+    #[tokio::test]
+    async fn a_recurring_schedule_answers_with_its_summary_and_next_fires() {
+        let (_temp, core) = core().await;
+        chat(&core, "mine", "Mine", "workspace-write", "supervised").await;
+        let cron = json!({"cron": "0 9 * * MON-FRI", "timezone": "America/New_York"});
+        let done = recurring_of(&core, agent("mine"), "mine", cron, json!({"maxRuns": 5})).await.unwrap();
+        let fires = done["nextFires"].as_array().unwrap();
+        assert_eq!(fires.len(), 3);
+        assert!(fires[0].as_str().unwrap().contains(" 09:00 E"), "{fires:?}");
+        assert!(fires[0].as_str().unwrap().contains("UTC)"));
+        let summary = done["summary"].as_str().unwrap();
+        assert!(summary.contains("America/New_York") && summary.ends_with("at most 5 times"), "{summary}");
+        assert_eq!(done["schedule"]["repeat"]["kind"], "cron");
+        assert_eq!(done["schedule"]["createdBy"], "mine");
+        assert!(done["schedule"]["repeat"]["anchorDate"].is_string(), "the anchor is fixed at creation");
+
+        for (repeat, want) in [
+            (json!({"cron": "0 9 * * *"}), "timezone"),
+            (json!({"cron": "* * * * *", "timezone": "UTC"}), "288"),
+            (json!({"everySeconds": 60}), "288"),
+            (json!({"cron": "0 9 * * *", "timezone": "UTC", "everySeconds": 3600}), "not both"),
+            (json!({"bogus": 1}), "bogus"),
+        ] {
+            let err = recurring_of(&core, Caller::Local, "mine", repeat, json!({})).await.unwrap_err().to_string();
+            assert!(err.contains(want), "{want}: {err}");
+        }
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn recurring_schedules_have_their_own_lower_caps() {
+        let (_temp, core) = core().await;
+        chat(&core, "mine", "Mine", "workspace-write", "supervised").await;
+        chat(&core, "other", "Other", "workspace-write", "supervised").await;
+        let every = json!({"everySeconds": 3600});
+        for _ in 0..crate::schedule_repeat::MAX_RECURRING_PER_AGENT {
+            recurring_of(&core, agent("mine"), "mine", every.clone(), json!({})).await.unwrap();
+        }
+        let err = recurring_of(&core, agent("mine"), "other", every.clone(), json!({})).await.unwrap_err().to_string();
+        assert!(err.contains("recurring schedules"), "{err}");
+        // One-shots still have room under their own cap, and other chats are free.
+        schedule_of(&core, agent("mine"), "mine", None).await.unwrap();
+        recurring_of(&core, agent("other"), "other", every.clone(), json!({})).await.unwrap();
+        // A chat holds at most so many as a target, whoever made them.
+        for _ in 0..crate::schedule_repeat::MAX_RECURRING_PER_CHAT - 1 {
+            recurring_of(&core, Caller::Local, "other", every.clone(), json!({})).await.unwrap();
+        }
+        let err = recurring_of(&core, Caller::Local, "other", every, json!({})).await.unwrap_err().to_string();
+        assert!(err.contains("that chat already has"), "{err}");
         core.sessions.shutdown().await;
     }
 }

@@ -185,6 +185,17 @@ pub struct WorkspaceHostConfig {
     pub local_only: bool,
 }
 
+/// What `WorkspaceHost::create_schedule_with` makes a schedule from.
+pub struct NewSchedule {
+    pub chat_id: String,
+    pub text: String,
+    pub fire_at: chrono::DateTime<Utc>,
+    pub created_by: Option<String>,
+    pub repeat: Option<zeron_proto::Repeat>,
+    pub until: Option<chrono::DateTime<Utc>>,
+    pub max_runs: Option<u32>,
+}
+
 struct WorkspaceHostInner {
     store: Arc<DocsStore>,
     config: WorkspaceHostConfig,
@@ -1264,7 +1275,7 @@ impl WorkspaceHost {
         self.read(|doc| doc.read_schedules())
     }
 
-    /// Schedule `text` for `chat_id` at `fire_at`; `created_by` is the
+    /// Schedule `text` for `chat_id` at `fire_at` once; `created_by` is the
     /// scheduling chat (`None`: the person). `Err` when the chat is unknown.
     pub fn create_schedule(
         &self,
@@ -1273,19 +1284,39 @@ impl WorkspaceHost {
         fire_at: chrono::DateTime<Utc>,
         created_by: Option<&str>,
     ) -> Result<zeron_proto::Schedule, EngineError> {
-        if !matches!(self.chat(chat_id), Ok(Some(_))) {
-            return Err(EngineError::Other(format!("no chat {chat_id}")));
-        }
-        let schedule = zeron_proto::Schedule {
-            id: uuid::Uuid::new_v4().to_string(),
+        self.create_schedule_with(NewSchedule {
             chat_id: chat_id.to_owned(),
             text: text.to_owned(),
             fire_at,
             created_by: created_by.map(str::to_owned),
+            repeat: None,
+            until: None,
+            max_runs: None,
+        })
+    }
+
+    /// A new schedule, one-shot or repeating (already checked: see
+    /// `schedule_repeat::plan`). `Err` when the chat is unknown.
+    pub fn create_schedule_with(&self, new: NewSchedule) -> Result<zeron_proto::Schedule, EngineError> {
+        if !matches!(self.chat(&new.chat_id), Ok(Some(_))) {
+            return Err(EngineError::Other(format!("no chat {}", new.chat_id)));
+        }
+        let schedule = zeron_proto::Schedule {
+            id: uuid::Uuid::new_v4().to_string(),
+            chat_id: new.chat_id,
+            text: new.text,
+            fire_at: new.fire_at,
+            created_by: new.created_by,
             created_at: Utc::now(),
             fired_at: None,
             cancelled_at: None,
             missed_at: None,
+            repeat: new.repeat,
+            until: new.until,
+            max_runs: new.max_runs,
+            runs: 0,
+            last_fired_at: None,
+            last_missed_at: None,
         };
         self.mutate(|doc| doc.create_schedule(&schedule))?;
         // Durable on return: a schedule lost to a crash would never fire.
@@ -1311,6 +1342,37 @@ impl WorkspaceHost {
             self.inner.persist_snapshot()?;
         }
         Ok(took)
+    }
+
+    /// The host takes a pending repeating schedule to send it (one write:
+    /// stamp the fire, count the run, move the due time to `next`; `None` ends
+    /// it), durably before this returns.
+    pub fn advance_schedule(
+        &self,
+        id: &str,
+        at: chrono::DateTime<Utc>,
+        next: Option<chrono::DateTime<Utc>>,
+    ) -> Result<bool, EngineError> {
+        let took = self.mutate(|doc| doc.advance_schedule(id, at, next))?;
+        if took {
+            self.inner.persist_snapshot()?;
+        }
+        Ok(took)
+    }
+
+    /// A repeating schedule's occurrence found too late: skipped, the due
+    /// time moves to `next` (`None`: ends as missed), no send.
+    pub fn skip_schedule(
+        &self,
+        id: &str,
+        at: chrono::DateTime<Utc>,
+        next: Option<chrono::DateTime<Utc>>,
+    ) -> Result<bool, EngineError> {
+        let skipped = self.mutate(|doc| doc.skip_schedule(id, at, next))?;
+        if skipped {
+            self.inner.persist_snapshot()?;
+        }
+        Ok(skipped)
     }
 
     pub fn miss_schedule(&self, id: &str, at: chrono::DateTime<Utc>) -> Result<bool, EngineError> {

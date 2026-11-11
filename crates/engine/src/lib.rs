@@ -66,6 +66,7 @@ pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 pub mod runner;
+pub mod schedule_repeat;
 pub mod scheduler;
 pub mod sessions;
 pub mod source_control;

@@ -5,8 +5,41 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// One scheduled message. One-shot in v1; a `repeat` field can join later
-/// without changing the rest (rows decode leniently, unknown fields ignored).
+/// How a schedule repeats ([`Schedule::repeat`]).
+///
+/// Stored as one object on the row. A repeating row keeps its next fire in
+/// `nextFireAt`, not `fireAt`: an engine from before repeats reads `fireAt`
+/// as required, so it skips such a row as malformed and can't send it once
+/// and stamp it done. That field name is the version gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Repeat {
+    /// A 5-field cron expression read as wall-clock time in an IANA zone.
+    #[serde(rename_all = "camelCase")]
+    Cron {
+        expr: String,
+        timezone: String,
+        /// Keep only every Nth week (Monday-Sunday) of the matches.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        every_n_weeks: Option<u32>,
+        /// Keep only every Nth day of the matches.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        every_n_days: Option<u32>,
+        /// Local `YYYY-MM-DD`: nothing fires before it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_date: Option<String>,
+        /// The local `YYYY-MM-DD` the every-N counting starts from: the first
+        /// day the cron matches on or after `start_date` (or the day the
+        /// schedule was made). Fixed when the schedule is created.
+        anchor_date: String,
+    },
+    /// A fixed interval in real elapsed seconds (drifts against the wall
+    /// clock across DST).
+    #[serde(rename_all = "camelCase")]
+    Every { seconds: u64 },
+}
+
+/// One scheduled message: one-shot, or repeating ([`Schedule::repeat`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Schedule {
@@ -15,12 +48,15 @@ pub struct Schedule {
     pub chat_id: String,
     /// What to send, as written: Zeron adds the "scheduled" header on delivery.
     pub text: String,
+    /// When it is next due. For a repeating schedule this moves forward with
+    /// each fire.
     pub fire_at: DateTime<Utc>,
     /// The chat that scheduled it; `None` when the person did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
     pub created_at: DateTime<Utc>,
     /// The host took it and sent it (stamped before the send: at most once).
+    /// For a repeating schedule: set only on its final run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fired_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -29,6 +65,24 @@ pub struct Schedule {
     /// didn't send it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missed_at: Option<DateTime<Utc>>,
+    /// Repeats by this rule; none for a one-shot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<Repeat>,
+    /// A repeating schedule sends nothing after this time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<DateTime<Utc>>,
+    /// A repeating schedule ends after this many sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_runs: Option<u32>,
+    /// How many times it has been sent.
+    #[serde(default)]
+    pub runs: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_fired_at: Option<DateTime<Utc>>,
+    /// A repeating schedule's latest occurrence skipped as too late (its
+    /// host was down past the grace window).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_missed_at: Option<DateTime<Utc>>,
 }
 
 /// Where a schedule stands ([`Schedule::state`]).
@@ -143,6 +197,25 @@ mod tests {
     }
 
     #[test]
+    fn a_repeat_round_trips_with_its_anchor() {
+        let cron = Repeat::Cron {
+            expr: "0 10 * * TUE".into(),
+            timezone: "America/Chicago".into(),
+            every_n_weeks: Some(2),
+            every_n_days: None,
+            start_date: None,
+            anchor_date: "2026-11-17".into(),
+        };
+        let json = serde_json::to_value(&cron).unwrap();
+        assert_eq!(json["kind"], "cron");
+        assert_eq!(json["everyNWeeks"], 2);
+        assert!(json.get("everyNDays").is_none());
+        assert_eq!(serde_json::from_value::<Repeat>(json).unwrap(), cron);
+        let every = serde_json::to_value(Repeat::Every { seconds: 90 }).unwrap();
+        assert_eq!(every, serde_json::json!({"kind": "every", "seconds": 90}));
+    }
+
+    #[test]
     fn a_cancel_outranks_a_fire_outranks_a_miss() {
         let mut s = Schedule {
             id: "s".into(),
@@ -154,6 +227,12 @@ mod tests {
             fired_at: None,
             cancelled_at: None,
             missed_at: Some(at(5)),
+            repeat: None,
+            until: None,
+            max_runs: None,
+            runs: 0,
+            last_fired_at: None,
+            last_missed_at: None,
         };
         assert_eq!(s.state(), ScheduleState::Missed);
         s.fired_at = Some(at(4));
