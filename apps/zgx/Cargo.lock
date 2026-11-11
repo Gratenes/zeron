@@ -7404,6 +7404,7 @@ dependencies = [
  "tungstenite",
  "ureq 2.12.1",
  "usvg",
+ "windows",
  "windows-sys 0.61.2",
  "zatex",
  "zeron-cli",
