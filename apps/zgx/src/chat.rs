@@ -879,8 +879,8 @@ impl Chats {
         let me = self.clone();
         let rpc = rpc.clone();
         engine::get().spawn(async move {
-            if let Ok(answer) = rpc.call("LocalDevice", json!({})).await {
-                *me.here.borrow_mut() = answer["deviceId"].as_str().map(Into::into);
+            if let Some(here) = engine::local_device(&rpc).await {
+                *me.here.borrow_mut() = Some(here);
             }
             // The composer's other device's, if it's on one: what an earlier
             // connection was asking is gone with it.
@@ -1720,7 +1720,7 @@ impl View {
     }
 
     fn heard_frame(self: &Rc<Self>, mut frame: Json) {
-        let applied = {
+        let applied = 'applied: {
             let mut slot = self.open.borrow_mut();
             let Some(open) = slot.as_mut() else { return };
             if let Some(usage) = frame.get("contextUsage").filter(|u| !u.is_null()) {
@@ -1728,22 +1728,46 @@ impl View {
                 open.context = tokens.zip(window).filter(|(_, w)| *w > 0.).map(|(t, w)| (t / w).min(1.));
                 open.context_usage = (tokens, window);
             }
-            // (Opened with all its rows: not down to the newest few, until
-            // the engine's whole copy comes.)
+            // Opened with all its rows (another view's, or its own with the
+            // model's name moved): not down to the newest few, until the
+            // engine's whole copy comes. Meanwhile what's newest still moves:
+            // the engine's opening tail is taken into the rows it has (its
+            // entries, as they are now, in their places, and any new after
+            // them), then each change after it, counted against the tail,
+            // not these rows (`apply_counted`). Dropped until the whole copy
+            // came, a turn being written stood still, its words and calls
+            // arriving all at once seconds later (a long chat's whole copy).
+            let mut waiting = false;
             if open.has_whole {
-                if frame.get("reset").is_none() || frame["historyPending"].as_bool() == Some(true) {
-                    return;
-                }
-                open.has_whole = false;
-                if std::mem::take(&mut open.rebuild) {
-                    open.built.clear();
+                if frame.get("reset").is_none() {
+                    waiting = true;
+                } else if frame["historyPending"].as_bool() == Some(true) {
+                    let tail = match frame.get_mut("reset").map(Json::take) {
+                        Some(Json::Array(list)) => list,
+                        _ => Vec::new(),
+                    };
+                    for entry in tail {
+                        let id = entry["id"].as_str().unwrap_or_default().to_owned();
+                        open.built.remove(id.as_str());
+                        match open.entries.iter_mut().find(|e| *e.id == *id) {
+                            Some(held) => *held = Entry::new(entry),
+                            None => open.entries.push(Entry::new(entry)),
+                        }
+                    }
+                    open.heard = true;
+                    break 'applied Ok(Change::Rows);
+                } else {
+                    open.has_whole = false;
+                    if std::mem::take(&mut open.rebuild) {
+                        open.built.clear();
+                    }
                 }
             }
             let before = frame.get("reset").map(|_| std::mem::take(&mut open.entries));
             if before.is_some() {
                 open.folding = None;
             }
-            let result = apply(&mut open.entries, &mut frame);
+            let result = apply_counted(&mut open.entries, &mut frame, !waiting);
             // What it changed, to build again: on a reset, the entries that
             // differ from what this view had, unless another view of this
             // chat has them built; else the ones it touched.
@@ -2530,7 +2554,11 @@ impl View {
             .map_err(|e| engine::outcome(&e))?;
         match answer["outcome"].as_str() {
             Some("acquired") => {}
-            Some("locked") => return Err("locked"),
+            // Said as "on another device" only when it is: this device's
+            // other window holding it is only "can't edit it now".
+            Some("locked") if held_elsewhere(chats.here.borrow().as_deref(), answer["ownerDeviceId"].as_str().unwrap_or("")) => {
+                return Err("locked");
+            }
             _ => return Err("missing"),
         }
         let lease = Lease {
@@ -3936,6 +3964,12 @@ fn reuse_built(
 /// A frame applied to `entries` (crates/doc/src/transcript_delta.rs's
 /// `apply_transcript_frame`); `Err` when the copy is out of step.
 fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
+    apply_counted(entries, frame, true)
+}
+
+/// `apply`, its count checked or not (`counted`): not while a view holds a
+/// chat's whole rows and the engine counts its opening tail (`heard_frame`).
+fn apply_counted(entries: &mut Vec<Entry>, frame: &mut Json, counted: bool) -> Result<Change, ()> {
     if let Some(reset) = frame.get_mut("reset") {
         // (Taken, not copied: a long chat's whole transcript, twice over.)
         *entries = match reset.take() {
@@ -4038,7 +4072,7 @@ fn apply(entries: &mut Vec<Entry>, frame: &mut Json) -> Result<Change, ()> {
         }
         rows = true;
     }
-    if frame["count"].as_u64().is_some_and(|n| n as usize != entries.len()) {
+    if counted && frame["count"].as_u64().is_some_and(|n| n as usize != entries.len()) {
         return Err(());
     }
     Ok(if rows {
@@ -5258,7 +5292,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
             let gate = &q["deliveryGate"];
             if gate["kind"].as_str() == Some("editing") && !mine {
                 let who = gate["ownerDeviceId"].as_str().unwrap_or_default();
-                if chats.here.borrow().as_deref() != Some(who) {
+                if held_elsewhere(chats.here.borrow().as_deref(), who) {
                     fields.push(("locked", Value::from("Being edited on another device")));
                 }
             }
@@ -5678,6 +5712,13 @@ fn stamp(_at: i64) -> Option<String> {
     None
 }
 
+/// Whether a queued message's edit lease is another device's: only once
+/// this device is known, and only for an owner that isn't it. (Unknown, a
+/// lease of this device's own was said as being edited on another device.)
+fn held_elsewhere(here: Option<&str>, owner: &str) -> bool {
+    here.is_some_and(|here| here != owner)
+}
+
 /// This window process's id, as an editor of queued messages.
 fn instance_id() -> String {
     thread_local! {
@@ -6083,6 +6124,16 @@ mod tests {
         let words = super::thought_words(&format!("\n{}\n", long.join("\n")));
         assert!(words.starts_with("line 1\n") && words.ends_with("\nline 30"), "{words}");
         assert_eq!(words.lines().count(), 30);
+    }
+
+    /// 2026-11-11, work-laptop: a queued message on the Mac hosting it said
+    /// "being edited on another device" while the app didn't know yet which
+    /// device it was on. Only a known, different owner is another device.
+    #[test]
+    fn only_a_different_owner_is_another_device() {
+        assert!(super::held_elsewhere(Some("mac"), "phone"));
+        assert!(!super::held_elsewhere(Some("mac"), "mac"));
+        assert!(!super::held_elsewhere(None, "mac"));
     }
 
     #[test]
@@ -7148,5 +7199,63 @@ mod tests {
         let quiet = fresh - 120_000.;
         assert!(background_tasks(&row("idle", quiet)).is_empty());
         assert!(background_tasks(&serde_json::Value::Null).is_empty());
+    }
+
+    /// A view holding a chat's whole rows (another view's, just let go; or its
+    /// own, the model's name moved) while the engine's whole copy is on its
+    /// way: the turn being written goes on showing, its thought's words and a
+    /// call arriving, rather than standing still until the whole copy comes
+    /// and all of it showing at once. The opening tail is taken into the
+    /// rows it holds, the changes after it counted against the tail.
+    #[test]
+    fn a_turn_being_written_goes_on_while_the_whole_copy_is_awaited() {
+        use super::{Entry, Open, View, draft_value};
+        use serde_json::json;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        let text = |id: &str, words: &str| json!({ "id": format!("{id}p"), "kind": "text", "text": words });
+        let prompt = |id: &str| json!({ "id": id, "role": "user", "parts": [text(id, "go")], "createdAt": 1_762_000_000_000_i64 });
+        let reply = |id: &str| json!({ "id": id, "role": "assistant", "status": "complete", "parts": [text(id, "done")], "createdAt": 1_762_000_000_000_i64 });
+        let thought = "I'm checking the swap.\n\nExec keeps the process start";
+        let writing = |words: &str| {
+            json!({ "id": "a1", "role": "assistant", "status": "streaming", "createdAt": 1_762_000_000_000_i64, "parts": [
+                { "id": "r1", "kind": "reasoning", "text": words },
+            ] })
+        };
+        // The rows it holds: a long chat's, its turn as it was let go.
+        let held: Vec<Entry> = [prompt("u0"), reply("a0"), prompt("u1"), writing(thought)].into_iter().map(Entry::new).collect();
+        let view = Rc::new(View {
+            session: app.host.shared("t.session", Value::Nil),
+            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            draft: app.host.shared("t.draft", draft_value("", "")),
+            rpc: RefCell::default(),
+            open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
+            pending: RefCell::default(),
+            generation: Cell::new(0),
+            snapshot: Cell::new(false),
+        });
+        let draft = || format!("{:?}", view.draft.signal().with_untracked(Clone::clone));
+        let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
+        // The engine's opening tail: its newest entries as they are now.
+        let now = format!("{thought} time");
+        view.heard_frame(json!({ "reset": [prompt("u1"), writing(&now)], "historyPending": true, "count": 2 }));
+        // More of the thought, counted against the tail.
+        let more = ", so the etime proves nothing.";
+        let len = now.len() + more.len();
+        view.heard_frame(json!({ "append": [{ "entry": "a1", "part": "r1", "text": more, "len": len }], "count": 2 }));
+        assert!(draft().contains("proves nothing"), "the thought's new words reach the draft: {}", draft());
+        // A call arriving: its row shows.
+        let call = json!({ "id": "c1", "kind": "tool", "call": { "kind": "exec", "command": "tail engine.log" }, "status": "running" });
+        view.heard_frame(json!({ "parts": [{ "entry": "a1", "at": 1, "part": call, "len": 2 }], "count": 2 }));
+        assert!(rows().contains("tail engine.log"), "the call shows: {}", rows());
+        // Its older rows are still the ones held (not down to the tail).
+        assert_eq!(view.open.borrow().as_ref().map(|o| o.entries.len()), Some(4));
+        // The whole copy: what shows is the engine's.
+        view.heard_frame(json!({ "reset": [prompt("u0"), reply("a0"), prompt("u1"), reply("a1")] }));
+        assert!(!view.open.borrow().as_ref().unwrap().has_whole);
+        assert!(!rows().contains("tail engine.log"), "the whole copy replaces it: {}", rows());
     }
 }
