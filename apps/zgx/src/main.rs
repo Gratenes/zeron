@@ -328,6 +328,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for font in fonts() {
         application = application.font(font?);
     }
+    // The desktop file Linux matches the app to (dist/zeron.desktop, installed
+    // as zeron.desktop, its StartupWMClass `zeron`): the window's class and
+    // icon, and the entry a dock shows the icon's badge on (`ui.badge`). Else
+    // it is the application id (the beta's, which no file is named for) or the
+    // executable's name, and a dock never finds the entry. Elsewhere it does
+    // nothing.
+    application = application.desktop_id("zeron");
     // The Zeron app's links (`zeron://`: a clicked banner, a chat's link),
     // delivered to the app as Zeron.app's are (src/links.rs).
     if cfg!(feature = "beta") {
