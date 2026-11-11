@@ -33,6 +33,7 @@ local auth = require("@account/auth")
 local sessions = require("@account/sessions")
 local route = require("@app/screens/shell/route")
 local boundary = require("@app/screens/shell/boundary")
+local badge = require("@app/screens/shell/badge")
 local view = require("@app/screens/shell/view")
 local Links = require("@ds/links")
 local plugin_links = require("@app/screens/shell/plugin_links")
@@ -372,6 +373,8 @@ return function(): Node
 			sessions.seen(id)
 		end
 	end)
+	-- How many chats wait for you, on the app icon (screens/shell/badge).
+	badge.install()
 	-- Signed out here (Settings, or the session ending): setup again. (A
 	-- window opened without an account stays: signing out is a change.)
 	local was_signed_in = auth.signed_in:peek()
