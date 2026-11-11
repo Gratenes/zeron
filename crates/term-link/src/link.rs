@@ -225,7 +225,7 @@ where
                         if let Err(err) =
                             terminals.write_sequenced(&terminal_id, &client, seq, &payload[8..])
                         {
-                            tracing::debug!(error = %err, "terminal link input failed");
+                            tracing::warn!(error = %err, "terminal link input failed");
                         }
                         if !send_bounded(&mut writer, ACK, &seq.to_be_bytes()).await {
                             break;
@@ -237,7 +237,7 @@ where
                             u16::from_be_bytes([payload[0], payload[1]]),
                             u16::from_be_bytes([payload[2], payload[3]]),
                         ) {
-                            tracing::debug!(error = %err, "terminal link resize failed");
+                            tracing::warn!(error = %err, "terminal link resize failed");
                         }
                     }
                     PING if payload.len() == 8 => {
@@ -339,7 +339,7 @@ where
                                 }
                             }
                             ERROR => {
-                                tracing::debug!(error = %String::from_utf8_lossy(&payload), "terminal link ended by host");
+                                tracing::warn!(error = %String::from_utf8_lossy(&payload), "terminal link ended by host");
                                 break;
                             }
                             _ => {

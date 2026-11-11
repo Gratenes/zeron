@@ -880,7 +880,13 @@ impl TerminalPanel {
                 let mut rx = match subscribed {
                     Ok(rx) => rx,
                     Err(err) => {
-                        tracing::debug!(error = %err, attempt, "SubscribeTerminal failed; backing off");
+                        // Warn on the first miss and every tenth after, so a stream
+                        // that never attaches shows in the log without a flood.
+                        if attempt % 10 == 0 {
+                            tracing::warn!(error = %err, attempt, "SubscribeTerminal failed; backing off");
+                        } else {
+                            tracing::debug!(error = %err, attempt, "SubscribeTerminal failed; backing off");
+                        }
                         cx.background_executor()
                             .timer(Duration::from_millis(backoff_ms(attempt)))
                             .await;
