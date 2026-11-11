@@ -13,6 +13,13 @@
 //! message is queued: a crash in between loses the message instead of
 //! sending it twice. One found past its grace window (the engine was down
 //! when it was due) is stamped missed, not sent.
+//!
+//! A repeating schedule fires the same way, and its one write both stamps the
+//! fire and moves its due time to the next occurrence after now
+//! ([`crate::schedule_repeat`]): it ends (`firedAt` stamped) on its last run,
+//! at `max_runs` or when nothing is left before `until`. One found past its
+//! grace skips to the next occurrence with nothing sent, so a long outage
+//! never ends in a burst of catch-up.
 
 use std::time::Duration;
 
@@ -99,6 +106,13 @@ pub fn sweep(
             next = Some(next.map_or(schedule.fire_at, |n| n.min(schedule.fire_at)));
             continue;
         }
+        if schedule.repeat.is_some() {
+            let following = sweep_repeating(workspace, doc_host, &schedule, now, grace);
+            if let Some(at) = following {
+                next = Some(next.map_or(at, |n| n.min(at)));
+            }
+            continue;
+        }
         if now - schedule.fire_at > grace {
             match workspace.miss_schedule(&schedule.id, now) {
                 Ok(true) => tracing::warn!(schedule = %schedule.id, chat = %schedule.chat_id,
@@ -126,6 +140,48 @@ pub fn sweep(
         }
     }
     next
+}
+
+/// One due repeating schedule: send it, or skip it when it's too late. The
+/// time it is next due (to wake for), if any.
+fn sweep_repeating(
+    workspace: &WorkspaceHost,
+    doc_host: &DocHost,
+    schedule: &Schedule,
+    now: DateTime<Utc>,
+    grace: chrono::Duration,
+) -> Option<DateTime<Utc>> {
+    if now - schedule.fire_at > grace {
+        let following = crate::schedule_repeat::next_skipping(schedule, now);
+        match workspace.skip_schedule(&schedule.id, now, following) {
+            Ok(true) => {
+                tracing::warn!(schedule = %schedule.id, chat = %schedule.chat_id,
+                    "a repeating scheduled message skipped an occurrence: its time passed while this engine was down");
+                return following;
+            }
+            Ok(false) => return None,
+            Err(error) => {
+                tracing::warn!(schedule = %schedule.id, %error, "couldn't skip a late occurrence");
+                return Some(now + chrono::Duration::seconds(5));
+            }
+        }
+    }
+    let following = crate::schedule_repeat::next_run(schedule, now);
+    match workspace.advance_schedule(&schedule.id, now, following) {
+        Ok(true) => {
+            if let Err(error) = deliver(workspace, doc_host, schedule) {
+                tracing::warn!(schedule = %schedule.id, chat = %schedule.chat_id, %error,
+                    "a scheduled message was taken but couldn't be queued");
+            }
+            following
+        }
+        Ok(false) => None,
+        Err(error) => {
+            // Not stamped, so not sent: the next pass tries again.
+            tracing::warn!(schedule = %schedule.id, %error, "couldn't take a due schedule");
+            Some(now + chrono::Duration::seconds(5))
+        }
+    }
 }
 
 fn deliver(
@@ -431,6 +487,297 @@ mod tests {
         assert_eq!(sent.len(), 1, "{sent:?}");
         assert_eq!(zeron_proto::scheduled_message_body(&sent[0]), Some("kept"));
         task.abort();
+        core.sessions.shutdown().await;
+    }
+
+    // ── repeating schedules ──
+
+    use zeron_proto::Repeat;
+
+    fn repeating(
+        core: &crate::EngineCore,
+        chat: &str,
+        first_ms: i64,
+        secs: u64,
+        until: Option<i64>,
+        max: Option<u32>,
+    ) -> zeron_proto::Schedule {
+        core.workspace
+            .create_schedule_with(crate::workspace_host::NewSchedule {
+                chat_id: chat.into(),
+                text: "standup".into(),
+                fire_at: at(first_ms),
+                created_by: None,
+                repeat: Some(Repeat::Every { seconds: secs }),
+                until: until.map(at),
+                max_runs: max,
+            })
+            .unwrap()
+    }
+
+    fn row(core: &crate::EngineCore, id: &str) -> zeron_proto::Schedule {
+        core.workspace
+            .read_schedules()
+            .into_iter()
+            .find(|s| s.id == id)
+            .unwrap()
+    }
+
+    const HOUR: i64 = 3_600_000;
+
+    #[tokio::test]
+    async fn a_repeating_schedule_fires_once_per_occurrence_and_moves_on() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = core_at(temp.path());
+        chat(&core, "c", &core.device_id).await;
+        hold(&core, "c");
+        let s = repeating(&core, "c", 10_000, 3_600, None, None);
+        assert_eq!(
+            sweep(&core.workspace, &core.doc_host, at(10_500), GRACE),
+            Some(at(10_000 + HOUR))
+        );
+        assert_eq!(queued(&core, "c").len(), 1);
+        let r = row(&core, &s.id);
+        assert_eq!(
+            (r.fire_at, r.runs, r.last_fired_at, r.fired_at),
+            (at(10_000 + HOUR), 1, Some(at(10_500)), None)
+        );
+        assert!(r.is_pending());
+        // The same occurrence is never sent twice.
+        for now in [10_600, 20_000, HOUR] {
+            sweep(&core.workspace, &core.doc_host, at(now), GRACE);
+        }
+        assert_eq!(queued(&core, "c").len(), 1);
+        // The next one, and the one after.
+        sweep(
+            &core.workspace,
+            &core.doc_host,
+            at(10_000 + HOUR + 1),
+            GRACE,
+        );
+        sweep(
+            &core.workspace,
+            &core.doc_host,
+            at(10_000 + 2 * HOUR + 1),
+            GRACE,
+        );
+        let sent = queued(&core, "c");
+        assert_eq!(sent.len(), 3);
+        assert!(
+            sent.iter()
+                .all(|t| zeron_proto::scheduled_message_body(t) == Some("standup"))
+        );
+        assert_eq!(row(&core, &s.id).runs, 3);
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn max_runs_and_until_end_it_on_its_last_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = core_at(temp.path());
+        chat(&core, "c", &core.device_id).await;
+        hold(&core, "c");
+        let by_count = repeating(&core, "c", 10_000, 3_600, None, Some(2));
+        let by_time = repeating(&core, "c", 10_000, 3_600, Some(10_000 + HOUR), None);
+        for k in 0..5 {
+            sweep(
+                &core.workspace,
+                &core.doc_host,
+                at(10_000 + k * HOUR + 1),
+                GRACE,
+            );
+        }
+        let a = row(&core, &by_count.id);
+        assert_eq!(
+            (a.runs, a.state(), a.fired_at.is_some()),
+            (2, ScheduleState::Fired, true)
+        );
+        let b = row(&core, &by_time.id);
+        assert_eq!(
+            (b.runs, b.state()),
+            (2, ScheduleState::Fired),
+            "the fire at until is the last"
+        );
+        assert_eq!(queued(&core, "c").len(), 4);
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_repeating_one_found_past_grace_skips_ahead_with_no_catch_up_burst() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = core_at(temp.path());
+        chat(&core, "c", &core.device_id).await;
+        hold(&core, "c");
+        // Down for 5 hours with an hourly schedule and a one-hour grace.
+        let late = repeating(&core, "c", 10_000, 3_600, None, None);
+        let now = 10_000 + 5 * HOUR;
+        assert_eq!(
+            sweep(&core.workspace, &core.doc_host, at(now), GRACE),
+            Some(at(10_000 + 6 * HOUR))
+        );
+        assert!(
+            queued(&core, "c").is_empty(),
+            "nothing sent for the hours it missed"
+        );
+        let r = row(&core, &late.id);
+        assert_eq!(
+            (r.runs, r.last_missed_at, r.fire_at, r.state()),
+            (
+                0,
+                Some(at(now)),
+                at(10_000 + 6 * HOUR),
+                ScheduleState::Pending
+            )
+        );
+        sweep(&core.workspace, &core.doc_host, at(now + 1), GRACE);
+        assert!(queued(&core, "c").is_empty());
+
+        core.workspace.cancel_schedule(&late.id).unwrap();
+
+        // Within the grace it is sent once, then moves to the next future one.
+        let soon = repeating(&core, "c", 20_000_000, 3_600, None, None);
+        sweep(
+            &core.workspace,
+            &core.doc_host,
+            at(20_000_000 + HOUR / 2),
+            GRACE,
+        );
+        assert_eq!(queued(&core, "c").len(), 1);
+        assert_eq!(row(&core, &soon.id).fire_at, at(20_000_000 + HOUR));
+
+        core.workspace.cancel_schedule(&soon.id).unwrap();
+
+        // Past its grace and past its `until`: it ends as missed.
+        let over = repeating(&core, "c", 30_000_000, 3_600, Some(30_000_000 + HOUR), None);
+        sweep(
+            &core.workspace,
+            &core.doc_host,
+            at(30_000_000 + 5 * HOUR),
+            GRACE,
+        );
+        assert_eq!(row(&core, &over.id).state(), ScheduleState::Missed);
+        core.sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_repeating_schedule_survives_restarts_and_never_repeats_an_occurrence() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = {
+            let core = core_at(temp.path());
+            chat(&core, "c", &core.device_id).await;
+            let s = repeating(&core, "c", 10_000, 3_600, None, Some(3));
+            core.sessions.shutdown().await;
+            s.id
+        };
+        {
+            let core = core_at(temp.path());
+            hold(&core, "c");
+            assert_eq!(
+                row(&core, &id).repeat,
+                Some(Repeat::Every { seconds: 3_600 }),
+                "read back from disk"
+            );
+            sweep(&core.workspace, &core.doc_host, at(10_500), GRACE);
+            assert_eq!(queued(&core, "c").len(), 1);
+            core.sessions.shutdown().await;
+        }
+        {
+            let core = core_at(temp.path());
+            hold(&core, "c");
+            let r = row(&core, &id);
+            assert_eq!(
+                (r.runs, r.fire_at),
+                (1, at(10_000 + HOUR)),
+                "the fire and the move are on disk"
+            );
+            // The same instant again: nothing (the occurrence was taken).
+            sweep(&core.workspace, &core.doc_host, at(10_600), GRACE);
+            assert!(
+                queued(&core, "c")
+                    .iter()
+                    .filter(|t| t.contains("standup"))
+                    .count()
+                    <= 1
+            );
+            sweep(
+                &core.workspace,
+                &core.doc_host,
+                at(10_000 + HOUR + 10),
+                GRACE,
+            );
+            assert_eq!(row(&core, &id).runs, 2);
+            core.sessions.shutdown().await;
+        }
+        let core = core_at(temp.path());
+        hold(&core, "c");
+        sweep(
+            &core.workspace,
+            &core.doc_host,
+            at(10_000 + 2 * HOUR + 10),
+            GRACE,
+        );
+        let r = row(&core, &id);
+        assert_eq!(
+            (r.runs, r.state()),
+            (3, ScheduleState::Fired),
+            "max_runs honoured across three engines"
+        );
+        sweep(
+            &core.workspace,
+            &core.doc_host,
+            at(10_000 + 9 * HOUR),
+            GRACE,
+        );
+        assert_eq!(row(&core, &id).runs, 3);
+        core.sessions.shutdown().await;
+    }
+
+    /// A cron schedule end to end: planned in New York across the March DST
+    /// change, fired, and moved to the next 02:30-ish occurrence.
+    #[tokio::test]
+    async fn a_cron_schedule_moves_to_its_next_occurrence_across_dst() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = core_at(temp.path());
+        chat(&core, "c", &core.device_id).await;
+        hold(&core, "c");
+        let spec = crate::schedule_repeat::RepeatSpec {
+            cron: Some("30 2 * * *".into()),
+            timezone: Some("America/New_York".into()),
+            ..Default::default()
+        };
+        let now = DateTime::parse_from_rfc3339("2026-03-07T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let plan = crate::schedule_repeat::plan(Some(&spec), None, None, None, now).unwrap();
+        assert_eq!(
+            plan.first.to_rfc3339(),
+            "2026-03-08T07:00:00+00:00",
+            "02:30 doesn't exist on the 8th: just after the gap"
+        );
+        let s = core
+            .workspace
+            .create_schedule_with(crate::workspace_host::NewSchedule {
+                chat_id: "c".into(),
+                text: "nightly".into(),
+                fire_at: plan.first,
+                created_by: None,
+                repeat: plan.repeat,
+                until: None,
+                max_runs: None,
+            })
+            .unwrap();
+        let next = sweep(
+            &core.workspace,
+            &core.doc_host,
+            plan.first + chrono::Duration::seconds(5),
+            GRACE,
+        );
+        assert_eq!(next.unwrap().to_rfc3339(), "2026-03-09T06:30:00+00:00");
+        assert_eq!(queued(&core, "c").len(), 1);
+        assert_eq!(
+            row(&core, &s.id).fire_at.to_rfc3339(),
+            "2026-03-09T06:30:00+00:00"
+        );
         core.sessions.shutdown().await;
     }
 }

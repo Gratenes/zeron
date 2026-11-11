@@ -859,9 +859,20 @@ enum MutateParams {
     CreateSchedule {
         chat_id: String,
         text: String,
-        fire_at: i64,
+        /// A one-shot's time, or the first fire of an `every_seconds` repeat.
+        /// A cron works out its own.
+        #[serde(default)]
+        fire_at: Option<i64>,
         #[serde(default)]
         created_by: Option<String>,
+        /// Make it repeat ([`crate::schedule_repeat::RepeatSpec`]).
+        #[serde(default)]
+        repeat: Option<crate::schedule_repeat::RepeatSpec>,
+        /// A repeating schedule sends nothing after this (epoch ms).
+        #[serde(default)]
+        until: Option<i64>,
+        #[serde(default)]
+        max_runs: Option<u32>,
     },
     /// Cancel a pending schedule. Reply `{ cancelled }`.
     #[serde(rename_all = "camelCase")]
@@ -1998,7 +2009,7 @@ impl EngineRpc {
     fn mutate_schedule(&self, params: MutateParams) -> Result<RpcReply, RpcError> {
         let failed = |e: crate::EngineError| RpcError::Failed(e.to_string());
         match params {
-            MutateParams::CreateSchedule { chat_id, text, fire_at, created_by } => {
+            MutateParams::CreateSchedule { chat_id, text, fire_at, created_by, repeat, until, max_runs } => {
                 if text.trim().is_empty() {
                     return Err(RpcError::BadParams("a scheduled message needs text".into()));
                 }
@@ -2007,16 +2018,59 @@ impl EngineRpc {
                         "a scheduled message is at most {MAX_SCHEDULED_TEXT} bytes"
                     )));
                 }
-                let fire_at = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(fire_at)
-                    .ok_or_else(|| RpcError::BadParams("fireAt is no time".into()))?;
-                if fire_at < chrono::Utc::now() - chrono::Duration::seconds(60) {
-                    return Err(RpcError::BadParams("that time has already passed".into()));
+                let at = |ms: i64, what: &str| {
+                    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+                        .ok_or_else(|| RpcError::BadParams(format!("{what} is no time")))
+                };
+                let now = chrono::Utc::now();
+                let fire_at = fire_at.map(|ms| at(ms, "fireAt")).transpose()?;
+                let until = until.map(|ms| at(ms, "until")).transpose()?;
+                // A one-shot a minute late is still sent (the caller's clock
+                // may lag); a repeat's first fire must be in the future.
+                let plan_now = if repeat.is_none() { now - chrono::Duration::seconds(60) } else { now };
+                let plan = crate::schedule_repeat::plan(repeat.as_ref(), fire_at, until, max_runs, plan_now)
+                    .map_err(RpcError::BadParams)?;
+                if plan.repeat.is_some() {
+                    let pending = self.workspace.read_schedules();
+                    let recurring = |s: &&zeron_proto::Schedule| s.is_pending() && s.repeat.is_some();
+                    if pending.iter().filter(recurring).filter(|s| s.chat_id == chat_id).count()
+                        >= crate::schedule_repeat::MAX_RECURRING_PER_CHAT
+                    {
+                        return Err(RpcError::BadParams(format!(
+                            "that chat already has {} recurring schedules: cancel one first",
+                            crate::schedule_repeat::MAX_RECURRING_PER_CHAT
+                        )));
+                    }
                 }
                 let schedule = self
                     .workspace
-                    .create_schedule(&chat_id, &text, fire_at, created_by.as_deref())
+                    .create_schedule_with(crate::workspace_host::NewSchedule {
+                        chat_id,
+                        text,
+                        fire_at: plan.first,
+                        created_by,
+                        repeat: plan.repeat,
+                        until,
+                        max_runs,
+                    })
                     .map_err(failed)?;
-                RpcReply::value(&serde_json::json!({ "ok": true, "schedule": schedule }))
+                let zone = crate::schedule_repeat::zone_of(schedule.repeat.as_ref());
+                let next_fires: Vec<String> = crate::schedule_repeat::upcoming(
+                    schedule.repeat.as_ref(),
+                    schedule.fire_at,
+                    schedule.until,
+                    schedule.max_runs,
+                    3,
+                )
+                .into_iter()
+                .map(|t| crate::schedule_repeat::format_fire(t, zone))
+                .collect();
+                RpcReply::value(&serde_json::json!({
+                    "ok": true,
+                    "schedule": schedule,
+                    "summary": crate::schedule_repeat::describe(schedule.repeat.as_ref(), schedule.until, schedule.max_runs),
+                    "nextFires": next_fires,
+                }))
             }
             MutateParams::CancelSchedule { schedule_id } => {
                 let cancelled = self.workspace.cancel_schedule(&schedule_id).map_err(failed)?;

@@ -830,7 +830,12 @@ pub(crate) struct RawSchedule {
     id: String,
     chat_id: String,
     text: String,
-    fire_at: i64,
+    /// A one-shot's due time. A repeating row has `next_fire_at` instead, so
+    /// an engine from before repeats (which requires this field) skips it.
+    #[serde(default)]
+    fire_at: Option<i64>,
+    #[serde(default)]
+    next_fire_at: Option<i64>,
     #[serde(default)]
     created_by: Option<String>,
     #[serde(default)]
@@ -841,21 +846,54 @@ pub(crate) struct RawSchedule {
     cancelled_at: Option<i64>,
     #[serde(default)]
     missed_at: Option<i64>,
+    /// LENIENT: a repeat rule from a newer peer reads as none, and the row is
+    /// then dropped (a repeating row without its rule is not a one-shot).
+    #[serde(default)]
+    repeat: Option<serde_json::Value>,
+    #[serde(default)]
+    until: Option<i64>,
+    #[serde(default)]
+    max_runs: Option<u32>,
+    #[serde(default)]
+    runs: u32,
+    #[serde(default)]
+    last_fired_at: Option<i64>,
+    #[serde(default)]
+    last_missed_at: Option<i64>,
 }
 
-impl From<RawSchedule> for zeron_proto::Schedule {
-    fn from(raw: RawSchedule) -> Self {
-        zeron_proto::Schedule {
-            id: raw.id,
-            chat_id: raw.chat_id,
-            text: raw.text,
-            fire_at: dt(raw.fire_at),
-            created_by: raw.created_by,
-            created_at: dt(raw.created_at),
-            fired_at: raw.fired_at.map(dt),
-            cancelled_at: raw.cancelled_at.map(dt),
-            missed_at: raw.missed_at.map(dt),
-        }
+impl RawSchedule {
+    /// `None` for a row that isn't a usable schedule: no due time, or a
+    /// repeat rule this build can't read.
+    pub(crate) fn into_schedule(self) -> Option<zeron_proto::Schedule> {
+        let repeat = match self.repeat {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => match serde_json::from_value::<zeron_proto::Repeat>(value) {
+                Ok(repeat) => Some(repeat),
+                Err(err) => {
+                    tracing::warn!(schedule = %self.id, error = %err, "schedule repeat from a newer peer; row ignored");
+                    return None;
+                }
+            },
+        };
+        let fire_at = self.fire_at.or(self.next_fire_at)?;
+        Some(zeron_proto::Schedule {
+            id: self.id,
+            chat_id: self.chat_id,
+            text: self.text,
+            fire_at: dt(fire_at),
+            created_by: self.created_by,
+            created_at: dt(self.created_at),
+            fired_at: self.fired_at.map(dt),
+            cancelled_at: self.cancelled_at.map(dt),
+            missed_at: self.missed_at.map(dt),
+            repeat,
+            until: self.until.map(dt),
+            max_runs: self.max_runs,
+            runs: self.runs,
+            last_fired_at: self.last_fired_at.map(dt),
+            last_missed_at: self.last_missed_at.map(dt),
+        })
     }
 }
 

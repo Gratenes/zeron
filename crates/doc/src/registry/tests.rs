@@ -2963,6 +2963,20 @@ fn schedule(id: &str, chat: &str, fire_ms: i64) -> zeron_proto::Schedule {
         fired_at: None,
         cancelled_at: None,
         missed_at: None,
+        repeat: None,
+        until: None,
+        max_runs: None,
+        runs: 0,
+        last_fired_at: None,
+        last_missed_at: None,
+    }
+}
+
+fn repeating(id: &str, chat: &str, fire_ms: i64) -> zeron_proto::Schedule {
+    zeron_proto::Schedule {
+        repeat: Some(zeron_proto::Repeat::Every { seconds: 3_600 }),
+        max_runs: Some(3),
+        ..schedule(id, chat, fire_ms)
     }
 }
 
@@ -3012,4 +3026,87 @@ fn a_schedule_replicates_and_a_cancel_and_a_fire_read_as_a_cancel() {
         assert_eq!((s.fired_at, s.cancelled_at), (Some(ts(9_000)), Some(ts(8_000))));
         assert_eq!(s.state(), ScheduleState::Cancelled);
     }
+}
+
+#[test]
+fn a_repeating_schedule_advances_in_one_write_and_ends_on_its_last_run() {
+    use zeron_proto::ScheduleState;
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.create_schedule(&repeating("r", "c", 5_000)).unwrap();
+    assert_eq!(ws.schedule("r").unwrap(), repeating("r", "c", 5_000));
+    assert!(!ws.fire_schedule("r", ts(5_000)).unwrap(), "a repeating one isn't a one-shot's fire");
+    assert!(!ws.miss_schedule("r", ts(5_000)).unwrap());
+
+    assert!(ws.advance_schedule("r", ts(5_100), Some(ts(8_600))).unwrap());
+    let s = ws.schedule("r").unwrap();
+    assert_eq!((s.fire_at, s.runs, s.last_fired_at, s.fired_at), (ts(8_600), 1, Some(ts(5_100)), None));
+    assert!(s.is_pending());
+
+    // Skipped as too late: no run counted, the due time moves.
+    assert!(ws.skip_schedule("r", ts(9_000), Some(ts(12_200))).unwrap());
+    let s = ws.schedule("r").unwrap();
+    assert_eq!((s.fire_at, s.runs, s.last_missed_at, s.state()), (ts(12_200), 1, Some(ts(9_000)), ScheduleState::Pending));
+
+    // The last run: no next, so it ends fired.
+    assert!(ws.advance_schedule("r", ts(12_300), None).unwrap());
+    let s = ws.schedule("r").unwrap();
+    assert_eq!((s.runs, s.fired_at, s.state()), (2, Some(ts(12_300)), ScheduleState::Fired));
+    assert!(!ws.advance_schedule("r", ts(13_000), Some(ts(99_000))).unwrap(), "ended");
+
+    ws.create_schedule(&repeating("m", "c", 100)).unwrap();
+    assert!(ws.skip_schedule("m", ts(999_999), None).unwrap());
+    assert_eq!(ws.schedule("m").unwrap().state(), ScheduleState::Missed);
+
+    ws.create_schedule(&repeating("x", "c", 100)).unwrap();
+    assert!(ws.cancel_schedule("x", ts(50)).unwrap());
+    assert!(!ws.advance_schedule("x", ts(100), Some(ts(200))).unwrap());
+}
+
+/// What an engine from before repeats read: `fireAt` required.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct LegacyRawSchedule {
+    id: String,
+    chat_id: String,
+    text: String,
+    fire_at: i64,
+}
+
+/// The version gate: a repeating row has no `fireAt`, so an engine from
+/// before repeats can't read it (it would send it once and stamp it done),
+/// while a one-shot still reads there.
+#[test]
+fn an_engine_from_before_repeats_cannot_read_a_repeating_row() {
+    let mut ws = RegistryDoc::new("dev-a");
+    ws.create_schedule(&repeating("r", "c", 5_000)).unwrap();
+    ws.create_schedule(&schedule("o", "c", 5_000)).unwrap();
+    let as_old = |id: &str| {
+        let row = ws.overlay_row(KIND_SCHEDULES, id).unwrap();
+        serde_json::from_value::<LegacyRawSchedule>(serde_json::Value::Object(row.fields.into_iter().collect()))
+    };
+    assert!(as_old("r").is_err(), "skipped as malformed");
+    assert!(as_old("o").is_ok());
+    // And ours reads both; an unreadable repeat rule drops the row.
+    assert_eq!(ws.read_schedules().len(), 2);
+    ws.write(KIND_SCHEDULES, "r", OpKind::Update, fields([("repeat", json!({"kind": "lunar"}))]));
+    assert_eq!(ws.read_schedules().iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["o"]);
+}
+
+/// The stamp and the move are one op: a viewer never sees one without the other.
+#[test]
+fn a_repeating_fire_replicates_as_one_op() {
+    let mut host = RegistryDoc::new("host");
+    let mut viewer = RegistryDoc::new("viewer");
+    let mut server = HashMap::new();
+    let mut seq = 0;
+    host.create_schedule(&repeating("r", "c", 5_000)).unwrap();
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    assert!(host.advance_schedule("r", ts(5_100), Some(ts(8_600))).unwrap());
+    let op = host.pending_ops().find(|o| o.id == "r").unwrap();
+    let set = op.set.as_ref().unwrap();
+    assert!(["lastFiredAt", "runs", "nextFireAt"].iter().all(|k| set.contains_key(*k)), "{set:?}");
+    server_round(&mut server, &mut seq, &mut [&mut host, &mut viewer]);
+    let s = viewer.schedule("r").unwrap();
+    assert_eq!((s.runs, s.fire_at), (1, ts(8_600)));
 }
