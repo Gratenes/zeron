@@ -381,8 +381,8 @@ impl RemoteTerminals {
             .await
             {
                 Ok(Ok(link)) => first = Some(Source::Direct(link)),
-                Ok(Err(error)) => tracing::debug!(%error, "direct terminal attach failed"),
-                Err(_) => tracing::debug!("direct terminal attach timed out"),
+                Ok(Err(error)) => tracing::warn!(%error, "direct terminal attach failed"),
+                Err(_) => tracing::warn!("direct terminal attach timed out"),
             }
         }
         let first = match first {
@@ -543,12 +543,12 @@ async fn forward_once(hub: &RemoteTerminals, key: &Key, relay: &dyn Relay, out: 
         }
         // The host refused it (an ended terminal): retrying can't help.
         Err(RpcError::Failed(error) | RpcError::BadParams(error)) => {
-            tracing::debug!(%error, method, "relayed terminal write refused");
+            tracing::warn!(%error, method, "relayed terminal write refused");
             true
         }
         // Unacknowledged input stays queued for the retry or the next path.
         Err(error) => {
-            tracing::debug!(%error, method, "relayed terminal write failed");
+            tracing::warn!(%error, method, "relayed terminal write failed");
             false
         }
     }
@@ -619,7 +619,7 @@ impl Pump {
                             Source::Relay(stream)
                         }
                         Err(error) => {
-                            tracing::debug!(%error, "terminal relay resume failed");
+                            tracing::warn!(%error, "terminal relay resume failed");
                             break;
                         }
                     }
@@ -713,7 +713,7 @@ impl Pump {
                     match link::attach(io, self.last_seq, &self.hub.client).await {
                         Ok(link) => return Ended::Upgrade(link),
                         Err(error) => {
-                            tracing::debug!(%error, "direct terminal attach failed; staying on the relay");
+                            tracing::warn!(%error, "direct terminal attach failed; staying on the relay");
                             // Leave the relay in charge; no further upgrades
                             // this session (the host refused the link).
                             upgrade = Box::pin(futures::future::pending());
