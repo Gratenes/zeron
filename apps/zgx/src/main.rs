@@ -62,6 +62,8 @@ mod relaunch;
 mod session_home;
 mod sessions;
 mod settings;
+#[cfg(target_os = "macos")]
+mod system_sound;
 mod terminal;
 mod tool_details;
 mod themes;
@@ -121,6 +123,10 @@ mod slide_bench_tests;
 mod activity_cost_tests;
 #[cfg(all(test, unix))]
 mod scroll_script_tests;
+#[cfg(test)]
+mod transcript_scroll_tests;
+#[cfg(test)]
+mod transcript_paint_tests;
 #[cfg(test)]
 mod editor_scroll_tests;
 #[cfg(test)]

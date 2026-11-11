@@ -602,6 +602,7 @@ files_stub.search = function(target: any, query: string): any
 	if LISTS_FAIL:peek() then
 		return unreachable()
 	end
+	note(`search_on:{target.device or "here"}`)
 	local found = {}
 	for _, path in FILES do
 		if query == "" or string.find(string.lower(path), string.lower(query), 1, true) then
@@ -1000,6 +1001,33 @@ local function seed()
 	}) :: any)
 end
 seed()
+-- Cloud chats' machines, each with its own copy of Atlas's repository
+-- (acme/atlas), as the engine lists them.
+ui.command {
+	id = "fixture.cloud_copies",
+	title = "Fixture: Cloud machines, each with a copy of Atlas's repository",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.devices = table.clone(now.devices)
+		now.projects = table.clone(now.projects)
+		for i, created in { 100, 300, 200 } do
+			table.insert(now.devices, { id = `cloud-m{i}`, name = "Cloud session", platform = "cloud", here = false, online = false, cloud = true })
+			table.insert(now.projects, { id = `atlas-c{i}`, name = "atlas", device = `cloud-m{i}`, path = "/home/user/atlas", git = true, github = "acme/atlas", created = created })
+		end
+		sessions.now:set(now)
+	end,
+}
+-- A second repository Cloud can open: Site (acme/site), on the build box.
+ui.command {
+	id = "fixture.site_project",
+	title = "Fixture: Site, a second repository Cloud can open",
+	run = function()
+		local now = table.clone(sessions.now:peek() :: any)
+		now.projects = table.clone(now.projects)
+		table.insert(now.projects, { id = "site", name = "Site", device = "box", path = "/srv/site", git = true, github = "acme/site" })
+		sessions.now:set(now)
+	end,
+}
 -- This device's connection as the shell hears it (`connection`).
 for _, c in { { "connection_reconnecting", "reconnecting" }, { "connection_offline", "offline" }, { "connection_back", nil } } do
 	ui.command {
@@ -1180,6 +1208,154 @@ do
 			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
 				store.messages:set(now)
 			end
+		end,
+	}
+	-- `long_chat`: Tall replies becomes a long working chat as a real
+	-- agent's reads (ui/long_chat_fixture), opened at its end: replies of
+	-- markdown and tables cut by their work, short prompts between them.
+	ui.command {
+		id = "long_chat",
+		title = "Tall replies becomes a long working chat",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	-- (table_fixture's `status`.)
+	local STATUS_TABLE = [[
+Beta.5 is almost out. Here's where everything stands:
+
+| Area | Status |
+|---|---|
+| **Beta.5** | Windows and both Linux builds passed. macOS has been building, signing and notarizing for about 40 minutes; notarization usually takes the longest. It publishes right after. |
+| **Memory** | Two of the three fixes are merged in zgx (#1960, #1981); #1945 merges after its checks. Together they bring memory after heavy use to about **264 MB** (was 315, and beta.1 was 271). The memory chat is now chasing the remaining ~50 MB stuck in partly used memory pages. |
+| **Streaming** | ff4bff4f's three zgx PRs are open and in CI: append-only text, styled text that follows state, and the fade-in drawn as one piece. Next is the GPU-run fade-in under the glass, worked out with the render chat. Your staging app's build is at 5.9% (from 7.1%), with about 4–4.5% as the next target. |
+| **Scrolling** | Waiting on zgx CI: accessibility updates (#1931), zgx's built-in scroll bar (#1961), and the "scrolling stopped" timer (#1975). The Zeron side of each is ready on branches. The working-rings fix is merged. |
+| **The scroll-skip / overlapping-rows bug** | Not reproduced, and no cause yet. Tests are in place. If it happens again, send a screenshot and the chat name before navigating away. |
+]]
+	-- `status_table`: a reply whose table has a 38-character label beside
+	-- long prose (table_fixture's `status`, the one Wing couldn't scroll).
+	ui.command {
+		id = "status_table",
+		title = "A reply with a wide status table",
+		run = function()
+			TRANSCRIPTS.s7 = {
+				{ id = "st1", role = "user", text = "Where does everything stand?" },
+				{ id = "st2", role = "assistant", text = STATUS_TABLE, model = "Opus" },
+			}
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	-- `long_chat_cross`: the same, other chats' long messages (folded behind
+	-- Show more) between its turns.
+	ui.command {
+		id = "long_chat_cross",
+		title = "Tall replies becomes a long working chat with other chats' messages",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150, false, true)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	-- `long_chat_cross_late`: the same, but its other chats' messages and
+	-- the replies after them not yet whole (a synced chat's rows as they first
+	-- come); `long_chat_cross_fill`: they come whole, in place.
+	ui.command {
+		id = "long_chat_cross_late",
+		title = "A long working chat whose last rows aren't whole yet",
+		run = function()
+			local whole = (require("./long_chat_fixture") :: any).chat(150, false, true)
+			local now = {}
+			for i, m in whole do
+				local early = table.clone(m)
+				if i > #whole - 40 and (m.sender or string.sub(m.id, 1, 2) == "ly") then
+					early.text = string.sub(m.text, 1, 40)
+					early.copy = early.text
+					if early.blocks then
+						early.blocks = { early.blocks[1] }
+					end
+				end
+				table.insert(now, early)
+			end
+			TRANSCRIPTS.s7 = now
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(now)
+			end
+		end,
+	}
+	ui.command {
+		id = "long_chat_cross_fill",
+		title = "The long working chat's last rows come whole",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150, false, true)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	-- `long_chat_sent`: the same, up to the reply before its last prompt
+	-- (sent then from the composer); `long_chat_streams`, run again and
+	-- again: its last reply streams in, a step at a time, then ends.
+	ui.command {
+		id = "long_chat_sent",
+		title = "Tall replies becomes a long working chat, its last turn to come",
+		run = function()
+			TRANSCRIPTS.s7 = (require("./long_chat_fixture") :: any).chat(150, true)
+			if store.session:peek() and (store.session:peek() :: any).id == "s7" then
+				store.messages:set(TRANSCRIPTS.s7)
+			end
+		end,
+	}
+	local stage = 0
+	ui.command {
+		id = "long_chat_streams",
+		title = "The long working chat's last reply streams a step",
+		run = function()
+			local fixture = require("./long_chat_fixture") :: any
+			local stages = fixture.stages()
+			local n = store.messages:len()
+			if stage < 0 then
+				return
+			end
+			stage += 1
+			if stage == 1 then
+				local prompt = store.messages:peek()[n]
+				if prompt and prompt.role == "user" and prompt.waiting then
+					store.messages:set_key({ n, "waiting" }, ui.null)
+				end
+				store.messages:push { id = "orbit-trigger", role = "assistant", text = "", model = "Opus", streaming = true, started = ui.now() / 1000, tools = {}, blocks = {} }
+				publish(opened :: any, { running = true })
+				n += 1
+			end
+			local s = stages[stage]
+			if s then
+				ui.batch(function()
+					store.messages:set_key({ n, "blocks" }, s.blocks)
+					store.draft:set { id = "orbit-trigger", text = s.part_text or "", part = s.part, part_text = s.part_text }
+				end)
+				return
+			end
+			local done = fixture.trigger()
+			local text = {}
+			for _, b in done do
+				if b.kind == "text" then
+					table.insert(text, b.text)
+				end
+			end
+			ui.batch(function()
+				store.messages:set_key({ n, "blocks" }, done)
+				store.messages:set_key({ n, "text" }, table.concat(text, "\n\n"))
+				store.messages:set_key({ n, "streaming" }, false)
+				store.messages:set_key({ n, "at" }, "Nov 10, 1:13 PM")
+				store.draft:set { id = "", text = "" }
+			end)
+			publish(opened :: any, { running = false })
+			stage = -1
 		end,
 	}
 end
