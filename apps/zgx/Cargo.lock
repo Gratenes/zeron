@@ -30,7 +30,7 @@ dependencies = [
 [[package]]
 name = "accesskit_atspi_common"
 version = "0.19.1"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -43,7 +43,7 @@ dependencies = [
 [[package]]
 name = "accesskit_consumer"
 version = "0.38.0"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "accesskit",
  "hashbrown 0.16.1",
@@ -66,7 +66,7 @@ dependencies = [
 [[package]]
 name = "accesskit_macos"
 version = "0.26.3"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -79,7 +79,7 @@ dependencies = [
 [[package]]
 name = "accesskit_unix"
 version = "0.22.1"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "accesskit",
  "accesskit_atspi_common",
@@ -96,7 +96,7 @@ dependencies = [
 [[package]]
 name = "accesskit_windows"
 version = "0.34.0"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -6462,7 +6462,7 @@ dependencies = [
 [[package]]
 name = "wgpu-hal"
 version = "29.0.4"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "android_system_properties",
  "arrayvec",
@@ -6900,7 +6900,7 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "ahash",
  "android-activity",
@@ -7468,7 +7468,7 @@ dependencies = [
 [[package]]
 name = "zgx"
 version = "0.1.10"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "fixed_decimal",
  "foldhash 0.2.0",
@@ -7496,7 +7496,7 @@ dependencies = [
 [[package]]
 name = "zgx-3d"
 version = "0.1.10"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "bytemuck",
  "zgx",
@@ -7506,7 +7506,7 @@ dependencies = [
 [[package]]
 name = "zgx-alacritty-terminal"
 version = "0.26.3"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
@@ -7531,7 +7531,7 @@ dependencies = [
 [[package]]
 name = "zgx-components"
 version = "0.1.10"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "zgx",
 ]
@@ -7539,7 +7539,7 @@ dependencies = [
 [[package]]
 name = "zgx-cosmic-text"
 version = "0.19.14"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "bitflags 2.13.2",
  "fontdb",
@@ -7563,7 +7563,7 @@ dependencies = [
 [[package]]
 name = "zgx-desktop"
 version = "0.1.10"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -7614,12 +7614,12 @@ dependencies = [
 [[package]]
 name = "zgx-ghostty-sys"
 version = "0.1.10"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 
 [[package]]
 name = "zgx-gpu"
 version = "0.1.10"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "block2 0.6.2",
  "bytemuck",
@@ -7652,7 +7652,7 @@ dependencies = [
 [[package]]
 name = "zgx-harfrust"
 version = "0.5.3"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -7664,7 +7664,7 @@ dependencies = [
 [[package]]
 name = "zgx-mlua"
 version = "0.12.8"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "bstr",
  "either",
@@ -7679,7 +7679,7 @@ dependencies = [
 [[package]]
 name = "zgx-run"
 version = "0.1.10"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "serde_json",
  "ureq 3.5.0",
@@ -7691,7 +7691,7 @@ dependencies = [
 [[package]]
 name = "zgx-script"
 version = "0.1.10"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "icu_locale_core",
  "icu_plurals",
@@ -7715,7 +7715,7 @@ dependencies = [
 [[package]]
 name = "zgx-swash"
 version = "0.2.11"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "skrifa",
  "yazi",
@@ -7725,7 +7725,7 @@ dependencies = [
 [[package]]
 name = "zgx-taffy"
 version = "0.9.2"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "arrayvec",
  "grid",
@@ -7751,7 +7751,7 @@ dependencies = [
 [[package]]
 name = "zgx-zune-jpeg"
 version = "0.5.15"
-source = "git+https://github.com/Gratenes/zgx?rev=049b4646c572b2d48ce50584a09843a8535cb78f#049b4646c572b2d48ce50584a09843a8535cb78f"
+source = "git+https://github.com/Gratenes/zgx?rev=8bf7f81ddd180f378f4d68882716c3342dda2aaf#8bf7f81ddd180f378f4d68882716c3342dda2aaf"
 dependencies = [
  "zune-core",
 ]
