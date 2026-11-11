@@ -1354,6 +1354,17 @@
         "terms": "focus unfocused",
         "description": "None while Zeron is the app you're in."
       },
+      "badge": {
+        "label": "Show count on app icon",
+        "terms": "badge dock taskbar number unread",
+        "description": "A count of the chats waiting for you."
+      },
+      "badge_count": {
+        "label": "Count",
+        "terms": "badge dock taskbar needs me finished",
+        "needs_me": "Needs me",
+        "all": "Needs me + finished"
+      },
       "sounds": {
         "label": "Session sounds",
         "terms": "audio chime mute"

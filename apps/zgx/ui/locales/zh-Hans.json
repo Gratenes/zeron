@@ -1354,6 +1354,17 @@
         "terms": "焦点 后台 focus unfocused",
         "description": "使用 Zeron 时不显示通知。"
       },
+      "badge": {
+        "label": "在应用图标上显示数量",
+        "terms": "角标 程序坞 任务栏 数字 未读 badge dock taskbar",
+        "description": "等待你处理的聊天数量。"
+      },
+      "badge_count": {
+        "label": "计数范围",
+        "terms": "角标 程序坞 任务栏 需要我 已完成 badge",
+        "needs_me": "需要我处理",
+        "all": "需要我处理 + 已完成"
+      },
       "sounds": {
         "label": "会话声音",
         "terms": "音频 提示音 静音 audio chime mute"

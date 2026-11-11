@@ -15,18 +15,33 @@
 -- chats (not in `chats`) and a chat's side chats and subagents (`children`)
 -- not at all. Reading a chat marks it seen on every device
 -- (`sessions.seen`), and that takes it off the count.
+--
+-- Settings → Notifications can turn it off (`prefs.badge`: off takes the
+-- badge down at once, nothing to restart) or count only the chats that ask
+-- (`prefs.badge_count` "needs_me": status "input"; the default, "all", is
+-- everything above).
 
+local prefs = require("@app/screens/settings/prefs")
 local sessions = require("@account/sessions")
 
 local M = {}
 
 local WAITING = { input = true, done = true, failed = true }
+local ASKING = { input = true }
 
-function M.count(chats: { any }): number
+-- `mode`: "all" (the default) or "needs_me" (only the chats that ask).
+function M.count(chats: { any }, mode: string?): number
 	local n = 0
 	for _, c in chats do
 		-- (`parent`: not a main chat, whatever the host sent it as.)
-		if c.parent == nil and (WAITING[c.status] or c.woke ~= nil) then
+		if c.parent ~= nil then
+			continue
+		end
+		if mode == "needs_me" then
+			if ASKING[c.status] then
+				n += 1
+			end
+		elseif WAITING[c.status] or c.woke ~= nil then
 			n += 1
 		end
 	end
@@ -41,10 +56,12 @@ function M.install()
 		if now.state ~= "ready" then
 			return nil
 		end
-		return M.count(now.chats)
+		return M.count(now.chats, prefs.badge_count:get())
 	end)
 	ui.effect(function()
-		local n = count:get()
+		-- (Off, none: whatever the engine is saying.)
+		local on = prefs.badge:get()
+		local n = if on then count:get() else 0
 		-- (The window's activity read too: told again as it comes forward,
 		-- as a taskbar button made after the first telling, or one made
 		-- again with Explorer, hasn't the badge. It's the same again,

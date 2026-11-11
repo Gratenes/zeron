@@ -69,3 +69,24 @@ fn an_engine_offline_leaves_the_badge_as_it_was() {
     run(&mut app, "badge.offline");
     assert_eq!(badge(&app).as_deref(), Some("4"));
 }
+
+#[test]
+fn turning_the_setting_off_takes_the_badge_down_and_on_puts_it_back() {
+    let mut app = mount();
+    run(&mut app, "badge.mixed");
+    assert_eq!(badge(&app).as_deref(), Some("4"));
+    run(&mut app, "badge.pref_off");
+    assert_eq!(badge(&app), None);
+    run(&mut app, "badge.pref_on");
+    assert_eq!(badge(&app).as_deref(), Some("4"));
+}
+
+#[test]
+fn needs_me_counts_only_the_chats_that_ask() {
+    let mut app = mount();
+    run(&mut app, "badge.mixed");
+    run(&mut app, "badge.pref_needs_me");
+    assert_eq!(badge(&app).as_deref(), Some("1"));
+    run(&mut app, "badge.pref_all");
+    assert_eq!(badge(&app).as_deref(), Some("4"));
+}

@@ -4,6 +4,7 @@
 -- test desktop.
 
 local node = require("./shell_fixture")
+local prefs = require("@app/screens/settings/prefs")
 local sessions = require("@account/sessions")
 
 local NOW = os.time()
@@ -99,5 +100,11 @@ ui.command {
 		say("offline", {}, nil, nil)
 	end,
 }
+
+-- Settings → Notifications' two choices.
+ui.command { id = "badge.pref_off", title = "Badge: setting off", run = function() prefs.badge:set(false) end }
+ui.command { id = "badge.pref_on", title = "Badge: setting on", run = function() prefs.badge:set(true) end }
+ui.command { id = "badge.pref_needs_me", title = "Badge: count only what asks", run = function() prefs.badge_count:set("needs_me") end }
+ui.command { id = "badge.pref_all", title = "Badge: count asks and finished", run = function() prefs.badge_count:set("all") end }
 
 return node

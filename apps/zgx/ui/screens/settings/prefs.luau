@@ -22,6 +22,8 @@
 --                                   (560–1200; the gallery's 660 by default)
 --   prefs.sound(kind):get()         whether a session's chime plays ("done",
 --                                   "request", "attention"; and `sounds`, all of them)
+--   prefs.badge:get()               the app icon shows a count (on by default);
+--   prefs.badge_count:get()         "all" | "needs_me": what it counts
 --
 -- Banners are the engine's, so their three switches are its file's
 -- (`notifications.get`/`.set`, see notifications.luau), not these.
@@ -102,6 +104,18 @@ end
 function M.chimes(kind: string): boolean
 	local one = each[kind]
 	return M.sounds:peek() and one ~= nil and one:peek()
+end
+
+-- The app icon's badge (screens/shell/badge): on by default, and what it
+-- counts, "all" (chats that ask, finished, failed or woke) or "needs_me"
+-- (only the ones that ask).
+M.badge = ui.persist("settings_badge", true)
+M.badge_count = ui.persist("settings_badge_count", "all")
+function M.BADGE_COUNT(): { { value: string, label: string } }
+	return {
+		{ value = "needs_me", label = ui.t("settings.notifications.badge_count.needs_me"):get() },
+		{ value = "all", label = ui.t("settings.notifications.badge_count.all"):get() },
+	}
 end
 
 -- Each agent's completion in the composer (Zeron's Settings → Providers,
