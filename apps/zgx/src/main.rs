@@ -80,6 +80,8 @@ mod label_fade_tests;
 #[cfg(test)]
 mod waiting_toast_tests;
 #[cfg(test)]
+mod taskbar_badge_tests;
+#[cfg(test)]
 mod split_tests;
 #[cfg(test)]
 mod route_motion_tests;
