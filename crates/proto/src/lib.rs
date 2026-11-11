@@ -23,6 +23,7 @@ pub mod redact;
 pub mod relay_gen;
 pub mod providers;
 pub mod run_errors;
+pub mod schedule;
 pub mod sidebar_pins;
 pub mod view;
 pub mod voice;
@@ -33,6 +34,7 @@ pub use cloud::*;
 pub use entities::*;
 pub use preview::*;
 pub use program_status::*;
+pub use schedule::*;
 pub use sidebar_pins::*;
 pub use workspace::*;
 

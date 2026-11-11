@@ -29,6 +29,8 @@ pub(crate) use plugins::is_plugin_tool_name;
 
 /// Default and ceiling for the blocking waits.
 const MAX_BATCH: usize = 32;
+/// The farthest ahead a message may be scheduled (a year, in seconds).
+const MAX_SCHEDULE_SECS: i64 = 366 * 24 * 3600;
 /// Cloud runs these agents (Codex and Claude Code): a Cloud chat's harness.
 const CLOUD_HARNESSES: &[HarnessId] = &[HarnessId::ClaudeCode, HarnessId::Codex];
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
@@ -213,6 +215,40 @@ fn catalog() -> Vec<ToolDef> {
             input_schema: chat_key_schema(json!({
                 "archived": { "type": "boolean", "default": true }
             })),
+        },
+        ToolDef {
+            name: "schedule_message",
+            description: "Send a message into a chat at a later time, once: 'chat' (default: your own chat) gets 'text' as a new message when the time comes, starting a turn if it is idle (or arriving after the turn it is in). Give exactly one of 'at' (an RFC 3339 time with its UTC offset, e.g. 2026-11-12T09:00:00-05:00) or 'in_seconds'. Zeron's own engine on the chat's device sends it, so it fires even if the chat's agent has stopped, and it survives Zeron restarting: if that device was off at the time it is still sent on start within an hour (see 'grace'), else it is dropped as missed. The message arrives marked as scheduled, naming your chat. Returns the schedule id: use list_schedules to see them and cancel_schedule to cancel. At most 50 pending per chat.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chat": { "type": "string", "description": "Chat id, unique id prefix, or exact title. Default: your own chat." },
+                    "text": { "type": "string", "description": "The message to send." },
+                    "at": { "type": "string", "description": "When to send it: an RFC 3339 time with an offset (Z or +hh:mm)." },
+                    "in_seconds": { "type": "integer", "minimum": 1, "maximum": MAX_SCHEDULE_SECS, "description": "Or: this many seconds from now (6 hours is 21600)." }
+                },
+                "required": ["text"]
+            }),
+        },
+        ToolDef {
+            name: "list_schedules",
+            description: "List scheduled messages: pending ones by default (soonest first), or with include_done=true also those already sent, cancelled or missed. Pass chat to list only those going into one chat.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chat": { "type": "string", "description": "Chat id, unique id prefix, or exact title." },
+                    "include_done": { "type": "boolean", "default": false }
+                }
+            }),
+        },
+        ToolDef {
+            name: "cancel_schedule",
+            description: "Cancel a pending scheduled message by its id (or a unique id prefix). You can cancel those you scheduled and those going into your own chat.",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "The schedule id from schedule_message or list_schedules." } },
+                "required": ["id"]
+            }),
         },
     ];
     for (name, single, description) in [
@@ -704,6 +740,26 @@ struct WaitArgs {
 }
 
 #[derive(Deserialize)]
+struct ScheduleArgs {
+    chat: Option<String>,
+    text: String,
+    at: Option<String>,
+    in_seconds: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct ListSchedulesArgs {
+    chat: Option<String>,
+    #[serde(default)]
+    include_done: bool,
+}
+
+#[derive(Deserialize)]
+struct CancelScheduleArgs {
+    id: String,
+}
+
+#[derive(Deserialize)]
 struct ArchiveArgs {
     chat: String,
     archived: Option<bool>,
@@ -863,6 +919,11 @@ impl Tools {
             "interrupt_chat" => self.interrupt_chat(parse(args)?).await,
             "respond_to_input" => self.respond_to_input(parse(args)?).await,
             "archive_chat" => self.archive_chat(parse(args)?).await,
+            // Boxed: `call`'s future holds every arm's, and unboxed these made
+            // an already deep test overflow its stack in debug builds.
+            "schedule_message" => Box::pin(self.schedule_message(parse(args)?)).await,
+            "list_schedules" => Box::pin(self.list_schedules(parse(args)?)).await,
+            "cancel_schedule" => Box::pin(self.cancel_schedule(parse(args)?)).await,
             SHOW_VISUAL => self.show_visual(parse(args)?).await,
             SHOW_IMAGE => self.show_image(parse(args)?).await,
             WAIT_ON_BACKGROUND => self.wait_on_background(parse(args)?).await,
@@ -1551,6 +1612,112 @@ impl Tools {
         Ok(json!({ "chatId": chat.id, "title": chat.title, "turn": turn }))
     }
 
+    async fn schedule_message(&self, args: ScheduleArgs) -> anyhow::Result<Value> {
+        let text = args.text.trim();
+        if text.is_empty() {
+            anyhow::bail!("text is empty");
+        }
+        let now = chrono::Utc::now();
+        let fire_at = match (args.at.as_deref(), args.in_seconds) {
+            (Some(_), Some(_)) | (None, None) => anyhow::bail!("give exactly one of 'at' or 'in_seconds'"),
+            (Some(at), None) => chrono::DateTime::parse_from_rfc3339(at.trim())
+                .map_err(|e| anyhow::anyhow!("'at' is not an RFC 3339 time with an offset (like 2026-11-12T09:00:00-05:00): {e}"))?
+                .with_timezone(&chrono::Utc),
+            (None, Some(secs)) => {
+                if !(1..=MAX_SCHEDULE_SECS).contains(&secs) {
+                    anyhow::bail!("'in_seconds' is 1 to {MAX_SCHEDULE_SECS}");
+                }
+                now + chrono::Duration::seconds(secs)
+            }
+        };
+        if fire_at <= now {
+            anyhow::bail!("that time has already passed");
+        }
+        if fire_at > now + chrono::Duration::seconds(MAX_SCHEDULE_SECS) {
+            anyhow::bail!("at most a year ahead");
+        }
+        let own = self.zeron.origin().chat_id.clone();
+        let key = args
+            .chat
+            .or_else(|| own.clone())
+            .context("chat is required (you are not running in a chat)")?;
+        let chat = self.zeron.resolve_chat(&key).await?;
+        let reply = self
+            .zeron
+            .mutate(json!({
+                "op": "createSchedule",
+                "chatId": chat.id,
+                "text": text,
+                "fireAt": fire_at.timestamp_millis(),
+                "createdBy": own,
+            }))
+            .await?;
+        Ok(json!({
+            "scheduled": reply.get("schedule").cloned().unwrap_or(Value::Null),
+            "chatId": chat.id,
+            "title": chat.title,
+            "fireAt": fire_at.to_rfc3339(),
+        }))
+    }
+
+    async fn list_schedules(&self, args: ListSchedulesArgs) -> anyhow::Result<Value> {
+        let chats = self.zeron.chats().await?;
+        let only = match args.chat.as_deref() {
+            Some(key) => Some(crate::zeron::resolve_chat_in(&chats, key)?.id),
+            None => None,
+        };
+        let rows: Vec<Value> = self
+            .zeron
+            .schedules()
+            .await?
+            .into_iter()
+            .filter(|s| (args.include_done || s.is_pending()) && only.as_deref().is_none_or(|id| s.chat_id == id))
+            .map(|s| {
+                let title = chats.iter().find(|c| c.id == s.chat_id).and_then(|c| c.title.clone());
+                json!({
+                    "id": s.id,
+                    "chatId": s.chat_id,
+                    "title": title,
+                    "state": s.state().as_str(),
+                    "fireAt": s.fire_at.to_rfc3339(),
+                    "text": s.text,
+                    "createdBy": s.created_by,
+                })
+            })
+            .collect();
+        Ok(json!({ "schedules": rows }))
+    }
+
+    async fn cancel_schedule(&self, args: CancelScheduleArgs) -> anyhow::Result<Value> {
+        let key = args.id.trim();
+        if key.is_empty() {
+            anyhow::bail!("id is empty");
+        }
+        let schedules = self.zeron.schedules().await?;
+        let matches: Vec<_> = schedules.iter().filter(|s| s.id == key).collect();
+        let matches = if matches.is_empty() {
+            schedules.iter().filter(|s| s.id.starts_with(key)).collect()
+        } else {
+            matches
+        };
+        let schedule = match matches.as_slice() {
+            [one] => *one,
+            [] => anyhow::bail!("no scheduled message {key}"),
+            _ => anyhow::bail!("{key} matches several scheduled messages: use more of the id"),
+        };
+        if !schedule.is_pending() {
+            anyhow::bail!("{} is already {}", short(&schedule.id), schedule.state().as_str());
+        }
+        let reply = self
+            .zeron
+            .mutate(json!({ "op": "cancelSchedule", "scheduleId": schedule.id }))
+            .await?;
+        Ok(json!({
+            "id": schedule.id,
+            "cancelled": reply.get("cancelled").and_then(Value::as_bool).unwrap_or(true),
+        }))
+    }
+
     async fn archive_chat(&self, args: ArchiveArgs) -> anyhow::Result<Value> {
         let chat = self.zeron.resolve_chat(&args.chat).await?;
         let archived = args.archived.unwrap_or(true);
@@ -2019,6 +2186,11 @@ mod tests {
         stats: Option<Value>,
     }
 
+    /// Whether the newest write was this `Mutate` op.
+    fn params_op_is(writes: &Mutex<Vec<(String, Value)>>, op: &str) -> bool {
+        writes.lock().unwrap().last().is_some_and(|(_, p)| p["op"] == op)
+    }
+
     fn stream(item: Value) -> RpcReply {
         RpcReply::Stream(futures::stream::iter(vec![item]).boxed())
     }
@@ -2107,6 +2279,12 @@ mod tests {
                     RpcReply::Value(self.accounts.clone().unwrap())
                 }
                 methods::WATCH_SESSIONS => stream(json!([])),
+                methods::WATCH_SCHEDULES => stream(json!([
+                    {"id": "sched-aaaa-1", "chatId": "chat-beta-2", "text": "look at the deploy",
+                     "fireAt": "2096-10-02T07:06:40Z", "createdBy": "chat-alpha-1", "createdAt": "2026-11-01T00:00:00Z"},
+                    {"id": "sched-bbbb-2", "chatId": "chat-alpha-1", "text": "old",
+                     "fireAt": "2026-11-02T00:00:00Z", "createdAt": "2026-11-01T00:00:00Z", "firedAt": "2026-11-02T00:00:01Z"},
+                ])),
                 methods::LIST_HARNESSES if remote => RpcReply::Value(json!([
                     {"id":"codex", "name":"Remote Codex", "installed":true},
                     {"id":"cursor", "name":"Disabled Cursor", "installed":true, "enabled":false}
@@ -2157,6 +2335,11 @@ mod tests {
                     if cloud_create {
                         return Ok(RpcReply::Value(json!({
                             "ok": true, "deviceId": "cloud-child", "cwd": "/home/user/app",
+                        })));
+                    }
+                    if method == methods::MUTATE && params_op_is(&self.writes, "createSchedule") {
+                        return Ok(RpcReply::Value(json!({
+                            "ok": true, "schedule": {"id": "sched-new-1"},
                         })));
                     }
                     if method == methods::QUEUE_COMMAND
@@ -3766,5 +3949,75 @@ mod tests {
             whoami["result"]["structuredContent"]["localDeviceId"],
             "dev-local"
         );
+    }
+
+    fn last_write(world: &World) -> Value {
+        world.writes.lock().unwrap().last().unwrap().1.clone()
+    }
+
+    #[tokio::test]
+    async fn schedule_message_defaults_to_the_callers_chat_and_takes_one_kind_of_time() {
+        let world = Arc::new(World::default());
+        let t = tools(world.clone(), Origin { chat_id: Some("chat-alpha-1".into()), device_id: Some("dev-local".into()), ..Default::default() });
+        assert!(t.has("schedule_message") && t.has("list_schedules") && t.has("cancel_schedule"));
+
+        let before = chrono::Utc::now().timestamp_millis();
+        let done = t.call("schedule_message", json!({"text": " ping ", "in_seconds": 21_600})).await.unwrap();
+        assert_eq!(done["chatId"], "chat-alpha-1");
+        assert_eq!(done["scheduled"]["id"], "sched-new-1");
+        let w = last_write(&world);
+        assert_eq!((w["op"].as_str(), w["chatId"].as_str(), w["text"].as_str(), w["createdBy"].as_str()),
+            (Some("createSchedule"), Some("chat-alpha-1"), Some("ping"), Some("chat-alpha-1")));
+        let fire = w["fireAt"].as_i64().unwrap();
+        assert!((before + 21_600_000..=before + 21_600_000 + 5_000).contains(&fire), "{fire}");
+
+        // Another chat, by title, at an exact time.
+        let at = (chrono::Utc::now() + chrono::Duration::hours(2)).with_timezone(&chrono::FixedOffset::west_opt(5 * 3600).unwrap());
+        t.call("schedule_message", json!({"chat": "Beta", "text": "x", "at": at.to_rfc3339()})).await.unwrap();
+        let w = last_write(&world);
+        assert_eq!(w["chatId"], "chat-beta-2");
+        assert_eq!(w["fireAt"].as_i64().unwrap(), at.timestamp_millis());
+
+        for bad in [
+            json!({"text": "x"}),
+            json!({"text": "x", "in_seconds": 60, "at": at.to_rfc3339()}),
+            json!({"text": "x", "in_seconds": 0}),
+            json!({"text": "x", "in_seconds": MAX_SCHEDULE_SECS + 1}),
+            json!({"text": "  ", "in_seconds": 60}),
+            json!({"text": "x", "at": "tomorrow"}),
+            json!({"text": "x", "at": "2026-11-12T09:00:00"}),
+            json!({"text": "x", "at": "2001-01-01T00:00:00Z"}),
+            json!({"chat": "nobody", "text": "x", "in_seconds": 60}),
+        ] {
+            assert!(t.call("schedule_message", bad.clone()).await.is_err(), "{bad}");
+        }
+
+        // Outside a chat there is no default.
+        let outside = tools(world.clone(), Origin::default());
+        assert!(outside.call("schedule_message", json!({"text": "x", "in_seconds": 60})).await.is_err());
+        outside.call("schedule_message", json!({"chat": "Alpha", "text": "x", "in_seconds": 60})).await.unwrap();
+        assert!(last_write(&world)["createdBy"].is_null());
+    }
+
+    #[tokio::test]
+    async fn schedules_list_pending_first_and_cancel_by_prefix() {
+        let world = Arc::new(World::default());
+        let t = tools(world.clone(), Origin { chat_id: Some("chat-alpha-1".into()), ..Default::default() });
+        let pending = t.call("list_schedules", json!({})).await.unwrap();
+        let rows = pending["schedules"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0]["id"].as_str(), rows[0]["title"].as_str(), rows[0]["state"].as_str()),
+            (Some("sched-aaaa-1"), Some("Beta"), Some("pending")));
+        let all = t.call("list_schedules", json!({"include_done": true})).await.unwrap();
+        assert_eq!(all["schedules"].as_array().unwrap().len(), 2);
+        let alpha = t.call("list_schedules", json!({"chat": "Alpha", "include_done": true})).await.unwrap();
+        assert_eq!(alpha["schedules"][0]["state"], "fired");
+
+        t.call("cancel_schedule", json!({"id": "sched-aaaa"})).await.unwrap();
+        let w = last_write(&world);
+        assert_eq!((w["op"].as_str(), w["scheduleId"].as_str()), (Some("cancelSchedule"), Some("sched-aaaa-1")));
+        assert!(t.call("cancel_schedule", json!({"id": "sched-bbbb-2"})).await.is_err(), "already sent");
+        assert!(t.call("cancel_schedule", json!({"id": "sched-"})).await.is_err(), "ambiguous");
+        assert!(t.call("cancel_schedule", json!({"id": "nope"})).await.is_err());
     }
 }

@@ -826,6 +826,41 @@ impl From<RawChat> for Chat {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct RawSchedule {
+    id: String,
+    chat_id: String,
+    text: String,
+    fire_at: i64,
+    #[serde(default)]
+    created_by: Option<String>,
+    #[serde(default)]
+    created_at: i64,
+    #[serde(default)]
+    fired_at: Option<i64>,
+    #[serde(default)]
+    cancelled_at: Option<i64>,
+    #[serde(default)]
+    missed_at: Option<i64>,
+}
+
+impl From<RawSchedule> for zeron_proto::Schedule {
+    fn from(raw: RawSchedule) -> Self {
+        zeron_proto::Schedule {
+            id: raw.id,
+            chat_id: raw.chat_id,
+            text: raw.text,
+            fire_at: dt(raw.fire_at),
+            created_by: raw.created_by,
+            created_at: dt(raw.created_at),
+            fired_at: raw.fired_at.map(dt),
+            cancelled_at: raw.cancelled_at.map(dt),
+            missed_at: raw.missed_at.map(dt),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct RawSession {
     #[serde(default)]
     last_turn_outcome: Option<zeron_proto::NativeTurnOutcome>,

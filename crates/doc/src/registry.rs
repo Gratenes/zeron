@@ -46,6 +46,8 @@ pub const KIND_SIDEBAR_PINS: &str = "sidebarPins";
 /// A repository's name and icon, shared by its copies; see `repository_looks`.
 pub const KIND_REPOSITORY_LOOKS: &str = "repositoryLooks";
 mod repository_looks;
+pub const KIND_SCHEDULES: &str = "schedules";
+mod schedules;
 mod sidebar_pins;
 mod sidebar_sections;
 

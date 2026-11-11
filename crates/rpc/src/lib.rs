@@ -163,6 +163,9 @@ pub mod methods {
     /// → `{removed}`. `false`: it already went out, or was already removed.
     pub const REMOVE_HELD_SEND: &str = "RemoveHeldSend";
     pub const WATCH_CHATS: &str = "WatchChats";
+    /// Every scheduled message (`Schedule[]`, soonest due first), live. Made
+    /// and cancelled with `Mutate` (`createSchedule`, `cancelSchedule`).
+    pub const WATCH_SCHEDULES: &str = "WatchSchedules";
     pub const WATCH_SIDEBAR_PREFERENCES: &str = "WatchSidebarPreferences";
     pub const WATCH_DEVICES: &str = "WatchDevices";
     pub const WATCH_SESSIONS: &str = "WatchSessions";
@@ -782,6 +785,7 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::DEVICE_STATS
             | methods::WATCH_SPACES
             | methods::WATCH_CHATS
+            | methods::WATCH_SCHEDULES
             | methods::WATCH_SESSIONS
             | methods::WATCH_DOC_MESSAGES
             | methods::LIST_HARNESSES
