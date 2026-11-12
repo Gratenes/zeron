@@ -2372,3 +2372,101 @@ async fn updating_a_device_that_cannot_be_reached_says_so_plainly() {
     assert!(error.to_string().contains("can't be reached"), "{error}");
     assert!(error.to_string().contains("didn't start"), "{error}");
 }
+
+/// A file moves between two real engines over the device relay: pulled from the
+/// other device, pushed to it, listed there, and refused outside its folders.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn device_files_copy_between_two_engines_over_the_relay() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().unwrap();
+    let host = assemble(&dirs.path().join("host"), "files-host");
+    let _host_relay = host.start_host_relay(&relay_url);
+    let viewer = assemble(&dirs.path().join("viewer"), "files-viewer");
+    let mut config = LinkCacheConfig::new(relay_url, Arc::new(StaticToken("test-user".into())));
+    config.probe_timeout = Duration::from_secs(5);
+    viewer.set_links(LinkCache::new(config));
+    // Each device's folder is a project there, so it is reachable without touching $HOME.
+    let (host_dir, viewer_dir) = (dirs.path().join("host-files"), dirs.path().join("viewer-files"));
+    std::fs::create_dir_all(&host_dir).unwrap();
+    std::fs::create_dir_all(&viewer_dir).unwrap();
+    host.workspace.create_space("host-space", "files-host", &host_dir.to_string_lossy(), None, false).unwrap();
+    viewer.workspace.create_space("viewer-space", "files-viewer", &viewer_dir.to_string_lossy(), None, false).unwrap();
+    viewer.workspace.upsert_device_row(&zeron_proto::Device {
+        id: "files-host".into(),
+        name: "Host".into(),
+        platform: "linux".into(),
+        last_seen_at: None,
+        created_at: None,
+        version: None,
+        cursor_sdk_version: None,
+        capabilities: vec![],
+    });
+    let data: Vec<u8> = (0..1_300_000usize).map(|i| (i * 7 % 253) as u8).collect();
+    std::fs::write(host_dir.join("call.m4a"), &data).unwrap();
+    let client = zeron_rpc::memory_client(viewer.rpc_service());
+
+    // The host's folder, listed from the viewer.
+    let listing = client
+        .call(methods::DEVICE_FILE_LIST, serde_json::json!({"path": host_dir.to_string_lossy(), "targetDeviceId": "files-host"}))
+        .await
+        .unwrap();
+    assert_eq!(listing["entries"][0]["name"], "call.m4a");
+
+    async fn finished(client: &zeron_rpc::RpcClient, id: &str) -> serde_json::Value {
+        for _ in 0..200 {
+            let job = client.call(methods::DEVICE_FILE_COPY_STATUS, serde_json::json!({"transferId": id})).await.unwrap();
+            if job["state"] != "running" {
+                return job;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("copy never finished");
+    }
+
+    // Host -> viewer (a pull).
+    let started = client
+        .call(methods::DEVICE_FILE_COPY, serde_json::json!({
+            "fromDeviceId": "files-host", "fromPath": host_dir.join("call.m4a").to_string_lossy(),
+            "toPath": viewer_dir.join("call.m4a").to_string_lossy()
+        }))
+        .await
+        .unwrap();
+    let job = finished(&client, started["transferId"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["bytesDone"], 1_300_000);
+    assert_eq!(std::fs::read(viewer_dir.join("call.m4a")).unwrap(), data);
+
+    // Viewer -> host (a push), into a folder that doesn't exist yet.
+    let started = client
+        .call(methods::DEVICE_FILE_COPY, serde_json::json!({
+            "toDeviceId": "files-host", "fromPath": viewer_dir.join("call.m4a").to_string_lossy(),
+            "toPath": host_dir.join("back/").to_string_lossy(), "recursive": false
+        }))
+        .await
+        .unwrap();
+    let job = finished(&client, started["transferId"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "failed", "{job}");
+    assert!(job["error"].as_str().unwrap().starts_with("files.not_found"), "{job}");
+    let started = client
+        .call(methods::DEVICE_FILE_COPY, serde_json::json!({
+            "toDeviceId": "files-host", "fromPath": viewer_dir.join("call.m4a").to_string_lossy(),
+            "toPath": host_dir.join("pushed.m4a").to_string_lossy()
+        }))
+        .await
+        .unwrap();
+    let job = finished(&client, started["transferId"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(std::fs::read(host_dir.join("pushed.m4a")).unwrap(), data);
+
+    // A path outside what the host allows is refused by the host.
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("x"), b"x").unwrap();
+    let error = client
+        .call(methods::DEVICE_FILE_READ, serde_json::json!({"path": outside.path().join("x").to_string_lossy(), "targetDeviceId": "files-host"}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("files.no_grant"), "{error}");
+    viewer.shutdown().await;
+    host.shutdown().await;
+}

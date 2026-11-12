@@ -22,6 +22,7 @@ use zeron_proto::{
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
+mod device_files;
 mod plugins;
 mod themes;
 pub use plugins::ListedTool;
@@ -292,6 +293,7 @@ fn catalog() -> Vec<ToolDef> {
     });
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
+    tools.extend(device_files::catalog());
     tools
 }
 
@@ -874,6 +876,9 @@ impl Tools {
             }
             plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
                 return self.template_packages(name, args).await;
+            }
+            files if device_files::NAMES.contains(&files) => {
+                return Box::pin(self.device_files(files, args)).await;
             }
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;
