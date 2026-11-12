@@ -356,6 +356,17 @@ pub mod methods {
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";
     pub const READ_ATTACHMENT_CHUNK: &str = "ReadAttachmentChunk";
+    // Device files (relay-forwardable): this device's files by absolute path, in bounded
+    // chunks, inside the engine's allowed folders. The phone answers the same shapes as
+    // `files_*` over `PhoneCall`.
+    pub const DEVICE_FILE_LIST: &str = "DeviceFileList";
+    pub const DEVICE_FILE_STAT: &str = "DeviceFileStat";
+    pub const DEVICE_FILE_HASH: &str = "DeviceFileHash";
+    pub const DEVICE_FILE_READ: &str = "DeviceFileRead";
+    pub const DEVICE_FILE_WRITE_PART: &str = "DeviceFileWritePart";
+    /// Copy a file or folder between two devices' files, run by the engine asked (never forwarded).
+    pub const DEVICE_FILE_COPY: &str = "DeviceFileCopy";
+    pub const DEVICE_FILE_COPY_STATUS: &str = "DeviceFileCopyStatus";
     /// One chunk of an image an agent's reply names in Markdown
     /// (`![alt](path)`), read only from inside that chat's working folder.
     pub const READ_CHAT_IMAGE_CHUNK: &str = "ReadChatImageChunk";

@@ -23,6 +23,7 @@ use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
 mod phone;
+mod device_files;
 mod plugins;
 mod themes;
 pub use plugins::ListedTool;
@@ -354,6 +355,7 @@ fn catalog() -> Vec<ToolDef> {
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
     tools.extend(phone::catalog());
+    tools.extend(device_files::catalog());
     tools
 }
 
@@ -983,6 +985,9 @@ impl Tools {
             }
             phone if phone::NAMES.contains(&phone) => {
                 return self.phone(phone, args).await;
+            }
+            files if device_files::NAMES.contains(&files) => {
+                return Box::pin(self.device_files(files, args)).await;
             }
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;

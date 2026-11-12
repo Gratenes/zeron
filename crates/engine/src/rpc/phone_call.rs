@@ -5,11 +5,12 @@
 //! Only a device in this account's list is asked, the phone's own per-tool
 //! switches decide what it does, and the ask is bounded by [`DEADLINE`].
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use zeron_proto::Device;
-use zeron_rpc::{RpcError, RpcReply, methods};
+use zeron_rpc::{LinkCache, RpcError, RpcReply, methods};
 
 use super::EngineRpc;
 
@@ -34,7 +35,10 @@ static LAST_CALL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap
 
 /// Whether a call to `device` has armed the timer that lets its link go (for tests).
 pub(crate) fn link_idle_pending(device: &str) -> bool {
-    LAST_CALL.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(device)
+    LAST_CALL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(device)
 }
 
 /// A phone that restarted keeps its agent link down until the person has unlocked it once by hand.
@@ -50,8 +54,11 @@ fn with_restart_hint(error: RpcError) -> RpcError {
 impl EngineRpc {
     /// One ask of the phone over its device room. A phone is dialed whatever its registry
     /// presence says (it rests its workspace sockets): the room tells at once if its host is away.
-    async fn ask_phone(&self, target: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
-        let links = self.links.as_ref().ok_or_else(|| RpcError::Failed("peer links unavailable (offline)".into()))?;
+    async fn ask_phone(
+        links: &Arc<LinkCache>,
+        target: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
         links.reset_cooldown(target);
         let client = links.client_ignoring_presence(target).await?;
         match client.call(methods::PHONE_CALL, params).await {
@@ -66,10 +73,11 @@ impl EngineRpc {
     }
 
     /// Close the link to `target` after [`LINK_IDLE`] with no newer call.
-    fn close_phone_link_when_idle(&self, target: &str) {
-        let Some(links) = self.links.clone() else { return };
+    fn close_phone_link_when_idle(links: Arc<LinkCache>, target: &str) {
         let generation = {
-            let mut last = LAST_CALL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut last = LAST_CALL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let next = last.get(target).copied().unwrap_or(0) + 1;
             last.insert(target.to_owned(), next);
             next
@@ -77,7 +85,9 @@ impl EngineRpc {
         let target = target.to_owned();
         tokio::spawn(async move {
             tokio::time::sleep(LINK_IDLE).await;
-            let mut last = LAST_CALL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut last = LAST_CALL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if last.get(&target) == Some(&generation) {
                 last.remove(&target);
                 links.invalidate(&target);
@@ -107,22 +117,34 @@ impl EngineRpc {
                 device.name
             )));
         }
+        let links = self.links.clone().expect("checked above");
+        Self::ask_line(links, device, params, DEADLINE).await
+    }
+
+    /// One call to the phone `device` over its device room: waits for a phone that is away to
+    /// dial in, answers within `deadline`, and lets the link go after the last call.
+    pub(crate) async fn ask_line(
+        links: Arc<LinkCache>,
+        device: &Device,
+        params: serde_json::Value,
+        deadline: Duration,
+    ) -> Result<RpcReply, RpcError> {
+        let target = device.id.as_str();
         let started = tokio::time::Instant::now();
         let asked = loop {
-            let left = DEADLINE.saturating_sub(started.elapsed());
-            let reply = tokio::time::timeout(left, self.ask_phone(target, params.clone())).await;
+            let left = deadline.saturating_sub(started.elapsed());
+            let reply =
+                tokio::time::timeout(left, Self::ask_phone(&links, target, params.clone())).await;
             match reply {
                 Ok(Err(error)) if is_away(&error) && started.elapsed() < WAKE_WAIT => {
                     tracing::debug!(%target, %error, "phone call: the phone is away, waiting for it");
-                    if let Some(links) = &self.links {
-                        links.invalidate(target);
-                    }
+                    links.invalidate(target);
                     tokio::time::sleep(WAKE_POLL).await;
                 }
                 other => break other,
             }
         };
-        self.close_phone_link_when_idle(target);
+        Self::close_phone_link_when_idle(links.clone(), target);
         match asked {
             Ok(Ok(reply @ RpcReply::Value(_))) => Ok(reply),
             Ok(Ok(RpcReply::Stream(_))) => Err(RpcError::Failed(format!(
@@ -135,13 +157,11 @@ impl EngineRpc {
             ))),
             Ok(Err(error)) => Err(with_restart_hint(remote_error(device, error, Utc::now()))),
             Err(_) => {
-                if let Some(links) = &self.links {
-                    links.invalidate(target);
-                }
+                links.invalidate(target);
                 Err(RpcError::Failed(format!(
                     "{} didn't answer within {} s: the phone may be asleep, offline, or waiting on a person",
                     device.name,
-                    DEADLINE.as_secs()
+                    deadline.as_secs()
                 )))
             }
         }
@@ -153,15 +173,25 @@ impl EngineRpc {
 fn is_away(error: &RpcError) -> bool {
     let lower = error.to_string().to_ascii_lowercase();
     matches!(error, RpcError::Transport(_) | RpcError::Closed)
-        || ["offline", "unreachable", "cannot reach", "host_offline", "host_closed"]
-            .iter()
-            .any(|word| lower.contains(word))
+        || [
+            "offline",
+            "unreachable",
+            "cannot reach",
+            "host_offline",
+            "host_closed",
+        ]
+        .iter()
+        .any(|word| lower.contains(word))
 }
 
 /// What a failed remote ask says, in the phone's own name.
 fn remote_error(device: &Device, error: RpcError, now: DateTime<Utc>) -> RpcError {
     if is_away(&error) {
-        return RpcError::Failed(format!("{} is offline ({})", device.name, last_seen(device, now)));
+        return RpcError::Failed(format!(
+            "{} is offline ({})",
+            device.name,
+            last_seen(device, now)
+        ));
     }
     RpcError::Failed(format!("{}: {error}", device.name))
 }
@@ -179,5 +209,8 @@ fn last_seen(device: &Device, now: DateTime<Utc>) -> String {
         86_400..172_800 => "1 day ago".to_string(),
         _ => format!("{} days ago", ago / 86_400),
     };
-    format!("last seen {}, {ago}", at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    format!(
+        "last seen {}, {ago}",
+        at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    )
 }

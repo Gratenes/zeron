@@ -57,6 +57,7 @@ pub mod desktop_notify;
 pub mod device_stats;
 pub mod diff_sync;
 pub mod doc_host;
+pub mod device_files;
 mod fs_watch;
 mod git_tree;
 pub mod harness_updates;

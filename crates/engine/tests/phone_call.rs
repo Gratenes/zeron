@@ -279,3 +279,119 @@ async fn the_link_to_a_phone_is_dropped_when_it_has_been_quiet() {
     // Paused time can't be used with real sockets: ask the engine whether its idle timer is armed.
     assert!(zeron_engine::phone_link_idle_pending("pixel"), "a quiet-spell timer is running for the phone");
 }
+
+// ---------------------------------------------------------------------------
+// Device files: a phone's `files_*` tools, through PhoneCall
+// ---------------------------------------------------------------------------
+
+/// A phone with one granted folder, answering `files_*` with the same shapes and errors as Zeron
+/// for Android (here from the engine's own implementation of them).
+struct FilesPhone {
+    policy: zeron_engine::device_files::Policy,
+    tools: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+}
+
+#[async_trait]
+impl RpcService for FilesPhone {
+    async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        use zeron_engine::device_files::copy::{Op, run_local};
+        match method {
+            methods::LIST_HARNESSES => RpcReply::value(&serde_json::json!([])),
+            methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
+            methods::PHONE_CALL => {
+                let tool = params["tool"].as_str().unwrap_or_default().to_string();
+                self.tools.lock().unwrap().push((tool.clone(), params["args"].clone()));
+                let op = match tool.as_str() {
+                    "files_list" => Op::List,
+                    "files_stat" => Op::Stat,
+                    "files_hash" => Op::Hash,
+                    "files_read" => Op::Read,
+                    "files_write_part" => Op::WritePart,
+                    other => return Err(RpcError::Failed(format!("unknown tool {other}"))),
+                };
+                run_local(&self.policy, op, params["args"].clone()).map(RpcReply::Value).map_err(RpcError::Failed)
+            }
+            other => Err(RpcError::UnknownMethod(other.into())),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn files_move_between_the_engine_and_a_phone_through_its_files_tools() {
+    let (relay_url, _relay) = fake_device_room().await;
+    let dirs = tempfile::tempdir().expect("tempdir");
+    let a = asker(&dirs.path().join("a"), &relay_url);
+    a.workspace.upsert_device_row(&phone_row("pixel"));
+    let phone_dir = std::fs::canonicalize(dirs.path()).unwrap().join("recordings");
+    let pc_dir = std::fs::canonicalize(dirs.path()).unwrap().join("pc");
+    std::fs::create_dir_all(&phone_dir).unwrap();
+    std::fs::create_dir_all(&pc_dir).unwrap();
+    a.workspace.create_space("pc-space", "asking-device", &pc_dir.to_string_lossy(), None, false).unwrap();
+    let data: Vec<u8> = (0..1_100_000usize).map(|i| (i * 13 % 251) as u8).collect();
+    std::fs::write(phone_dir.join("call-1.m4a"), &data).unwrap();
+    let tools = Arc::new(Mutex::new(Vec::new()));
+    let phone_policy = zeron_engine::device_files::Policy::new(&phone_dir, &dirs.path().join("phone-data"), []);
+    let mut config = HostRelayConfig::new(&relay_url, "pixel", Arc::new(StaticToken("test-user".into())));
+    config.keepalive = Some(Duration::from_secs(60));
+    let _phone = HostRelay::spawn(config, Arc::new(FilesPhone { policy: phone_policy, tools: tools.clone() }), Arc::new(|_| true));
+    let client = zeron_rpc::memory_client(a.rpc_service());
+
+    // The phone's folder is listed through the same method as a computer's.
+    let listing = loop {
+        match client.call(methods::DEVICE_FILE_LIST, serde_json::json!({"path": phone_dir.to_string_lossy(), "targetDeviceId": "pixel"})).await {
+            Err(e) if e.to_string().contains("offline") => tokio::time::sleep(Duration::from_millis(100)).await,
+            other => break other.unwrap(),
+        }
+    };
+    assert_eq!(listing["entries"][0]["name"], "call-1.m4a");
+
+    async fn finished(client: &zeron_rpc::RpcClient, id: &str) -> serde_json::Value {
+        for _ in 0..300 {
+            let job = client.call(methods::DEVICE_FILE_COPY_STATUS, serde_json::json!({"transferId": id})).await.unwrap();
+            if job["state"] != "running" {
+                return job;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("copy never finished");
+    }
+
+    // Phone -> PC.
+    let started = client
+        .call(methods::DEVICE_FILE_COPY, serde_json::json!({
+            "fromDeviceId": "pixel", "fromPath": phone_dir.join("call-1.m4a").to_string_lossy(),
+            "toPath": pc_dir.join("call-1.m4a").to_string_lossy()
+        }))
+        .await
+        .unwrap();
+    let job = finished(&client, started["transferId"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(std::fs::read(pc_dir.join("call-1.m4a")).unwrap(), data);
+
+    // PC -> phone, a folder with its subfolder: the phone is asked only for what it knows.
+    std::fs::create_dir_all(pc_dir.join("out/sub")).unwrap();
+    std::fs::write(pc_dir.join("out/sub/x.bin"), b"hello phone").unwrap();
+    let started = client
+        .call(methods::DEVICE_FILE_COPY, serde_json::json!({
+            "toDeviceId": "pixel", "fromPath": pc_dir.join("out/sub/x.bin").to_string_lossy(),
+            "toPath": phone_dir.join("x.bin").to_string_lossy()
+        }))
+        .await
+        .unwrap();
+    let job = finished(&client, started["transferId"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(std::fs::read(phone_dir.join("x.bin")).unwrap(), b"hello phone");
+    let seen = tools.lock().unwrap().clone();
+    assert!(seen.iter().any(|(t, _)| t == "files_read"));
+    assert!(seen.iter().any(|(t, _)| t == "files_write_part"));
+    assert!(seen.iter().all(|(_, args)| args.get("makeParents").is_none() && args.get("targetDeviceId").is_none()));
+
+    // A folder the phone didn't grant: its own refusal, in its own words.
+    let other = tempfile::tempdir().unwrap();
+    let error = client
+        .call(methods::DEVICE_FILE_READ, serde_json::json!({"path": other.path().join("z").to_string_lossy(), "targetDeviceId": "pixel"}))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("files.no_grant"), "{error}");
+}

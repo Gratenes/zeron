@@ -923,6 +923,8 @@ pub struct EngineRpc {
     /// The plugins service (absent in bare test assemblies).
     plugins: Option<crate::plugins::Plugins>,
     engine_info: EngineInfo,
+    /// Device-file copies this engine runs (`DeviceFileCopy`).
+    device_file_jobs: crate::device_files::copy::Jobs,
 }
 
 impl EngineRpc {
@@ -984,6 +986,7 @@ impl EngineRpc {
             viewport_focus: Default::default(),
             plugins: None,
             engine_info,
+            device_file_jobs: Default::default(),
         }
     }
 
@@ -1815,6 +1818,114 @@ impl EngineRpc {
             ));
         }
         self.forward(target, methods::APPLY_UPDATE, params).await
+    }
+
+    /// What other devices may reach on this one: home, project folders, minus the deny-list.
+    fn device_files_policy(&self) -> crate::device_files::Policy {
+        let mut roots: Vec<std::path::PathBuf> = self
+            .workspace
+            .read_spaces()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.device_id == self.doc_host.device_id())
+            .map(|s| std::path::PathBuf::from(s.path))
+            .collect();
+        roots.extend(self.workspace.read_chats().unwrap_or_default().into_iter().filter_map(|c| c.cwd).map(std::path::PathBuf::from));
+        crate::device_files::Policy::new(&crate::repos::home_dir(), self.repos.data_dir(), roots)
+    }
+
+    /// `method` answered by the phone `target`, or `None` when it isn't a phone.
+    async fn device_file_on_phone(&self, target: &str, method: &str, params: &serde_json::Value) -> Option<Result<RpcReply, RpcError>> {
+        use crate::device_files::copy::{Op, Peer, PhonePeer};
+        let device = self.workspace.watch_devices().borrow().iter().find(|d| d.id == target && d.platform == "android").cloned()?;
+        let links = self.links.clone()?;
+        let op = match method {
+            methods::DEVICE_FILE_LIST => Op::List,
+            methods::DEVICE_FILE_STAT => Op::Stat,
+            methods::DEVICE_FILE_HASH => Op::Hash,
+            methods::DEVICE_FILE_READ => Op::Read,
+            _ => Op::WritePart,
+        };
+        let deadline = if op == Op::WritePart && params.get("offset").and_then(|v| v.as_u64()) == Some(0) {
+            crate::device_files::copy::FIRST_WRITE_DEADLINE
+        } else if op == Op::Hash {
+            std::time::Duration::from_secs(300)
+        } else {
+            crate::device_files::copy::CALL_DEADLINE
+        };
+        Some(PhonePeer { links, device }.call(op, params.clone(), deadline).await.map(RpcReply::Value).map_err(RpcError::Failed))
+    }
+
+    /// The device-file methods; boxed by the dispatcher so its frame stays small.
+    async fn device_files_rpc(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        use crate::device_files::copy::{Op, run_local};
+        let op = match method {
+            methods::DEVICE_FILE_COPY => return self.device_file_copy(params).await,
+            methods::DEVICE_FILE_COPY_STATUS => {
+                let id = params.get("transferId").and_then(|v| v.as_str()).unwrap_or_default();
+                return match self.device_file_jobs.get(id) {
+                    Some(job) => RpcReply::value(&job),
+                    None => Err(RpcError::BadParams(format!("no copy {id} (this engine only remembers its last 50)"))),
+                };
+            }
+            methods::DEVICE_FILE_LIST => Op::List,
+            methods::DEVICE_FILE_STAT => Op::Stat,
+            methods::DEVICE_FILE_HASH => Op::Hash,
+            methods::DEVICE_FILE_READ => Op::Read,
+            _ => Op::WritePart,
+        };
+        let policy = self.device_files_policy();
+        let reply = tokio::task::spawn_blocking(move || run_local(&policy, op, params))
+            .await
+            .map_err(|e| RpcError::Failed(e.to_string()))?
+            .map_err(RpcError::Failed)?;
+        Ok(RpcReply::Value(reply))
+    }
+
+    /// `DeviceFileCopy {fromDeviceId?, fromPath, toDeviceId?, toPath, overwrite?, recursive?}`:
+    /// start the copy and answer `{transferId}`; `DeviceFileCopyStatus` follows it. An absent
+    /// or own device id is this engine's own files.
+    async fn device_file_copy(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        use crate::device_files::copy::{LocalPeer, Peer, RemotePeer, Request};
+        let text = |key: &str| params.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty());
+        let need = |key: &str| text(key).ok_or_else(|| RpcError::BadParams(format!("DeviceFileCopy needs {key}")));
+        let me = self.doc_host.device_id().to_string();
+        let peer = |key: &str| -> Result<std::sync::Arc<dyn Peer>, RpcError> {
+            match text(key) {
+                None => Ok(std::sync::Arc::new(LocalPeer(self.device_files_policy()))),
+                Some(id) if id == me => Ok(std::sync::Arc::new(LocalPeer(self.device_files_policy()))),
+                Some(id) => {
+                    let known = self.workspace.watch_devices().borrow().iter().any(|d| d.id == id);
+                    if !known {
+                        return Err(RpcError::BadParams(format!("{id} isn't one of this account's devices")));
+                    }
+                    let links = self.links.clone().ok_or_else(|| {
+                        RpcError::Failed(format!("Can't reach {id}: this device isn't connected (signed out or offline)"))
+                    })?;
+                    let phone = self
+                        .workspace
+                        .watch_devices()
+                        .borrow()
+                        .iter()
+                        .find(|d| d.id == id && d.platform == "android")
+                        .cloned();
+                    Ok(match phone {
+                        Some(device) => std::sync::Arc::new(crate::device_files::copy::PhonePeer { links, device }),
+                        None => std::sync::Arc::new(RemotePeer { links, target: id.to_string() }),
+                    })
+                }
+            }
+        };
+        let request = Request {
+            from_path: need("fromPath")?.to_string(),
+            to_path: need("toPath")?.to_string(),
+            overwrite: params.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false),
+            recursive: params.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false),
+        };
+        let (src, dst) = (peer("fromDeviceId")?, peer("toDeviceId")?);
+        let (id, job) = self.device_file_jobs.start();
+        tokio::spawn(crate::device_files::copy::run(src, dst, request, job));
+        RpcReply::value(&serde_json::json!({ "transferId": id }))
     }
 
     async fn forward(
@@ -2695,6 +2806,11 @@ fn forwardable(method: &str) -> bool {
             | methods::UPLOAD_CHUNK
             | methods::UPLOAD_COMMIT
             | methods::READ_ATTACHMENT_CHUNK
+            | methods::DEVICE_FILE_LIST
+            | methods::DEVICE_FILE_STAT
+            | methods::DEVICE_FILE_HASH
+            | methods::DEVICE_FILE_READ
+            | methods::DEVICE_FILE_WRITE_PART
             | methods::READ_CHAT_IMAGE_CHUNK
             // A command's whole output lives in its host's run journal.
             | methods::READ_TOOL_OUTPUT
@@ -3350,6 +3466,18 @@ impl RpcService for EngineRpc {
                     | methods::CLOSE_TERMINAL
             ) {
                 return self.remote_terminal(&target, method, params).await;
+            }
+            // A phone answers a file call as its `files_*` tool, not as a method of its own.
+            if matches!(
+                method,
+                methods::DEVICE_FILE_LIST
+                    | methods::DEVICE_FILE_STAT
+                    | methods::DEVICE_FILE_HASH
+                    | methods::DEVICE_FILE_READ
+                    | methods::DEVICE_FILE_WRITE_PART
+            ) && let Some(reply) = self.device_file_on_phone(&target, method, &params).await
+            {
+                return reply;
             }
             if method == methods::UPDATE_STATUS {
                 return self.follow_update_status(target, params).await;
@@ -5783,6 +5911,16 @@ impl RpcService for EngineRpc {
                 .map_err(|e| RpcError::Failed(e.to_string()))?
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&chunk)
+            }
+            methods::DEVICE_FILE_LIST
+            | methods::DEVICE_FILE_STAT
+            | methods::DEVICE_FILE_HASH
+            | methods::DEVICE_FILE_READ
+            | methods::DEVICE_FILE_WRITE_PART => {
+                Box::pin(self.device_files_rpc(method, params)).await
+            }
+            methods::DEVICE_FILE_COPY | methods::DEVICE_FILE_COPY_STATUS => {
+                Box::pin(self.device_files_rpc(method, params)).await
             }
             methods::READ_CHAT_IMAGE_CHUNK => {
                 let p: ReadChatImageChunkParams = parse_params(params)?;
