@@ -99,6 +99,8 @@ pub(crate) struct ClientInner {
     pub(crate) terminals_wake: Arc<tokio::sync::Notify>,
     /// When the app last went to the background.
     backgrounded_at: Mutex<Option<std::time::Instant>>,
+    /// This phone's own device-room host for agents' phone tools (phone_host.rs).
+    pub(crate) phone_host: Mutex<Option<zeron_rpc::HostRelay>>,
 }
 
 impl Drop for ClientInner {
@@ -798,6 +800,7 @@ impl Client {
             remote_terminals: Default::default(),
             terminals_wake: Arc::new(tokio::sync::Notify::new()),
             backgrounded_at: Mutex::new(None),
+            phone_host: Mutex::new(None),
             credentials: credentials.clone(),
             config,
         });
@@ -882,6 +885,7 @@ impl Client {
             }
         }
         self.inner.cancel.cancel();
+        *lock(&self.inner.phone_host) = None;
         // Dropping the cores stops their rooms (each flushes its snapshot).
         lock(&self.inner.sessions).clear();
         self.inner.attachment_cache.clear();

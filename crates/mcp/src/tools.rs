@@ -22,6 +22,7 @@ use zeron_proto::{
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
 use crate::zeron::{HarnessInfo, TranscriptFollow, TurnOutcome, Zeron, session_for, short};
 
+mod phone;
 mod plugins;
 mod themes;
 pub use plugins::ListedTool;
@@ -352,6 +353,7 @@ fn catalog() -> Vec<ToolDef> {
     });
     tools.extend(plugins::catalog());
     tools.extend(themes::catalog());
+    tools.extend(phone::catalog());
     tools
 }
 
@@ -978,6 +980,9 @@ impl Tools {
             }
             plugins::EXPORT_TEMPLATE | plugins::IMPORT_TEMPLATE => {
                 return self.template_packages(name, args).await;
+            }
+            phone if phone::NAMES.contains(&phone) => {
+                return self.phone(phone, args).await;
             }
             theme if themes::NAMES.contains(&theme) => {
                 return self.themes(theme, args).await;

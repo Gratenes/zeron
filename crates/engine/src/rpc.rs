@@ -63,6 +63,8 @@
 mod agent_gate;
 mod device_stats;
 mod remote_plugins;
+mod phone_call;
+pub(crate) use phone_call::link_idle_pending as phone_link_idle_pending;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -3269,6 +3271,11 @@ impl RpcService for EngineRpc {
         // account's devices with its own deadline and error words.
         if method == methods::DEVICE_STATS {
             return self.device_stats(params).await;
+        }
+        // An agent's call to a phone's tools: forwarded to the phone's own
+        // relay host, with a deadline and the phone's name in the errors.
+        if method == methods::PHONE_CALL {
+            return self.phone_call(params).await;
         }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.

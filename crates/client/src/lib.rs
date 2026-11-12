@@ -37,6 +37,7 @@ pub mod error;
 pub mod events;
 mod host_stream;
 mod live;
+pub mod phone_host;
 pub mod provider_login;
 pub mod providers;
 pub mod rpc;
@@ -53,6 +54,7 @@ pub use config::{
 };
 pub use connectivity::{Connectivity, ConnectivityState, SendState};
 pub use error::ClientError;
+pub use phone_host::PhoneTools;
 pub use events::{ClientEvent, ClientListener};
 pub use provider_login::{LoginProvider, ProviderLoginStart};
 pub use session::{
