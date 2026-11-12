@@ -11,6 +11,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use zeron_proto::{EngineInfo, HarnessId, WorkspaceScope};
+
+/// Whether a call to the phone `device` has armed the timer that lets its link go (for tests).
+#[doc(hidden)]
+pub fn phone_link_idle_pending(device: &str) -> bool {
+    rpc::phone_link_idle_pending(device)
+}
 use zeron_rpc::{RpcError, RpcReply, RpcService, methods};
 
 use zeron_sync::DocsStore;

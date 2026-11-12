@@ -165,6 +165,11 @@ pub mod methods {
     pub const LOCAL_DEVICE: &str = "LocalDevice";
     /// This engine runtime's fixed device and workspace identity.
     pub const ENGINE_INFO: &str = "EngineInfo";
+    /// An agent's call to a phone's tools (`phone_*` in Zeron's MCP):
+    /// `{targetDeviceId, tool, args}` → whatever the phone's tool returns.
+    /// Only a phone device (Zeron for Android) answers it; every other engine
+    /// refuses. The calling engine forwards it over the relay with a deadline.
+    pub const PHONE_CALL: &str = "PhoneCall";
     /// Readiness barrier for the engine runtime. The call completes once stores
     /// and journals are assembled, or fails with the assembly error.
     pub const ENGINE_READY: &str = "EngineReady";
@@ -701,6 +706,7 @@ pub fn agent_allowed(method: &str) -> bool {
         methods::ENGINE_INFO
             | methods::LOCAL_DEVICE
             | methods::WATCH_DEVICES
+            | methods::PHONE_CALL
             | methods::WATCH_SPACES
             | methods::WATCH_CHATS
             | methods::WATCH_SESSIONS
@@ -864,6 +870,16 @@ pub fn memory_client(service: Arc<dyn RpcService>) -> RpcClient {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_agent_may_call_the_phone_but_a_peer_may_too() {
+        // The tools' MCP server calls PhoneCall with the agent-scoped token...
+        assert!(agent_allowed(methods::PHONE_CALL));
+        // ...and it is not one of the methods a relay refuses a peer (a phone's own
+        // device room serves it to the account's other devices).
+        assert!(!local_only(methods::PHONE_CALL));
+        assert!(!peer_refused(methods::PHONE_CALL, &serde_json::json!({ "tool": "ping" })));
+    }
+
     use super::*;
     use futures::StreamExt;
     use std::sync::Mutex;

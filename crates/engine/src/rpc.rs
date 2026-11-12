@@ -60,6 +60,8 @@
 //! whose checkout always lives on the routed target device.
 
 mod agent_gate;
+mod phone_call;
+pub(crate) use phone_call::link_idle_pending as phone_link_idle_pending;
 mod voice_chat;
 mod voice_remote;
 use async_trait::async_trait;
@@ -2886,6 +2888,11 @@ impl RpcService for EngineRpc {
         // An agent's chats: capped at its own access, runs as the chat is
         // set, attributed by Zeron (rpc/agent_gate.rs). Before forwarding.
         let params = self.agent_gate(method, params)?;
+        // An agent's call to a phone's tools: forwarded to the phone's own
+        // relay host, with a deadline and the phone's name in the errors.
+        if method == methods::PHONE_CALL {
+            return self.phone_call(params).await;
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)

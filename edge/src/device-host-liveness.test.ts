@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pickLiveHost } from "./device-room";
+import { hostLivenessMs, pickLiveHost } from "./device-room";
 
 // The bug this guards: a host whose uplink died silently leaves a socket the
 // runtime still lists (no close event ever fires, and the supersede `close()`
@@ -94,5 +94,16 @@ describe("device-room host selection", () => {
         "leaving"
       )
     ).toBe("successor");
+  });
+
+  it("keeps routing to a phone that pings seldom for three of its intervals", () => {
+    expect(hostLivenessMs(undefined)).toBe(75_000);
+    expect(hostLivenessMs(10_000)).toBe(75_000); // never shorter than the usual window
+    expect(hostLivenessMs(60_000)).toBe(180_000);
+    expect(hostLivenessMs(9_999_999)).toBe(900_000); // a declared interval is capped at 5 minutes
+    const phone = (silentMs: number) =>
+      pickLiveHost([{ ws: "phone", lastSeenAt: NOW - silentMs, livenessMs: hostLivenessMs(60_000) }], NOW);
+    expect(phone(150_000)).toBe("phone");
+    expect(phone(181_000)).toBeUndefined();
   });
 });

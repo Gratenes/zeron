@@ -331,6 +331,11 @@ pub struct HostRelayConfig {
     pub token: Arc<dyn TokenSource>,
     /// Reconnect delay after a session ends (a small jitter is added).
     pub retry: Duration,
+    /// A slower keepalive than [`PING_INTERVAL`], for a host on a battery (a
+    /// phone). The silence lease follows it ([`HostRelayConfig::timing`]) and the
+    /// room is told (`keepalive` seconds on the join), so it keeps routing to a
+    /// host that pings this seldom (`HOST_LIVENESS_MS` in the edge's room).
+    pub keepalive: Option<Duration>,
 }
 
 impl HostRelayConfig {
@@ -344,6 +349,17 @@ impl HostRelayConfig {
             device_id: device_id.into(),
             token,
             retry: Duration::from_secs(5),
+            keepalive: None,
+        }
+    }
+
+    /// The ping interval and silence lease this host runs on. A host that
+    /// pings every `k` is dead after 2.5 `k` of silence (one lost pong is
+    /// forgiven, as at [`PING_INTERVAL`] / [`SILENCE_LEASE`]).
+    fn timing(&self) -> (Duration, Duration) {
+        match self.keepalive {
+            Some(k) => (k.max(Duration::from_secs(10)), k.max(Duration::from_secs(10)).mul_f32(2.5)),
+            None => (PING_INTERVAL, SILENCE_LEASE),
         }
     }
 }
@@ -416,9 +432,14 @@ impl HostRelay {
                             &token,
                         );
                         let url = format!("{url}&nudgeAck=1");
+                        let timing = config.timing();
+                        let url = match config.keepalive {
+                            Some(_) => format!("{url}&keepalive={}", timing.0.as_secs()),
+                            None => url,
+                        };
                         let started = tokio::time::Instant::now();
                         let outcome = {
-                            let session = host_session(&url, &service, &on_nudge);
+                            let session = host_session(&url, &service, &on_nudge, timing);
                             tokio::pin!(session);
                             loop {
                                 tokio::select! {
@@ -596,6 +617,7 @@ async fn host_session(
     url: &str,
     service: &Arc<dyn RpcService>,
     on_nudge: &NudgeHandler,
+    (ping, lease): (Duration, Duration),
 ) -> Result<(), RpcError> {
     let ws = zeron_sync::dial::connect_ws(url)
         .await
@@ -609,8 +631,8 @@ async fn host_session(
         in_tx,
         WsMessage::Binary,
         binary_frame,
-        PING_INTERVAL,
-        SILENCE_LEASE,
+        ping,
+        lease,
     );
     let mut conns: HashMap<String, VirtualConn> = HashMap::new();
     let dispatch = async {
@@ -1102,6 +1124,18 @@ impl LinkCache {
     /// window should ride over it, not error (user report: refs/folders
     /// "unstable" vs the old app).
     pub async fn client(self: &Arc<Self>, device_id: &str) -> Result<Arc<RpcClient>, RpcError> {
+        self.client_inner(device_id, true).await
+    }
+
+    /// [`Self::client`] without the registry-dark gate, for a device that is quiet on purpose:
+    /// a phone that rests its workspace sockets to spare its battery sends no presence, yet
+    /// its device room's host is there (or the dial's readiness probe bounces `host_offline`
+    /// at once). The dial cooldown still applies.
+    pub async fn client_ignoring_presence(self: &Arc<Self>, device_id: &str) -> Result<Arc<RpcClient>, RpcError> {
+        self.client_inner(device_id, false).await
+    }
+
+    async fn client_inner(self: &Arc<Self>, device_id: &str, gate_on_presence: bool) -> Result<Arc<RpcClient>, RpcError> {
         if self.revoked.load(Ordering::Acquire) {
             return Err(RpcError::Transport("not signed in".into()));
         }
@@ -1113,7 +1147,8 @@ impl LinkCache {
         // dial (let alone the 3-attempt sequence) — fail fast with zero
         // network traffic. A live cached link above always wins over the
         // verdict; ambiguity (registry down, unknown device) never parks.
-        if let Some(probe) = &self.config.liveness
+        if gate_on_presence
+            && let Some(probe) = &self.config.liveness
             && probe(device_id) == PeerLiveness::Dark
         {
             return Err(RpcError::Transport(format!(
@@ -1332,6 +1367,18 @@ impl LinkCache {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_phone_host_pings_seldom_and_its_silence_lease_follows() {
+        let mut config = HostRelayConfig::new("http://edge", "phone", Arc::new(StaticToken("t".into())));
+        assert_eq!(config.timing(), (PING_INTERVAL, SILENCE_LEASE), "an engine keeps the usual clocks");
+        config.keepalive = Some(Duration::from_secs(60));
+        // One lost pong is forgiven: dead after 2.5 intervals of silence.
+        assert_eq!(config.timing(), (Duration::from_secs(60), Duration::from_secs(150)));
+        // Never faster than the usual interval, whatever is asked.
+        config.keepalive = Some(Duration::from_secs(1));
+        assert_eq!(config.timing().0, Duration::from_secs(10));
+    }
+
     #[tokio::test]
     async fn relay_refuses_local_only_methods_and_serves_the_rest() {
         use crate::{RpcReply, RpcService, methods};
