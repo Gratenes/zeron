@@ -698,6 +698,47 @@ impl Peer for RemotePeer {
     }
 }
 
+/// A phone's files: Zeron for Android answers `files_*` tools over `PhoneCall`, and decides for
+/// itself which folders it lets an agent reach.
+pub struct PhonePeer {
+    pub links: Arc<zeron_rpc::LinkCache>,
+    pub device: zeron_proto::Device,
+}
+
+fn tool_of(op: Op) -> &'static str {
+    match op {
+        Op::List => "files_list",
+        Op::Stat => "files_stat",
+        Op::Hash => "files_hash",
+        Op::Read => "files_read",
+        Op::WritePart => "files_write_part",
+    }
+}
+
+#[async_trait]
+impl Peer for PhonePeer {
+    async fn call(&self, op: Op, mut params: Value, deadline: Duration) -> Result<Value, String> {
+        if let Some(args) = params.as_object_mut() {
+            // Not the phone's to know: this engine made the missing folders itself.
+            args.remove("makeParents");
+            args.remove("targetDeviceId");
+        }
+        let call = json!({ "targetDeviceId": self.device.id, "tool": tool_of(op), "args": params });
+        let reply = crate::rpc::EngineRpc::ask_line(self.links.clone(), &self.device, call, deadline).await;
+        match reply {
+            Ok(zeron_rpc::RpcReply::Value(value)) => Ok(value),
+            Ok(_) => Err("files.unavailable: the phone answered with a stream".into()),
+            Err(error) => {
+                let text = error.to_string();
+                Err(match text.find("files.") {
+                    Some(at) => text[at..].to_owned(),
+                    None => format!("files.unavailable: {text}"),
+                })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

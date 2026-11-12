@@ -1750,6 +1750,28 @@ impl EngineRpc {
         crate::device_files::Policy::new(&crate::repos::home_dir(), self.repos.data_dir(), roots)
     }
 
+    /// `method` answered by the phone `target`, or `None` when it isn't a phone.
+    async fn device_file_on_phone(&self, target: &str, method: &str, params: &serde_json::Value) -> Option<Result<RpcReply, RpcError>> {
+        use crate::device_files::copy::{Op, Peer, PhonePeer};
+        let device = self.workspace.watch_devices().borrow().iter().find(|d| d.id == target && d.platform == "android").cloned()?;
+        let links = self.links.clone()?;
+        let op = match method {
+            methods::DEVICE_FILE_LIST => Op::List,
+            methods::DEVICE_FILE_STAT => Op::Stat,
+            methods::DEVICE_FILE_HASH => Op::Hash,
+            methods::DEVICE_FILE_READ => Op::Read,
+            _ => Op::WritePart,
+        };
+        let deadline = if op == Op::WritePart && params.get("offset").and_then(|v| v.as_u64()) == Some(0) {
+            crate::device_files::copy::FIRST_WRITE_DEADLINE
+        } else if op == Op::Hash {
+            std::time::Duration::from_secs(300)
+        } else {
+            crate::device_files::copy::CALL_DEADLINE
+        };
+        Some(PhonePeer { links, device }.call(op, params.clone(), deadline).await.map(RpcReply::Value).map_err(RpcError::Failed))
+    }
+
     /// The device-file methods; boxed by the dispatcher so its frame stays small.
     async fn device_files_rpc(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         use crate::device_files::copy::{Op, run_local};
@@ -1796,7 +1818,17 @@ impl EngineRpc {
                     let links = self.links.clone().ok_or_else(|| {
                         RpcError::Failed(format!("Can't reach {id}: this device isn't connected (signed out or offline)"))
                     })?;
-                    Ok(std::sync::Arc::new(RemotePeer { links, target: id.to_string() }))
+                    let phone = self
+                        .workspace
+                        .watch_devices()
+                        .borrow()
+                        .iter()
+                        .find(|d| d.id == id && d.platform == "android")
+                        .cloned();
+                    Ok(match phone {
+                        Some(device) => std::sync::Arc::new(crate::device_files::copy::PhonePeer { links, device }),
+                        None => std::sync::Arc::new(RemotePeer { links, target: id.to_string() }),
+                    })
                 }
             }
         };
@@ -3040,6 +3072,18 @@ impl RpcService for EngineRpc {
                     | methods::CLOSE_TERMINAL
             ) {
                 return self.remote_terminal(&target, method, params).await;
+            }
+            // A phone answers a file call as its `files_*` tool, not as a method of its own.
+            if matches!(
+                method,
+                methods::DEVICE_FILE_LIST
+                    | methods::DEVICE_FILE_STAT
+                    | methods::DEVICE_FILE_HASH
+                    | methods::DEVICE_FILE_READ
+                    | methods::DEVICE_FILE_WRITE_PART
+            ) && let Some(reply) = self.device_file_on_phone(&target, method, &params).await
+            {
+                return reply;
             }
             if method == methods::UPDATE_STATUS {
                 return self.follow_update_status(target, params).await;
