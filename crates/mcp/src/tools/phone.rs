@@ -154,12 +154,12 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "phone_sms_send",
-            description: "Send a message from the person's own number. In a Google Messages chat (RCS) it answers through Messages' own reply notification, so it only works while one of their messages is waiting in the phone's notification shade and the person has turned on Notification access for Zeron; otherwise the call says so (pass via \"sms\" to send a plain text message instead, which may land in a separate SMS thread). A one-to-one SMS conversation is sent as an ordinary text. The person may have the phone ask them to confirm each send (then this call waits up to 60 s for their answer and says if they declined). It is a real message to a real person, from the user: send only what they asked for.",
+            description: "Send a message from the person's own number, by RCS (a Google Messages chat) whenever possible. In order: (1) an answer through Messages' own live reply notification, when one is waiting for that person (needs Notification access for Zeron); (2) otherwise Google Messages is driven on the phone (opens the conversation, types, taps Send; it unlocks the phone first if the person allows that, takes over the screen for a few seconds, and refuses while the person is using the phone), which sends by RCS when both sides have it; (3) a plain SMS only when via is \"sms\", or when the conversation is plainly SMS-only. via \"rcs\" sends only if Google Messages says the transport is RCS, else nothing is sent. The reply says how it went and whether it showed up in Google Messages' message database (`confirmedInMessages`, `kind`). The person may have the phone ask them to confirm each send, saying how it will go (then this call waits up to 60 s for their answer and says if they declined). It is a real message to a real person, from the user: send only what they asked for.",
             input_schema: schema(json!({
                 "to": { "type": "string", "description": "A phone number. Give this or thread_id." },
                 "thread_id": { "type": "string", "description": "A one-to-one conversation's id from phone_sms_threads. Give this or to." },
                 "text": { "type": "string" },
-                "via": { "type": "string", "enum": ["auto", "sms"], "description": "auto (default): answer inside the Messages chat when there is one, else SMS; sms: a plain text message." }
+                "via": { "type": "string", "enum": ["auto", "sms", "rcs"], "description": "auto (default): RCS whenever possible, SMS if the person isn't on RCS; sms: a plain text message; rcs: only by RCS." }
             }), &["text"]),
         },
         ToolDef {
@@ -400,7 +400,7 @@ mod tests {
         }
         // Only the text is required here: who to send to is `to` or `thread_id`, which the phone checks.
         assert_eq!(send.input_schema["required"], json!(["text"]));
-        assert_eq!(props["via"]["enum"], json!(["auto", "sms"]));
+        assert_eq!(props["via"]["enum"], json!(["auto", "sms", "rcs"]));
         // The reading tools say the chats (RCS) are in them.
         for name in ["phone_sms_threads", "phone_sms_read"] {
             let def = full_catalog().into_iter().find(|d| d.name == name).expect("listed");
