@@ -2474,6 +2474,10 @@
       "session": {
         "new_session": "New session",
         "will_delete": "“{title}” will be permanently deleted. This can’t be undone.",
+        "will_delete_with": "{will} {also}",
+        "also_deletes_side": "{n, plural, one {This also deletes its side chat.} other {This also deletes its # side chats.}}",
+        "also_deletes_subagents": "{n, plural, one {This also deletes its subagent.} other {This also deletes its # subagents.}}",
+        "also_deletes_both": "This also deletes its {subagents, plural, one {# subagent} other {# subagents}} and {sides, plural, one {# side chat} other {# side chats}}.",
         "delete_title": "Delete session?",
         "couldnt_delete": "Couldn’t delete “{title}”",
         "rename_title": "Rename session",
@@ -2914,9 +2918,7 @@
       },
       "device": {
         "offline": "Offline",
-        "offline_seen": "Offline · last seen {ago}",
-        "cloud_from": "A machine of its own, from {repo}",
-        "cloud": "A machine of its own"
+        "offline_seen": "Offline · last seen {ago}"
       },
       "project": {
         "missing": "Missing project",
@@ -3070,6 +3072,12 @@
       "slow": "Waking its Cloud machine is taking longer than usual…",
       "resuming_slow": "Resuming — its Cloud machine is taking longer than usual to wake…",
       "the_host": "its computer",
+      "starting": "Starting a Cloud machine…",
+      "waking_stage": "Waking its Cloud machine — {stage}…",
+      "stage_clone": "cloning the repository",
+      "stage_branch": "checking out the branch",
+      "setup_summary": "Set up the Cloud machine",
+      "woke_summary": "Woke the Cloud machine",
       "unreachable": "Interrupted — can't reach {host}"
     }
   },

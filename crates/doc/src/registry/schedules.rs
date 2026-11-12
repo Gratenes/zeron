@@ -51,9 +51,12 @@ impl RegistryDoc {
     /// Every schedule, soonest due first.
     pub fn read_schedules(&self) -> Vec<Schedule> {
         let mut all: Vec<Schedule> = self
-            .read_kind::<crate::workspace::RawSchedule>(KIND_SCHEDULES)
+            .read_cached::<crate::workspace::RawSchedule, Option<Schedule>>(
+                KIND_SCHEDULES,
+                crate::workspace::RawSchedule::into_schedule,
+            )
             .into_iter()
-            .filter_map(crate::workspace::RawSchedule::into_schedule)
+            .flatten()
             .collect();
         all.sort_by(|a, b| a.fire_at.cmp(&b.fire_at).then(a.id.cmp(&b.id)));
         all

@@ -95,6 +95,13 @@ struct Chats {
     /// Chats this window made that the engine's list may not have yet
     /// (`made`): its next list replaces them, or lets them go.
     made_here: RefCell<Vec<String>>,
+    /// New chats on Cloud this window opened before Cloud made them (the
+    /// shipping app's optimistic new chat): shown at once, their first message
+    /// sending, watched once made (`chat.created`).
+    creating: RefCell<HashMap<String, Json>>,
+    /// Sends to a chat still being made (its first message not gone yet):
+    /// shown, sending, and sent in order once its first message has gone.
+    after_create: RefCell<HashMap<String, Vec<Value>>>,
     rpc: RefCell<Option<Rpc>>,
     /// What each chat waiting on its person asks: "approval" or
     /// "question", by chat (`chat.asks`, for the sidebar's rows).
@@ -119,10 +126,14 @@ struct Chats {
     /// (`settle_remote`): its catalog stands complete with what it has, and
     /// answers still to come fill it in without its going back to looking.
     remote_settled: Cell<u64>,
-    /// The chat a view has just let go of, kept a moment: a chat on its own
-    /// that becomes a split is opened again at once, in its pane, and has
-    /// what it had rather than reading and building it all again.
-    let_go: RefCell<Option<LetGo>>,
+    /// The chats views have let go of lately, the most recent last
+    /// (`LET_GO_MOST`, `LET_GO_KEPT`): one opened again (switched back to,
+    /// or a chat on its own becoming a split) shows its rows at once, from
+    /// the first frame, rather than a skeleton while it's read and built
+    /// again; the engine's copy then brings what changed.
+    let_go: RefCell<Vec<LetGo>>,
+    /// Moves with each chat let go of: only the last one's look at the
+    /// footprint, once the app has rested, counts.
     let_go_turn: Cell<u64>,
 }
 
@@ -166,29 +177,57 @@ const WHOLE_TAIL: usize = 32;
 /// A sum of a JSON value, the same for equal values (an object's keys are
 /// sorted: this workspace's serde_json has no `preserve_order`).
 fn sum_of(json: &Json) -> u64 {
-    use std::hash::{Hash, Hasher};
-    fn feed(json: &Json, hasher: &mut std::hash::DefaultHasher) {
+    // The engine's `entry_sum` (crates/doc/src/transcript_delta.rs), byte for
+    // byte: a reopen says what it holds by these, and the engine sends only
+    // the entries whose sums differ. FNV-1a, an object's fields in key order.
+    struct Fnv(u64);
+    impl Fnv {
+        fn bytes(&mut self, bytes: &[u8]) {
+            for byte in bytes {
+                self.0 ^= u64::from(*byte);
+                self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        fn len(&mut self, len: usize) {
+            self.bytes(&(len as u64).to_le_bytes());
+        }
+    }
+    fn feed(json: &Json, h: &mut Fnv) {
         match json {
-            Json::Null => 0u8.hash(hasher),
-            Json::Bool(b) => b.hash(hasher),
-            Json::Number(n) => n.to_string().hash(hasher),
-            Json::String(s) => s.hash(hasher),
+            Json::Null => h.bytes(&[0]),
+            Json::Bool(b) => h.bytes(&[1, u8::from(*b)]),
+            Json::Number(n) => {
+                let n = n.to_string();
+                h.bytes(&[2]);
+                h.len(n.len());
+                h.bytes(n.as_bytes());
+            }
+            Json::String(s) => {
+                h.bytes(&[3]);
+                h.len(s.len());
+                h.bytes(s.as_bytes());
+            }
             Json::Array(items) => {
-                items.len().hash(hasher);
-                items.iter().for_each(|item| feed(item, hasher));
+                h.bytes(&[4]);
+                h.len(items.len());
+                items.iter().for_each(|item| feed(item, h));
             }
             Json::Object(fields) => {
-                fields.len().hash(hasher);
-                for (key, value) in fields {
-                    key.hash(hasher);
-                    feed(value, hasher);
+                h.bytes(&[5]);
+                h.len(fields.len());
+                let mut keys: Vec<&String> = fields.keys().collect();
+                keys.sort();
+                for key in keys {
+                    h.len(key.len());
+                    h.bytes(key.as_bytes());
+                    feed(&fields[key], h);
                 }
             }
         }
     }
-    let mut hasher = std::hash::DefaultHasher::new();
-    feed(json, &mut hasher);
-    hasher.finish()
+    let mut h = Fnv(0xcbf2_9ce4_8422_2325);
+    feed(json, &mut h);
+    h.0
 }
 
 /// A settled entry's row as its row holds it out of view: what makes it,
@@ -219,8 +258,13 @@ impl zgx_script::Unfold for FoldedEntry {
 /// and to open, as a scroll does. (LZ4 makes them in a quarter of the time deflate's
 /// fastest level does and opens them in a twelfth, for rows a quarter larger, measured
 /// on 16,271 rows of real chats; deflate spends most of its time on a table per row.)
+///
+/// Held at its own length: LZ4 writes into a buffer made for its worst case
+/// (about the input's size), and a shrinking realloc keeps a block where it
+/// is when it loses less than half, so a row kept nearly its uncompressed
+/// size (30.7 MB for a 15,443-row chat whose rows compress to 20.4 MB).
 fn compressed(bytes: &[u8]) -> Box<[u8]> {
-    lz4_flex::block::compress_prepend_size(bytes).into_boxed_slice()
+    Box::from(lz4_flex::block::compress_prepend_size(bytes).as_slice())
 }
 
 /// An entry's row, as a view keeps it: its subagents apart, as the transcript
@@ -229,6 +273,8 @@ fn compressed(bytes: &[u8]) -> Box<[u8]> {
 struct Built {
     row: Option<Value>,
     subagents: Option<Rc<[Value]>>,
+    /// Folded, its compressed bytes' length (what a chat kept is weighed by).
+    folded: usize,
 }
 
 /// `entry` built: its row, folded if `fold`, which a row that shows or may
@@ -237,12 +283,17 @@ fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
     let RowContext { doc, device, model } = &**context;
     let row = built_entry(entry, doc, device.as_deref(), model.as_deref());
     let subagents = row.as_ref().and_then(subagents_in);
+    let mut folded = 0;
     let row = match row {
         Some(_) if fold && entry["status"].as_str() != Some("streaming") => match (entry["id"].as_str(), serde_json::to_vec(entry)) {
             (Some(id), Ok(bytes)) => Some(Value::folded(
                 id.into(),
                 FoldedEntry {
-                    bytes: compressed(&bytes),
+                    bytes: {
+                        let bytes = compressed(&bytes);
+                        folded = bytes.len();
+                        bytes
+                    },
                     context: context.clone(),
                 },
             )),
@@ -250,7 +301,7 @@ fn built_for(entry: &Json, context: &Rc<RowContext>, fold: bool) -> Built {
         },
         row => row,
     };
-    Built { row, subagents }
+    Built { row, subagents, folded }
 }
 
 /// A long chat's settled entries, as a worker thread makes them: what they fold
@@ -370,6 +421,10 @@ fn folding(entries: Vec<(usize, String, Json)>, context: &RowContext) -> Folding
 
 /// What a view's chat had read and built, as it let it go.
 struct LetGo {
+    /// When it was let go of.
+    at: std::time::Instant,
+    /// About what it holds, in bytes (`let_go_weight`).
+    bytes: usize,
     id: String,
     entries: Vec<Entry>,
     older_todo: Option<(usize, Json)>,
@@ -379,8 +434,76 @@ struct LetGo {
     context_usage: (Option<f64>, Option<f64>),
 }
 
-/// How long a chat let go of is kept for another view to take it.
-const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long a chat let go of is kept for a view to open again, and how many
+/// are kept at most (a long chat's rows are its whole transcript, built).
+const LET_GO_KEPT: std::time::Duration = std::time::Duration::from_secs(600);
+const LET_GO_MOST: usize = 6;
+/// How long after a chat is let go of the app is taken to have rested, its
+/// footprint then looked at (`room_to_keep`).
+const LET_GO_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+/// And at most about this much of them, the oldest going first: a long
+/// chat's kept rows (7,900 entries, 18 MB as JSON) cost some 14 MB, and the
+/// app rests near 265 MB of its 300 MB: one long chat, or a few others.
+const LET_GO_BYTES: usize = 20 << 20;
+/// Nothing kept while the app's footprint (what Activity Monitor shows) is
+/// past this: what's kept is the first to go when memory is short.
+#[cfg(target_os = "macos")]
+const LET_GO_FOOTPRINT: u64 = 280 << 20;
+
+/// The process's footprint in bytes, as Activity Monitor shows it.
+#[cfg(target_os = "macos")]
+fn footprint() -> Option<u64> {
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a rusage_info_v4 the call fills in, as RUSAGE_INFO_V4 asks.
+    let read = unsafe { libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V4, (&mut info as *mut libc::rusage_info_v4).cast()) };
+    (read == 0).then_some(info.ri_phys_footprint)
+}
+
+/// Whether the app has room to keep a chat let go of.
+fn room_to_keep() -> bool {
+    #[cfg(target_os = "macos")]
+    if footprint().is_some_and(|bytes| bytes > LET_GO_FOOTPRINT) {
+        return false;
+    }
+    true
+}
+
+/// `ZERON_ZGX_KEEP_CHATS=0`: chats let go of are kept as they were before
+/// (one, two seconds, for a split taking it), to compare what keeping costs.
+fn keeping_chats() -> bool {
+    thread_local! {
+        static ON: bool = std::env::var("ZERON_ZGX_KEEP_CHATS").map_or(true, |v| v != "0");
+    }
+    ON.with(|on| *on)
+}
+/// What each entry costs beyond its folded bytes (its id, sum, row slots).
+const LET_GO_PER_ENTRY: usize = 512;
+
+/// About what a chat's kept rows hold: each settled row's folded bytes, each
+/// entry's slots, and the newest entries' JSON, whole, with the rows built
+/// from it.
+fn let_go_weight(entries: &[Entry], built: &HashMap<Rc<str>, Built>) -> usize {
+    let folded: usize = built.values().map(|b| b.folded).sum();
+    let whole: usize = entries
+        .iter()
+        .filter_map(|e| e.json.as_ref())
+        .map(|json| serde_json::to_vec(json).map_or(0, |b| b.len()))
+        .sum();
+    folded + entries.len() * LET_GO_PER_ENTRY + 2 * whole
+}
+
+/// The chats let go of that are still kept: none older than `LET_GO_KEPT`,
+/// and the newest `LET_GO_MOST`.
+fn prune_let_go(kept: &mut Vec<LetGo>) {
+    let (most, kept_for) = if keeping_chats() { (LET_GO_MOST, LET_GO_KEPT) } else { (1, std::time::Duration::from_secs(2)) };
+    kept.retain(|held| held.at.elapsed() < kept_for);
+    let over = kept.len().saturating_sub(most);
+    kept.drain(..over);
+    // (The oldest first, until what's kept fits.)
+    while keeping_chats() && kept.iter().map(|held| held.bytes).sum::<usize>() > LET_GO_BYTES {
+        kept.remove(0);
+    }
+}
 
 /// How long after connecting other devices' catalogs start being looked at.
 const LOOK_AHEAD_AFTER: std::time::Duration = std::time::Duration::from_secs(6);
@@ -488,6 +611,9 @@ impl Pending {
             ("text", Value::from(words.as_str())),
             ("attachments", carried_value(&self.paths, &quotes, &picks, &comments, &chats)),
             ("waiting", Value::from(self.waiting)),
+            // Still in the engine's outbox, its files uploading: nothing has
+            // gone to its chat yet (a Cloud machine isn't woken for it).
+            ("held", Value::Bool(self.held)),
             // (This device's own copy: its pictures are the files it was
             // sent from, here, which the chat's device never had. The
             // chat's copy, once it comes, is marked `waiting` too until
@@ -609,6 +735,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     engine::get().on_connect(move |rpc| {
         if let Some(view) = weak.upgrade() {
             *view.rpc.borrow_mut() = Some(rpc.clone());
+            view.hold_rows();
             view.subscribe();
         }
     });
@@ -660,6 +787,64 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let on = compact.get().truthy();
         c.compact_shown(on);
     }));
+    // A new chat on Cloud, opened before Cloud has made it (the shipping app
+    // selects a new chat and shows its first message at once): known here as
+    // a chat on Cloud, its first message sending (`req`: the send it will
+    // get, `session` its id). `chat.created` watches it once Cloud has made
+    // it; `chat.create_failed` lets it go.
+    let (c, pick) = (chats.clone(), which.clone());
+    host.action("chat.creating", move |req| {
+        let id = req.field("session").map(text).unwrap_or_default();
+        let message_id = req.field("message_id").map(text).unwrap_or_default();
+        if id.is_empty() || message_id.is_empty() {
+            return;
+        }
+        let mut row = json!({ "id": id, "cloud": true });
+        if let Some(project) = req.field("project").map(text).filter(|p| !p.is_empty()) {
+            row["spaceId"] = Json::from(project);
+        }
+        c.creating.borrow_mut().insert(id.clone(), row.clone());
+        c.made(&id, row);
+        let view = pick(&req);
+        let mut pending = view.pending.borrow_mut();
+        let prompts = pending.entry(id).or_default();
+        prompts.retain(|p| p.id != message_id);
+        prompts.push(Pending {
+            id: message_id,
+            words: req.field("text").map(text).unwrap_or_default(),
+            paths: local_paths(&req),
+            waiting: "sending",
+            retry: None,
+            at: stamp(now_seconds()),
+            held: false,
+            row: false,
+            transfers: Vec::new(),
+        });
+    });
+    let c = chats.clone();
+    host.action("chat.created", move |id| {
+        let id = text(&id);
+        if c.creating.borrow_mut().remove(&id).is_none() {
+            return;
+        }
+        for view in c.views() {
+            if view.open_id().as_deref() == Some(id.as_str()) {
+                view.subscribe();
+                view.publish_session();
+            }
+        }
+    });
+    let c = chats.clone();
+    host.action("chat.create_failed", move |id| {
+        let id = text(&id);
+        c.creating.borrow_mut().remove(&id);
+        c.after_create.borrow_mut().remove(&id);
+        c.made_here.borrow_mut().retain(|m| *m != id);
+        c.chats.borrow_mut().remove(&id);
+        for view in c.views() {
+            view.pending.borrow_mut().remove(&id);
+        }
+    });
     let c = chats.clone();
     host.action("chat.catalog", move |_| {
         let c = c.clone();
@@ -675,7 +860,26 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
     let pick = which.clone();
     host.async_action("chat.send", move |req| {
         let v = pick(&req);
-        async move { crate::plugins::preview::refuse("chat.send")?; v.send(req).await.map(|_| Value::Nil).map_err(String::from) }
+        async move {
+            crate::plugins::preview::refuse("chat.send")?;
+            let first = req.field("fresh").is_some_and(Value::truthy);
+            let id = req.field("session").map(text).unwrap_or_default();
+            let sent = v.send(req).await;
+            // A new chat's first message gone: what was sent to it meanwhile
+            // goes now, in order.
+            if first {
+                loop {
+                    let next = CHATS.with(|c| c.after_create.borrow_mut().remove(&id)).unwrap_or_default();
+                    if next.is_empty() {
+                        break;
+                    }
+                    for later in next {
+                        let _ = v.send(later).await;
+                    }
+                }
+            }
+            sent.map(|_| Value::Nil).map_err(String::from)
+        }
     });
     host.async_action("chat.interrupt", move |id| async move {
         command(&text(&id), json!({ "kind": "interrupt" })).await?;
@@ -773,6 +977,7 @@ fn lane_view(host: &ScriptHost, slot: &str) -> Rc<View> {
     engine::get().on_connect(move |rpc| {
         if let Some(view) = weak.upgrade() {
             *view.rpc.borrow_mut() = Some(rpc.clone());
+            view.hold_rows();
             view.subscribe();
         }
     });
@@ -853,12 +1058,20 @@ impl Chats {
                 frame.apply_to_map(&mut chats);
                 // (One made here and still not in the list goes, as it did
                 // when each list replaced them all.)
+                let creating = me.creating.borrow();
+                let mut kept = Vec::new();
                 for id in me.made_here.borrow_mut().drain(..) {
                     let listed = frame.list.as_array().is_some_and(|rows| rows.iter().any(|r| r["id"].as_str() == Some(&id)));
-                    if !listed && frame.changes.is_some() {
+                    // (One still being made on Cloud stays until the list has it.)
+                    if !listed && let Some(row) = creating.get(&id) {
+                        // (Put back if the list came whole: it replaced them all.)
+                        chats.entry(id.clone()).or_insert_with(|| row.clone());
+                        kept.push(id);
+                    } else if !listed && frame.changes.is_some() {
                         chats.remove(&id);
                     }
                 }
+                me.made_here.borrow_mut().extend(kept);
             }
             me.chats_heard.set(true);
             me.publish_views();
@@ -963,32 +1176,60 @@ impl Chats {
         self.views.borrow().iter().filter_map(Weak::upgrade).collect()
     }
 
-    /// Keeps what a view's chat had for a moment (`LET_GO_KEPT`), for another
-    /// view that's about to open it.
+    /// Keeps what a view's chat had (`let_go`), for a view that opens it
+    /// again: the most recent `LET_GO_MOST`, for `LET_GO_KEPT`.
     fn keep_let_go(self: &Rc<Self>, old: Option<Open>) {
-        // (Not while its rows are on a worker: it has only the ones they left.)
-        let Some(old) = old.filter(|o| o.heard && !o.stepping) else { return };
+        let Some(old) = old else { return };
+        let mut kept = self.let_go.borrow_mut();
+        // (Not while its rows are on a worker: it has only the ones they
+        // left. Nor rows to be built again for a moved model's name: opened
+        // again they'd say what they hold and keep the old name; any older
+        // copy of it goes too.)
+        if old.rebuild {
+            kept.retain(|held| held.id != old.id);
+            return;
+        }
+        if !old.heard || old.stepping {
+            return;
+        }
         let Open { id, entries, older_todo, built, built_model, context, context_usage, .. } = old;
-        *self.let_go.borrow_mut() = Some(LetGo { id, entries, older_todo, built, built_model, context, context_usage });
-        let turn = self.let_go_turn.get() + 1;
+        let bytes = let_go_weight(&entries, &built);
+        kept.retain(|held| held.id != id);
+        // (Too big on its own to keep: not kept, and what is kept stays.)
+        if keeping_chats() && bytes > LET_GO_BYTES {
+            return;
+        }
+        kept.push(LetGo { at: std::time::Instant::now(), bytes, id, entries, older_todo, built, built_model, context, context_usage });
+        prune_let_go(&mut kept);
+        eprintln!(
+            "zeron-zgx: chat: kept chats let go of: {}, {:.1} MB",
+            kept.len(),
+            kept.iter().map(|held| held.bytes).sum::<usize>() as f64 / 1e6
+        );
+        drop(kept);
+        // The app's footprint once it has come to rest after the switch (as
+        // it lets a chat go it's opening the next, drawing it, its GPU
+        // memory counted too: past any mark at nearly every switch): past
+        // its mark then, what's kept goes.
+        let turn = self.let_go_turn.get().wrapping_add(1);
         self.let_go_turn.set(turn);
         let me = self.clone();
         engine::get().spawn(async move {
-            zgx::timer::sleep(LET_GO_KEPT).await;
-            if me.let_go_turn.get() == turn {
-                me.let_go.borrow_mut().take();
+            zgx::timer::sleep(LET_GO_SETTLE).await;
+            if me.let_go_turn.get() == turn && !room_to_keep() && !me.let_go.borrow().is_empty() {
+                me.let_go.borrow_mut().clear();
+                eprintln!("zeron-zgx: chat: kept chats let go of: none (the app's footprint at rest is past its mark)");
             }
         });
     }
 
-    /// What a view let go of just now, if it was this chat: an `Open` that
-    /// has its rows.
+    /// What a view let go of lately, if it was this chat: an `Open` that has
+    /// its rows.
     fn take_let_go(&self, id: &str) -> Option<Open> {
-        let mut slot = self.let_go.borrow_mut();
-        if slot.as_ref()?.id != id {
-            return None;
-        }
-        let held = slot.take()?;
+        let mut kept = self.let_go.borrow_mut();
+        prune_let_go(&mut kept);
+        let at = kept.iter().position(|held| held.id == id)?;
+        let held = kept.remove(at);
         Some(Open {
             id: held.id,
             entries: held.entries,
@@ -1588,7 +1829,12 @@ impl View {
         let chats = CHATS.with(Rc::clone);
         let was_snapshot = self.snapshot.replace(false);
         self.generation.set(self.generation.get() + 1);
-        let next = id.map(|id| chats.take_let_go(&id).unwrap_or(Open { id, ..Open::default() }));
+        let next = id.map(|id| {
+            // A chat being made has nothing more to come yet: its rows (its
+            // first message) are all there is.
+            let heard = chats.creating.borrow().contains_key(&id);
+            chats.take_let_go(&id).unwrap_or(Open { id, heard, ..Open::default() })
+        });
         let has_rows = next.as_ref().is_some_and(|o| o.heard);
         let old = self.open.replace(next);
         if !was_snapshot {
@@ -1664,13 +1910,26 @@ impl View {
             return;
         };
         let Some(id) = self.open_id() else { return };
+        // (Not made yet: nothing to watch until it is, `chat.created`.)
+        if CHATS.with(|c| c.creating.borrow().contains_key(&id)) {
+            return;
+        }
         let generation = self.generation.get();
         let weak = Rc::downgrade(self);
         // (`partPatches`: a long reply's changed parts alone, `apply`'s
         // `parts`; an engine that doesn't know it sends replies whole.)
+        let mut params = json!({ "chatId": id, "openingTail": true, "partPatches": true });
+        // Its rows kept (opened before): what it holds, each entry's id and
+        // sum, so the engine sends what changed since (a `since` frame), not
+        // the whole transcript. An engine that doesn't know it sends it whole.
+        // (Not when its rows are to be built again, the model's name moved:
+        // a settled entry keeps no words to build from, so it needs them all.)
+        if let Some(open) = self.open.borrow().as_ref() {
+            params = with_known(params, open);
+        }
         let transcript = rpc.watch(
             "WatchDocMessages",
-            json!({ "chatId": id, "openingTail": true, "partPatches": true }),
+            params,
             move |item| {
                 if let Some(view) = weak.upgrade()
                     && view.generation.get() == generation
@@ -1707,6 +1966,18 @@ impl View {
         }
     }
 
+    /// On a new connection: the rows this view has stay, as a chat opened
+    /// again with its kept rows (`has_whole`), and the engine is told what
+    /// they are (`known`) to send what changed since, not them all again.
+    fn hold_rows(&self) {
+        if let Some(open) = self.open.borrow_mut().as_mut()
+            && open.heard
+            && !open.entries.is_empty()
+        {
+            open.has_whole = true;
+        }
+    }
+
     /// Watches the open chat again from a reset (its copy went out of step).
     fn resubscribe(self: &Rc<Self>) {
         if let Some(open) = self.open.borrow_mut().as_mut() {
@@ -1738,6 +2009,13 @@ impl View {
             // came, a turn being written stood still, its words and calls
             // arriving all at once seconds later (a long chat's whole copy).
             let mut waiting = false;
+            if open.has_whole && frame["since"].as_bool() == Some(true) {
+                // What changed since the rows it kept: they're the whole copy.
+                open.has_whole = false;
+                if std::mem::take(&mut open.rebuild) {
+                    open.built.clear();
+                }
+            }
             if open.has_whole {
                 if frame.get("reset").is_none() {
                     waiting = true;
@@ -1767,7 +2045,16 @@ impl View {
             if before.is_some() {
                 open.folding = None;
             }
-            let result = apply_counted(&mut open.entries, &mut frame, !waiting);
+            let mut result = apply_counted(&mut open.entries, &mut frame, !waiting);
+            // A `since` frame says the order the rows must now be in: held
+            // out of the engine's order, they're asked for whole instead.
+            if let Some(expected) = frame["orderSum"].as_u64()
+                && result.is_ok()
+                // (Rows without an id are left out, as `known` leaves them.)
+                && order_sum(open.entries.iter().filter(|e| !e.id.is_empty()).map(|e| &*e.id)) != expected
+            {
+                result = Err(());
+            }
             // What it changed, to build again: on a reset, the entries that
             // differ from what this view had, unless another view of this
             // chat has them built; else the ones it touched.
@@ -1826,7 +2113,7 @@ impl View {
     fn share_built(&self, open: &mut Open) {
         let chats = CHATS.with(Rc::clone);
         let let_go = chats.let_go.borrow();
-        if let Some(held) = let_go.as_ref().filter(|h| h.id == open.id) {
+        if let Some(held) = let_go.iter().find(|h| h.id == open.id) {
             reuse_built(open, &held.entries, &held.built, &held.built_model);
         }
         for view in chats.views() {
@@ -2031,9 +2318,14 @@ impl View {
                 let turn = seconds(&session["startedAt"]).map(|t| t as f64);
                 let running = chats.running(&open.id);
                 let fresh = now_seconds() as f64 - sent < SEND_GRACE_SECONDS;
+                // Still on its way as the engine says (a Cloud machine coming
+                // up for it can take longer than the grace).
+                let awaited = open.waiting.iter().any(|w| {
+                    w["messageId"].as_str().is_some_and(|m| Some(m) == last["id"].as_str()) && w["failure"].is_null()
+                });
                 let waiting = match turn {
                     Some(turn) if running && turn + 1. >= sent => Some(("working", turn)),
-                    _ if running || fresh => Some(("sending", sent)),
+                    _ if running || fresh || awaited => Some(("sending", sent)),
                     _ => None,
                 };
                 if let Some((waiting, since)) = waiting
@@ -2107,7 +2399,11 @@ impl View {
             .unwrap_or_else(new_id);
         // Shown until the transcript has it (the page's own copy kept in
         // step as the list is published again meanwhile), sending.
-        self.pending.borrow_mut().entry(id.clone()).or_default().push(Pending {
+        let mut pending = self.pending.borrow_mut();
+        let prompts = pending.entry(id.clone()).or_default();
+        // (Shown already while its chat was being made: `chat.creating`.)
+        prompts.retain(|p| p.id != message_id);
+        prompts.push(Pending {
             id: message_id.clone(),
             words: words.clone(),
             paths: local_paths(&req),
@@ -2118,7 +2414,14 @@ impl View {
             row: false,
             transfers: Vec::new(),
         });
+        drop(pending);
         self.publish_messages();
+        // To a chat Cloud is still making: after its first message, which
+        // goes once it's made (`chat.send`'s flush).
+        if !fresh && chats.creating.borrow().contains_key(&id) {
+            chats.after_create.borrow_mut().entry(id).or_default().push(req);
+            return Ok(());
+        }
         // What it carries, uploaded to the chat's host.
         let mut paths = Vec::new();
         let mut images = 0;
@@ -3799,9 +4102,10 @@ fn settle_off(open: &mut Open, folded: FoldedOff, context: &Rc<RowContext>) {
     {
         *older_todo = Some((place, part));
     }
+    let folded = bytes.as_ref().map_or(0, |bytes| bytes.len());
     let row = bytes.map(|bytes| Value::folded(entry.id.clone(), FoldedEntry { bytes, context: context.clone() }));
     let subagents = (!subagents.is_empty()).then(|| subagents.iter().map(SubagentOff::value).collect());
-    built.insert(entry.id.clone(), Built { row, subagents });
+    built.insert(entry.id.clone(), Built { row, subagents, folded });
 }
 
 /// `entry`, built, down to its id and sum; a plan in it is kept (`todos`).
@@ -3918,6 +4222,29 @@ fn share_parts(value: &mut Value, seen: &mut Seen) {
         }
         _ => {}
     }
+}
+
+/// The engine's `order_sum` (crates/doc/src/transcript_delta.rs): the
+/// entries' ids in order, FNV-1a, each ended by a zero byte.
+fn order_sum<'a>(ids: impl IntoIterator<Item = &'a str>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for id in ids {
+        for byte in id.as_bytes().iter().chain(&[0u8]) {
+            h ^= u64::from(*byte);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    h
+}
+
+/// `params` with what `open` holds (`known`), when it has rows to keep
+/// and they aren't to be built again (`rebuild`).
+fn with_known(mut params: Json, open: &Open) -> Json {
+    if open.has_whole && !open.rebuild {
+        params["known"] =
+            Json::Array(open.entries.iter().filter(|e| !e.id.is_empty()).map(|e| json!([&*e.id, e.sum()])).collect());
+    }
+    params
 }
 
 /// Entries by their ids.
@@ -4738,6 +5065,10 @@ enum CallKind {
     Fetch,
     Todo,
     Other,
+    /// A Cloud machine's own setup step (`woke`: its wake).
+    Cloud {
+        woke: bool,
+    },
 }
 impl Tally {
     fn of(p: &Json) -> Tally {
@@ -4760,7 +5091,10 @@ impl Tally {
                     "search" | "glob" | "webSearch" => (CallKind::Search, None),
                     "webFetch" => (CallKind::Fetch, None),
                     "todo" => (CallKind::Todo, None),
-                    _ => (CallKind::Other, None),
+                    _ => match cloud_setup_step(p) {
+                        Some(step) => (CallKind::Cloud { woke: step == "wake" }, None),
+                        None => (CallKind::Other, None),
+                    },
                 };
                 Tally::Call {
                     kind,
@@ -4785,6 +5119,9 @@ struct GroupTally {
     fetches: usize,
     todos: usize,
     other: usize,
+    /// A Cloud machine's setup steps (counted in `other` too), and its wakes.
+    cloud: usize,
+    woke: usize,
     failed: usize,
     /// Each file once, however often it was edited: how many edits each.
     edited: HashMap<String, usize>,
@@ -4823,6 +5160,13 @@ impl GroupTally {
                     CallKind::Fetch => step(&mut self.fetches),
                     CallKind::Todo => step(&mut self.todos),
                     CallKind::Other => step(&mut self.other),
+                    CallKind::Cloud { woke } => {
+                        step(&mut self.other);
+                        step(&mut self.cloud);
+                        if *woke {
+                            step(&mut self.woke);
+                        }
+                    }
                     CallKind::Edit => {
                         let path = edited.clone().unwrap_or_default();
                         if add {
@@ -4841,6 +5185,15 @@ impl GroupTally {
     /// The line: its thinking, then what its tools did, then how many failed;
     /// the first letter raised.
     fn text(&self) -> String {
+        // A Cloud machine's setup alone reads as what happened to the machine,
+        // as the shipping app's (zeron_proto `tool_group_summary`).
+        if self.calls > 0 && self.cloud == self.calls && self.thoughts == 0 {
+            let mut line = if self.woke > 0 { "Woke the Cloud machine" } else { "Set up the Cloud machine" }.to_owned();
+            if self.failed > 0 {
+                line.push_str(&format!(" · {} failed", self.failed));
+            }
+            return line;
+        }
         let mut segments: Vec<String> = Vec::new();
         match self.thoughts {
             0 => {}
@@ -4972,6 +5325,16 @@ fn live_tool(id: &str, part: &Json, live: bool) -> Option<Value> {
     built
 }
 
+/// The Cloud machine setup step a tool part records ("start", "wake",
+/// "clone", "branch"), if it is one (zeron_proto `cloud_setup_step`).
+fn cloud_setup_step(part: &Json) -> Option<&str> {
+    let call = &part["call"];
+    if call["kind"].as_str() != Some("unknown") {
+        return None;
+    }
+    call["input"][zeron_proto::CLOUD_SETUP_KEY].as_str()
+}
+
 fn tool_row(part: &Json, live: bool) -> Option<Value> {
     let id = part["id"].as_str()?;
     let (kind, verb, target): (&str, String, Option<String>) = match part["kind"].as_str()? {
@@ -5004,6 +5367,13 @@ fn tool_row(part: &Json, live: bool) -> Option<Value> {
                 "webFetch" => ("web", "Fetched".into(), s("url")),
                 "webSearch" => ("web", "Searched the web".into(), s("query")),
                 "todo" => ("todo", "Updated the plan".into(), None),
+                // A Cloud machine's own setup ("Woke the machine", "Cloned
+                // acme/app"): its name is what it did, the machine's glyph
+                // (git's for its checkout), as the shipping app draws it.
+                "unknown" if cloud_setup_step(part).is_some() => {
+                    let kind = if matches!(cloud_setup_step(part), Some("clone" | "branch")) { "git" } else { "cloud" };
+                    (kind, s("name").unwrap_or_default(), None)
+                }
                 "mcp" => {
                     let tool = s("tool").unwrap_or_default();
                     if tool == "Agent" || tool.starts_with("Agent: ") {
@@ -5081,6 +5451,11 @@ fn call_text(part: &Json) -> Option<String> {
         return None;
     }
     let call = &part["call"];
+    // A Cloud setup step opens to the command it ran (a clone's), never the
+    // step's own bookkeeping.
+    if cloud_setup_step(part).is_some() {
+        return call["input"]["command"].as_str().filter(|c| !c.trim().is_empty()).map(str::to_owned);
+    }
     let s = |k: &str| call[k].as_str().filter(|v| !v.trim().is_empty());
     let input = |head: String| match call.get("input").filter(|v| !v.is_null()) {
         Some(v) => format!("{head}\n{}", serde_json::to_string_pretty(v).unwrap_or_default()),
@@ -5236,9 +5611,13 @@ fn chat_offline(no_connection: bool, unreachable: bool) -> bool {
 
 fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let chat = chats.chat(&open.id);
-    // Ready once its transcript has come and the chat itself (its config)
-    // is known: the composer takes its model from it.
-    let state = if open.heard && chat.is_some() {
+    // Ready once its transcript has come (this device's copy, read first,
+    // whatever its host's state): its rows show at once, and the chat itself
+    // (its config, the composer's model) fills in as the chats list brings
+    // it. Waiting on that list as well, a chat kept here stood as a skeleton
+    // until the whole list came. Missing only when the list is known, hasn't
+    // it, and nothing of it is here.
+    let state = if open.heard && (chat.is_some() || !open.entries.is_empty() || !chats.chats_heard.get()) {
         "ready"
     } else if chats.chats_heard.get() && chat.is_none() {
         "missing"
@@ -5322,6 +5701,8 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("ask", ask),
         ("queue", Value::List(queue.into())),
         ("waiting", waiting_value(&open.waiting)),
+        // A new chat on Cloud before its machine is known (`chat.creating`).
+        ("cloud", Value::Bool(chat["cloud"].as_bool() == Some(true))),
         ("todos", todos(open)),
         ("tasks", Value::List(tasks.into())),
     ];
@@ -5909,6 +6290,33 @@ mod tests {
         assert_eq!(there.row.as_ref().unwrap().to_json(), here.row.as_ref().unwrap().to_json());
         assert_eq!(there.subagents.as_ref().map(|s| s[0].to_json()), here.subagents.as_ref().map(|s| s[0].to_json()));
         assert_eq!(open.entries[0].sum, super::sum_of(&entry));
+    }
+
+    /// A folded row's bytes take their own length, not LZ4's worst-case
+    /// buffer: rows compressing as real ones do (about a third smaller) kept
+    /// that buffer, as a shrinking realloc left it where it was.
+    #[test]
+    fn a_folded_rows_bytes_take_their_own_length() {
+        unsafe extern "C" {
+            // mimalloc's own, the program's allocator (zgx-desktop's `mimalloc`).
+            fn mi_usable_size(p: *const std::ffi::c_void) -> usize;
+        }
+        // Words drawn from a small vocabulary, as a transcript's are: they
+        // compress, but not by half.
+        let words = ["the", "row", "tool", "output", "src/chat.rs", "cargo", "test", "fold", "error", "warning", "fn", "let"];
+        let (mut seed, mut text) = (7u32, String::new());
+        for _ in 0..400 {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            text.push_str(words[(seed >> 16) as usize % words.len()]);
+            text.push(if seed & 0x100 == 0 { ' ' } else { '\n' });
+            text.push_str(&((seed >> 8) % 1000).to_string());
+        }
+        let raw = serde_json::to_vec(&serde_json::json!({ "id": "e1", "role": "assistant", "text": text })).unwrap();
+        let folded = super::compressed(&raw);
+        assert!(folded.len() > raw.len() / 2 && folded.len() < raw.len(), "a ratio like real rows': {} of {}", folded.len(), raw.len());
+        // SAFETY: mimalloc reports the size of the block it gave the box.
+        let held = unsafe { mi_usable_size(folded.as_ptr().cast()) };
+        assert!(held <= folded.len() + folded.len() / 8 + 16, "held {held} for {} bytes ({} raw)", folded.len(), raw.len());
     }
 
     /// A row out of view holds what makes it, not itself: what it opens to is
@@ -6919,6 +7327,45 @@ mod tests {
         assert_eq!(paths, ["/tmp/a.png"]);
     }
 
+    /// A Cloud machine's own setup (the entry its engine writes under the
+    /// message that woke it) reads as what happened to the machine: each step
+    /// by its name, the machine's glyph or git's, and a clone opening to its
+    /// command, never the step's bookkeeping.
+    #[test]
+    fn a_cloud_machines_setup_reads_as_the_machine() {
+        let step = |id: &str, name: &str, step: &str, command: Option<&str>, error: bool| {
+            let mut input = json!({ "cloudSetup": step });
+            if let Some(c) = command {
+                input["command"] = json!(c);
+            }
+            json!({ "kind": "tool", "id": id, "call": { "kind": "unknown", "name": name, "input": input }, "resolved": true, "isError": error })
+        };
+        let woke = json!({ "id": "m.cloud-setup", "role": "assistant", "status": "streaming", "parts": [
+            step("m.cloud-machine", "Woke the machine", "wake", None, false),
+            step("m.cloud-clone", "Cloned acme/app", "clone", Some("git clone acme/app"), false),
+        ] });
+        let Value::List(woke) = blocks(&woke) else { panic!("no blocks") };
+        assert_eq!(text_of(&woke[0], "summary"), "Woke the Cloud machine");
+        let Some(Value::List(tools)) = woke[0].field("tools") else { panic!("no tools") };
+        assert_eq!(text_of(&tools[0], "kind"), "cloud");
+        assert_eq!(text_of(&tools[0], "verb"), "Woke the machine");
+        assert!(tools[0].field("target").is_none() && tools[0].field("call").is_none());
+        assert_eq!(text_of(&tools[1], "kind"), "git");
+        assert_eq!(text_of(&tools[1], "call"), "git clone acme/app");
+        let started = json!({ "id": "n.cloud-setup", "role": "assistant", "status": "done", "parts": [
+            step("n.cloud-machine", "Started a machine", "start", None, false),
+            step("n.cloud-clone", "Couldn't clone acme/app", "clone", None, true),
+        ] });
+        let Value::List(started) = blocks(&started) else { panic!("no blocks") };
+        assert_eq!(text_of(&started[0], "summary"), "Set up the Cloud machine · 1 failed");
+        // An agent's own unknown tool is still one.
+        let other = json!({ "id": "o", "role": "assistant", "status": "done", "parts": [
+            { "kind": "tool", "id": "t", "call": { "kind": "unknown", "name": "Frobnicate", "input": { "x": 1 } }, "resolved": true, "isError": false },
+        ] });
+        let Value::List(other) = blocks(&other) else { panic!("no blocks") };
+        assert_eq!(text_of(&other[0], "summary"), "Called 1 tool");
+    }
+
     #[test]
     fn a_replys_tools_group_between_its_text() {
         let text = |id: &str| json!({ "kind": "text", "id": id, "text": "words" });
@@ -7207,6 +7654,189 @@ mod tests {
     /// call arriving, rather than standing still until the whole copy comes
     /// and all of it showing at once. The opening tail is taken into the
     /// rows it holds, the changes after it counted against the tail.
+    /// A real long chat's whole copy, taken in on the main thread: how long
+    /// each frame holds it. Set ZERON_RESET_FRAME to a frame file (a
+    /// `TranscriptUpdate` reset) to run it.
+    #[test]
+    fn a_long_chats_whole_copy_on_the_main_thread() {
+        use super::{Entry, Open, View, draft_value};
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let Ok(path) = std::env::var("ZERON_RESET_FRAME") else { return };
+        let bytes = std::fs::read(&path).unwrap();
+        let start = std::time::Instant::now();
+        let whole: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        eprintln!("parsing the frame ({} MB, the network thread's work): {:?}", bytes.len() / 1_000_000, start.elapsed());
+        let n = whole["reset"].as_array().unwrap().len();
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        let view = |open: Open| {
+            Rc::new(View {
+                session: app.host.shared("t.session", Value::Nil),
+                messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+                subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+                draft: app.host.shared("t.draft", draft_value("", "")),
+                rpc: RefCell::default(),
+                open: RefCell::new(Some(open)),
+                pending: RefCell::default(),
+                generation: Cell::new(0),
+                snapshot: Cell::new(false),
+            })
+        };
+        let time = |label: &str, view: &Rc<View>, frame: serde_json::Value| {
+            let start = std::time::Instant::now();
+            view.heard_frame(frame);
+            eprintln!("{label}: {:?}", start.elapsed());
+        };
+        // Cold: the tail, then the whole copy.
+        let cold = view(Open { id: "c".into(), ..Open::default() });
+        let tail: Vec<_> = whole["reset"].as_array().unwrap()[n - 49..].to_vec();
+        time("cold open, tail frame (49)", &cold, serde_json::json!({ "reset": tail, "historyPending": true }));
+        time(&format!("cold open, whole copy ({n})"), &cold, whole.clone());
+        // Held rows (a reopen on an engine without `known`): the whole copy again.
+        let held: Vec<Entry> = whole["reset"].as_array().unwrap().iter().cloned().map(Entry::new).collect();
+        let warm = view(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() });
+        time(&format!("held rows, whole copy again ({n})"), &warm, whole.clone());
+        let start = std::time::Instant::now();
+        drop(whole);
+        eprintln!("dropping the frame's JSON: {:?}", start.elapsed());
+    }
+
+    /// The app's entry sums are the engine's (`zeron_doc::entry_sum`): a
+    /// reopen says what it holds by them. Pinned in both crates.
+    #[test]
+    fn entry_sums_match_the_engines() {
+        let a: serde_json::Value = serde_json::from_str(r#"{"id":"x","n":1.5,"p":[{"k":"t","v":null}]}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(r#"{"p":[{"v":null,"k":"t"}],"n":1.5,"id":"x"}"#).unwrap();
+        assert_eq!(super::sum_of(&a), 0xec67_0b99_244f_a276);
+        assert_eq!(super::sum_of(&b), super::sum_of(&a));
+        // And the order digest (`zeron_doc::order_sum`).
+        assert_eq!(super::order_sum(["a", "b"]), 0xab40_d782_0d40_8076);
+    }
+
+    /// After the engine's live frames (text appends, part patches, an
+    /// upsert), the app's sum of each entry is the engine's `entry_sum` of
+    /// it: else every reopen would say it holds something else and get a
+    /// reset. The frames and sums come from the engine's own diff
+    /// (crates/doc/examples/app_sum_fixture.rs).
+    #[test]
+    fn sums_after_live_frames_match_the_engines() {
+        use super::{Open, View, draft_value};
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("live_frames_fixture.json")).unwrap();
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        let view = Rc::new(View {
+            session: app.host.shared("t.session", Value::Nil),
+            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            draft: app.host.shared("t.draft", draft_value("", "")),
+            rpc: RefCell::default(),
+            open: RefCell::new(Some(Open { id: "c".into(), ..Open::default() })),
+            pending: RefCell::default(),
+            generation: Cell::new(0),
+            snapshot: Cell::new(false),
+        });
+        for (n, step) in fixture["steps"].as_array().unwrap().iter().enumerate() {
+            view.heard_frame(step["frame"].clone());
+            let open = view.open.borrow();
+            let entries = &open.as_ref().unwrap().entries;
+            let engine: Vec<(String, u64)> = step["sums"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| (p[0].as_str().unwrap().to_owned(), p[1].as_str().unwrap().parse().unwrap()))
+                .collect();
+            let here: Vec<(String, u64)> = entries.iter().map(|e| (e.id.to_string(), e.sum())).collect();
+            assert_eq!(here, engine, "after frame {n}: {}", step["frame"]);
+        }
+        assert_eq!(view.generation.get(), 0, "no frame asked for the whole copy again");
+    }
+
+    /// Rows held (opened before, or a new connection): the engine's `since`
+    /// frame is what changed from them, and once applied they're the whole
+    /// copy; nothing is fetched whole.
+    #[test]
+    fn rows_held_take_what_changed_since() {
+        use super::{Entry, Open, View, draft_value};
+        use serde_json::json;
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use zgx_script::{ScriptHost, Value, testing::TestApp};
+        let app = TestApp::new(|runtime| ScriptHost::inline(runtime, "app", "return ui.text { \"x\" }"));
+        let text = |id: &str, words: &str| json!({ "id": format!("{id}p"), "kind": "text", "text": words });
+        let reply = |id: &str, words: &str| json!({ "id": id, "role": "assistant", "status": "complete", "parts": [text(id, words)], "createdAt": 1_762_000_000_000_i64 });
+        let held: Vec<Entry> = (0..50).map(|i| Entry::new(reply(&format!("a{i}"), "done"))).collect();
+        let view = Rc::new(View {
+            session: app.host.shared("t.session", Value::Nil),
+            messages: app.host.shared("t.messages", Value::List(Rc::from([]))),
+            subagents: app.host.shared("t.subagents", Value::List(Rc::from([]))),
+            draft: app.host.shared("t.draft", draft_value("", "")),
+            rpc: RefCell::default(),
+            open: RefCell::new(Some(Open { id: "c".into(), entries: held, heard: true, has_whole: true, ..Open::default() })),
+            pending: RefCell::default(),
+            generation: Cell::new(0),
+            snapshot: Cell::new(false),
+        });
+        let rows = || format!("{:?}", view.messages.signal().with_untracked(Clone::clone));
+        // What it holds, as it would tell the engine: ids and the engine's sums.
+        let known: Vec<(String, u64)> = view.open.borrow().as_ref().unwrap().entries.iter().map(|e| (e.id.to_string(), e.sum())).collect();
+        assert_eq!(known.len(), 50);
+        assert_eq!(known[7].1, super::sum_of(&reply("a7", "done")));
+        // Told what it holds; not when its rows are to be built again.
+        let params = |rebuild: bool| {
+            let mut slot = view.open.borrow_mut();
+            let open = slot.as_mut().unwrap();
+            open.rebuild = rebuild;
+            let params = super::with_known(json!({ "chatId": "c" }), open);
+            open.rebuild = false;
+            params
+        };
+        assert_eq!(params(false)["known"].as_array().map(Vec::len), Some(50));
+        assert!(params(true).get("known").is_none(), "a rebuild needs the whole copy");
+        // The engine's answer: one entry new since.
+        view.heard_frame(json!({ "since": true, "upsert": [{ "after": "a49", "entry": reply("a50", "new since") }], "count": 51 }));
+        {
+            let open = view.open.borrow();
+            let open = open.as_ref().unwrap();
+            assert!(!open.has_whole, "the held rows and what changed are the whole copy");
+            assert_eq!(open.entries.len(), 51);
+        }
+        assert!(rows().contains("new since"), "{}", rows());
+        // A live change after it applies as ever.
+        view.heard_frame(json!({ "upsert": [{ "after": "a50", "entry": reply("a51", "live") }], "count": 52 }));
+        assert_eq!(view.open.borrow().as_ref().unwrap().entries.len(), 52);
+
+        // The engine's order, said: held so, the frame is taken.
+        let ids = |view: &View| view.open.borrow().as_ref().unwrap().entries.iter().map(|e| e.id.to_string()).collect::<Vec<_>>();
+        let reopen = |view: &View| view.open.borrow_mut().as_mut().unwrap().has_whole = true;
+        reopen(&view);
+        let mut order: Vec<String> = ids(&view);
+        order.push("a52".into());
+        let sum = super::order_sum(order.iter().map(String::as_str));
+        let generation = view.generation.get();
+        view.heard_frame(json!({ "since": true, "upsert": [{ "after": "a51", "entry": reply("a52", "more") }], "count": 53, "orderSum": sum }));
+        assert_eq!(view.generation.get(), generation, "held in the engine's order: taken");
+        assert_eq!(ids(&view), order);
+        // A row without an id (a malformed one the app kept) is left out of
+        // the order, as it's left out of `known`: no reload for it.
+        reopen(&view);
+        view.open.borrow_mut().as_mut().unwrap().entries.insert(1, super::Entry::new(json!({ "role": "user", "parts": [] })));
+        let sum = super::order_sum(order.iter().map(String::as_str));
+        view.heard_frame(json!({ "since": true, "count": 54, "orderSum": sum }));
+        assert_eq!(view.generation.get(), generation, "a row without an id doesn't make it reload");
+        view.open.borrow_mut().as_mut().unwrap().entries.remove(1);
+        // Held in another order than the engine's: asked for whole again.
+        reopen(&view);
+        let mut other = ids(&view);
+        other.swap(0, 1);
+        let sum = super::order_sum(other.iter().map(String::as_str));
+        view.heard_frame(json!({ "since": true, "count": 53, "orderSum": sum }));
+        assert_eq!(view.generation.get(), generation + 1, "out of the engine's order: watched again, for the whole copy");
+        assert!(!view.open.borrow().as_ref().unwrap().has_whole, "and without saying what it holds");
+    }
+
     #[test]
     fn a_turn_being_written_goes_on_while_the_whole_copy_is_awaited() {
         use super::{Entry, Open, View, draft_value};
@@ -7257,5 +7887,181 @@ mod tests {
         view.heard_frame(json!({ "reset": [prompt("u0"), reply("a0"), prompt("u1"), reply("a1")] }));
         assert!(!view.open.borrow().as_ref().unwrap().has_whole);
         assert!(!rows().contains("tail engine.log"), "the whole copy replaces it: {}", rows());
+    }
+
+    /// A chat opened shows its rows once its transcript has come (this
+    /// device's copy, read first whatever its host's state), not once the
+    /// chats list has it too; "missing" only when the list is known, hasn't
+    /// it, and nothing of it came; loading only while nothing has.
+    #[test]
+    fn a_chat_with_its_transcript_here_is_ready_before_the_chats_list_knows_it() {
+        use super::{Chats, Entry, Open, session_value, text};
+        use serde_json::json;
+        let chats = Chats::default();
+        let state = |chats: &Chats, open: &Open| session_value(chats, open, false).field("state").map(text).unwrap_or_default();
+        let rows = vec![Entry::new(json!({ "id": "u0", "role": "user", "parts": [] }))];
+        let mut open = Open { id: "c".into(), ..Open::default() };
+        assert_eq!(state(&chats, &open), "loading", "nothing come yet");
+        open.heard = true;
+        open.entries = rows;
+        // The chats list not come yet (a launch, the list large): its rows show.
+        assert_eq!(state(&chats, &open), "ready");
+        // The list come, without it (its host gone quiet, another device's):
+        // its rows still show.
+        chats.chats_heard.set(true);
+        assert_eq!(state(&chats, &open), "ready");
+        // Nothing of it here, and the list hasn't it: missing.
+        open.entries.clear();
+        assert_eq!(state(&chats, &open), "missing");
+        // Listed: ready.
+        chats.chats.borrow_mut().insert("c".into(), json!({ "id": "c", "config": {} }));
+        assert_eq!(state(&chats, &open), "ready");
+    }
+
+    /// The chats views let go of lately are kept, the most recent few, so
+    /// one opened again shows its rows at once (not a skeleton while it's
+    /// read and built again), then takes what changed from the engine.
+    #[test]
+    fn chats_let_go_of_are_kept_to_open_again_with_their_rows() {
+        use super::{Chats, Entry, LET_GO_MOST, Open};
+        use serde_json::json;
+        use std::rc::Rc;
+        let chats = Rc::new(Chats::default());
+        let open = |id: &str| Open {
+            id: id.into(),
+            entries: vec![Entry::new(json!({ "id": format!("{id}-m"), "role": "user", "parts": [] }))],
+            heard: true,
+            ..Open::default()
+        };
+        for id in ["a", "b", "c"] {
+            chats.keep_let_go(Some(open(id)));
+        }
+        let b = chats.take_let_go("b").expect("b kept, though two were let go after it");
+        assert!(b.heard && b.has_whole && b.entries.len() == 1);
+        assert!(chats.take_let_go("b").is_none(), "taken once");
+        assert!(chats.take_let_go("a").is_some());
+        // The most recent few only.
+        for i in 0..LET_GO_MOST + 2 {
+            chats.keep_let_go(Some(open(&format!("x{i}"))));
+        }
+        assert!(chats.take_let_go("x0").is_none());
+        assert!(chats.take_let_go(&format!("x{}", LET_GO_MOST + 1)).is_some());
+        // And no more than LET_GO_BYTES of them: a chat alone over it isn't
+        // kept, and those kept before it stay.
+        chats.keep_let_go(Some(open("small")));
+        let mut huge = open("huge");
+        huge.built.insert("huge-m".into(), super::Built { folded: super::LET_GO_BYTES + 1, ..Default::default() });
+        chats.keep_let_go(Some(huge));
+        assert!(chats.take_let_go("huge").is_none(), "too big to keep");
+        assert!(chats.take_let_go("small").is_some());
+    }
+
+    /// What keeping chats let go of costs (`let_go`): six chats the size of a
+    /// long one (some 7,900 entries, about 28 MB as JSON whole), each built as
+    /// a view builds it (its settled rows folded), kept one after another; the
+    /// process's footprint (what Activity Monitor shows) after each.
+    ///   cargo test --release --bin zeron-zgx kept_chats_cost -- --ignored --nocapture
+    #[test]
+    #[ignore = "a measurement"]
+    #[cfg(target_os = "macos")]
+    fn kept_chats_cost() {
+        use super::{Chats, Entry, Open, RowContext, WHOLE_TAIL, built_for, settle};
+        use serde_json::json;
+        use std::rc::Rc;
+        fn footprint_mb() -> f64 {
+            let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+            let r = unsafe { libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V4, &mut info as *mut _ as *mut _) };
+            assert_eq!(r, 0);
+            info.ri_phys_footprint as f64 / 1e6
+        }
+        let words = |i: usize, n: usize| -> String {
+            (0..n).map(|k| format!("word{} ", (i * 31 + k * 7) % 997)).collect()
+        };
+        let chat = |c: usize| -> Vec<Json> {
+            (0..7900)
+                .map(|i| {
+                    let id = format!("c{c}-e{i}");
+                    if i % 2 == 0 {
+                        json!({ "id": id, "role": "user", "createdAt": 1_762_000_000_000_i64 + i as i64, "parts": [{ "id": "t0", "kind": "text", "text": words(i, 40) }] })
+                    } else {
+                        json!({ "id": id, "role": "assistant", "status": "complete", "createdAt": 1_762_000_000_000_i64 + i as i64, "durationMs": 9000, "parts": [
+                            { "id": "r0", "kind": "reasoning", "text": words(i, 120) },
+                            { "id": "x0", "kind": "tool", "status": "completed", "call": { "kind": "exec", "command": format!("cargo test {i}") }, "output": words(i + 1, 200) },
+                            { "id": "t0", "kind": "text", "text": format!("## Part {i}\n\n{}\n\n- a\n- b\n\n```rust\nfn f() {{}}\n```\n", words(i + 2, 160)) },
+                        ] })
+                    }
+                })
+                .collect()
+        };
+        let chats = Rc::new(Chats::default());
+        let context = Rc::new(RowContext { doc: "doc".into(), device: None, model: Some("Opus".into()) });
+        let base = footprint_mb();
+        println!("KEPT base {base:.1} MB");
+        // One built as a view builds it and let go of with nothing kept: what a
+        // long chat opened at all leaves, cache or not.
+        let build = |c: usize| {
+            let list = chat(c);
+            let whole_from = list.len().saturating_sub(WHOLE_TAIL);
+            let mut entries: Vec<Entry> = Vec::with_capacity(list.len());
+            let mut built = std::collections::HashMap::new();
+            let mut older_todo = None;
+            for (at, e) in list.into_iter().enumerate() {
+                let row = built_for(&e, &context, at < whole_from);
+                let mut entry = Entry::new(e);
+                built.insert(entry.id.clone(), row);
+                if at < whole_from {
+                    settle(&mut entry, at, &mut older_todo);
+                }
+                entries.push(entry);
+            }
+            Open { id: format!("c{c}"), entries, built, older_todo, heard: true, ..Open::default() }
+        };
+        drop(build(99));
+        println!("KEPT one opened and let go, none kept: {:.1} MB (+{:.1})", footprint_mb(), footprint_mb() - base);
+        zgx_desktop::release_thread_heap();
+        println!("KEPT and the heap released: {:.1} MB (+{:.1})", footprint_mb(), footprint_mb() - base);
+        for c in 0..6 {
+            let list = chat(c);
+            let json_mb = list.iter().map(|e| serde_json::to_vec(e).map_or(0, |b| b.len())).sum::<usize>() as f64 / 1e6;
+            let whole_from = list.len().saturating_sub(WHOLE_TAIL);
+            let mut entries: Vec<Entry> = Vec::with_capacity(list.len());
+            let mut built = std::collections::HashMap::new();
+            let mut older_todo = None;
+            for (at, e) in list.into_iter().enumerate() {
+                let row = built_for(&e, &context, at < whole_from);
+                let mut entry = Entry::new(e);
+                built.insert(entry.id.clone(), row);
+                if at < whole_from {
+                    settle(&mut entry, at, &mut older_todo);
+                }
+                entries.push(entry);
+            }
+            chats.keep_let_go(Some(Open { id: format!("c{c}"), entries, built, older_todo, heard: true, ..Open::default() }));
+            let weights: Vec<String> = chats.let_go.borrow().iter().map(|h| format!("{}={:.1}MB", h.id, h.bytes as f64 / 1e6)).collect();
+            println!("KEPT {} chats: {:.1} MB (+{:.1}); this one {json_mb:.1} MB as JSON; kept {}", c + 1, footprint_mb(), footprint_mb() - base, weights.join(" "));
+        }
+        chats.let_go.borrow_mut().clear();
+        println!("KEPT none again: {:.1} MB", footprint_mb());
+    }
+
+    /// A chat let go while its rows wait to be built again (its model's
+    /// name moved) isn't kept, and an older kept copy of it goes: opened
+    /// again it reads its rows whole, never says it holds old-model rows.
+    #[test]
+    fn a_chat_let_go_mid_rebuild_is_not_kept() {
+        use super::{Chats, Entry, Open};
+        use serde_json::json;
+        use std::rc::Rc;
+        let chats = Rc::new(Chats::default());
+        let open = |rebuild: bool| Open {
+            id: "m".into(),
+            entries: vec![Entry::new(json!({ "id": "m-1", "role": "user", "parts": [] }))],
+            heard: true,
+            rebuild,
+            ..Open::default()
+        };
+        chats.keep_let_go(Some(open(false)));
+        chats.keep_let_go(Some(open(true)));
+        assert!(chats.take_let_go("m").is_none(), "neither copy is kept");
     }
 }

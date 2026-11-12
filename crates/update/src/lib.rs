@@ -61,6 +61,17 @@ pub const fn current_version() -> &'static str {
 
 static APP_VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// Set by the zgx app, the Zeron app on every platform: its updater follows
+/// the channel on record ([`InstallKind::follows_channels`]). Not by an
+/// engine, whose process runs this crate too.
+static APP_FOLLOWS_CHANNELS: AtomicBool = AtomicBool::new(false);
+
+/// This process is the zgx app (see [`APP_FOLLOWS_CHANNELS`]). Called first
+/// thing in its `main`.
+pub fn set_app_follows_channels() {
+    APP_FOLLOWS_CHANNELS.store(true, Ordering::SeqCst);
+}
+
 /// The app's own version when it isn't this crate's: a beta interface built
 /// apart from the workspace (`0.2.136-beta.1`). Set once, before the desktop
 /// checker starts.
@@ -308,6 +319,11 @@ impl Offer {
 ///   stable's engine is older than the one the beta brought (it would run on
 ///   data a newer engine wrote): then it waits until stable catches up.
 /// - A release needing a newer macOS than this one is held.
+///
+/// Leaving beta for an older stable takes a person's choice of Stable on
+/// record ([`channel::stable_on_record`]): a beta build that only reads
+/// stable because it doesn't follow channels (one run from where it was
+/// unpacked, an engine) is never offered an older release.
 pub fn offer(
     manifest: &Manifest,
     running: &str,
@@ -315,11 +331,24 @@ pub fn offer(
     running_engine: Option<&str>,
     macos: Option<&str>,
 ) -> Offer {
+    offer_given(manifest, running, selected, running_engine, macos, channel::stable_on_record())
+}
+
+/// [`offer`], told whether Stable is the choice on record.
+fn offer_given(
+    manifest: &Manifest,
+    running: &str,
+    selected: Channel,
+    running_engine: Option<&str>,
+    macos: Option<&str>,
+    stable_chosen: bool,
+) -> Offer {
     let latest = manifest.version.as_str();
     if parse_version(latest).is_none() || latest.trim() == running.trim() {
         return Offer::Current;
     }
-    let leaving_beta = Channel::of_version(running) == Channel::Beta && selected == Channel::Stable;
+    let leaving_beta =
+        Channel::of_version(running) == Channel::Beta && selected == Channel::Stable && stable_chosen;
     if !leaving_beta && !version_newer(latest, running) {
         return Offer::Current;
     }
@@ -597,14 +626,20 @@ impl InstallKind {
     }
 
     /// Whether this install's updater follows `update-channel.json`: a macOS
-    /// app always; on Windows and the Linux desktop a beta build alone, so
-    /// stable builds there (and every engine, which is a stable build) stay on
-    /// stable and a tester can still leave beta.
+    /// app always; on Windows and the Linux desktop the zgx app
+    /// ([`set_app_follows_channels`]) and any beta build, so that a beta
+    /// download stays on the beta channel through the stable releases it
+    /// carries, and a tester can still leave beta. The old app's stable
+    /// builds there, and engines that aren't betas, stay on stable.
     pub fn follows_channels(&self) -> bool {
         match self {
             Self::MacApp { .. } => true,
             Self::Unmanaged => false,
-            _ => self.supports_desktop_update() && Channel::of_version(app_version()) == Channel::Beta,
+            _ => {
+                self.supports_desktop_update()
+                    && (APP_FOLLOWS_CHANNELS.load(Ordering::SeqCst)
+                        || Channel::of_version(app_version()) == Channel::Beta)
+            }
         }
     }
 
@@ -912,10 +947,10 @@ fn detect_install_from(exe: &Path, home: Option<&Path>) -> InstallKind {
 
 fn detect_install_from_for_os(exe: &Path, home: Option<&Path>, os: &str) -> InstallKind {
     #[cfg(windows)]
-    if os == "windows" && windows::is_managed(exe) {
-        return InstallKind::WindowsPortable {
-            directory: exe.parent().unwrap().to_owned(),
-        };
+    if os == "windows"
+        && let Some(directory) = windows::managed_directory(exe)
+    {
+        return InstallKind::WindowsPortable { directory };
     }
     // Never interpret a coincidental Windows `%HOME%\.zeron\app` layout as
     // the Unix symlink-managed installation.
@@ -1002,7 +1037,17 @@ pub async fn download_release_file(
     dest: &Path,
 ) -> anyhow::Result<()> {
     // From the feed the manifest came from: a beta's files are beta's.
-    let url = format!("{}/{file}", manifest.channel.base(&release_base(edge_url)?));
+    download_release_file_from(&manifest.channel.base(&release_base(edge_url)?), manifest, file, dest).await
+}
+
+/// [`download_release_file`] from the feed at `base`.
+pub(crate) async fn download_release_file_from(
+    base: &str,
+    manifest: &Manifest,
+    file: &str,
+    dest: &Path,
+) -> anyhow::Result<()> {
+    let url = format!("{base}/{file}");
     let expected = manifest.files.get(file).and_then(|m| m.sha256.as_deref());
     if expected.is_none() {
         tracing::warn!(
@@ -1331,6 +1376,36 @@ fn stage_is_abandoned(rest: &str) -> bool {
     }
 }
 
+type BeforeRestart = std::sync::Arc<dyn Fn() + Send + Sync>;
+static BEFORE_RESTART: std::sync::Mutex<Option<BeforeRestart>> = std::sync::Mutex::new(None);
+
+/// Runs just before this process asks to be restarted into another version
+/// ([`restart_service`]): the engine leaves its stores in the form every
+/// version reads (snapshot deltas folded in), so a stop that is cut short,
+/// or a later move back to an older version, finds nothing it can't read.
+/// The newest call wins.
+pub fn set_before_restart(prepare: impl Fn() + Send + Sync + 'static) {
+    *BEFORE_RESTART.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(std::sync::Arc::new(prepare));
+}
+
+/// Runs what [`set_before_restart`] set, as [`restart_service`] does first,
+/// without restarting anything. For tests.
+#[doc(hidden)]
+pub fn run_before_restart() {
+    before_restart();
+}
+
+fn before_restart() {
+    let prepare = BEFORE_RESTART
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(prepare) = prepare {
+        prepare();
+    }
+}
+
 type ManagedRestart = Box<dyn Fn() -> anyhow::Result<()> + Send + Sync>;
 
 static MANAGED_RESTART: std::sync::OnceLock<ManagedRestart> = std::sync::OnceLock::new();
@@ -1465,6 +1540,7 @@ pub fn systemctl_query(unit: &str) -> std::process::Command {
 /// picks up the new binary. Only queues the restart: the caller may be the
 /// service itself, which must stay responsive to the stop signal that follows.
 pub fn restart_service() -> anyhow::Result<()> {
+    before_restart();
     if let Some(restart) = MANAGED_RESTART.get() {
         return restart();
     }
@@ -3846,20 +3922,56 @@ mod tests {
     #[test]
     fn leaving_beta_installs_stable_even_when_older() {
         let stable = manifest_of("0.2.135", Channel::Stable);
-        assert_eq!(offer(&stable, "0.2.136-beta.2", Channel::Stable, Some("0.2.135"), None), Offer::Switch);
+        assert_eq!(offer_given(&stable, "0.2.136-beta.2", Channel::Stable, Some("0.2.135"), None, true), Offer::Switch);
         // A stable that caught up is simply newer.
         let caught_up = manifest_of("0.2.136", Channel::Stable);
-        assert_eq!(offer(&caught_up, "0.2.136-beta.2", Channel::Stable, Some("0.2.135"), None), Offer::Newer);
+        assert_eq!(offer_given(&caught_up, "0.2.136-beta.2", Channel::Stable, Some("0.2.135"), None, true), Offer::Newer);
+    }
+
+    /// 0.3.0, the first zgx stable, after 0.2.138 and the 0.2.139 betas: newer
+    /// than all of them, by a shipped updater's rules as by these.
+    #[test]
+    fn a_minor_version_is_newer_than_the_last_and_its_betas() {
+        for older in ["0.2.138", "0.2.139-beta.6", "0.2.139-beta.7", "0.2.999"] {
+            assert!(version_newer("0.3.0", older), "{older}");
+            assert!(!version_newer(older, "0.3.0"), "{older}");
+        }
+        assert!(version_newer("0.3.1", "0.3.0") && version_newer("0.3.1-beta.1", "0.3.0"));
+        let stable = manifest_of("0.3.0", Channel::Stable);
+        assert_eq!(offer_given(&stable, "0.2.138", Channel::Stable, Some("0.2.138"), None, false), Offer::Newer);
+        let beta_feed = manifest_of("0.3.0", Channel::Beta);
+        assert_eq!(offer_given(&beta_feed, "0.2.139-beta.6", Channel::Beta, Some("0.2.139-beta.6"), None, false), Offer::Newer);
+        assert_eq!(managed_dir("0.3.0"), "0.3.0");
+    }
+
+    /// An unpacked Linux tarball of a beta, run where it lies (unmanaged, so
+    /// it reads stable), was offered the older stable. Without Stable chosen
+    /// on record, a beta build is offered only what's newer.
+    #[test]
+    fn a_beta_never_goes_back_to_an_older_stable_unless_stable_was_chosen() {
+        let older = manifest_of("0.2.138", Channel::Stable);
+        assert_eq!(offer_given(&older, "0.2.139-beta.6", Channel::Stable, None, None, false), Offer::Current);
+        assert_eq!(offer_given(&older, "0.2.139-beta.6", Channel::Stable, None, None, true), Offer::Switch);
+        // Stable catching up is newer either way.
+        let caught_up = manifest_of("0.2.139", Channel::Stable);
+        assert_eq!(offer_given(&caught_up, "0.2.139-beta.6", Channel::Stable, None, None, false), Offer::Newer);
+        #[cfg(target_os = "linux")]
+        {
+            let unpacked = std::path::Path::new("/home/someone/Downloads/zeron-0.2.139-beta.6-linux-x86_64/zeron");
+            let home = std::path::Path::new("/home/someone");
+            assert_eq!(detect_install_from(unpacked, Some(home)), InstallKind::Unmanaged);
+            assert!(!InstallKind::Unmanaged.follows_channels());
+        }
     }
 
     #[test]
     fn leaving_beta_waits_when_stable_s_engine_is_older_than_the_beta_s() {
         let stable = manifest_of("0.2.135", Channel::Stable);
-        let held = offer(&stable, "0.2.136-beta.3", Channel::Stable, Some("0.2.136"), None);
+        let held = offer_given(&stable, "0.2.136-beta.3", Channel::Stable, Some("0.2.136"), None, true);
         assert!(matches!(&held, Offer::Held(why) if why.contains("catches up")), "{held:?}");
         // A manifest naming its engine is weighed by that.
         let named = Manifest { engine_version: Some("0.2.136".into()), ..stable };
-        assert_eq!(offer(&named, "0.2.136-beta.3", Channel::Stable, Some("0.2.136"), None), Offer::Switch);
+        assert_eq!(offer_given(&named, "0.2.136-beta.3", Channel::Stable, Some("0.2.136"), None, true), Offer::Switch);
     }
 
     #[test]
@@ -4095,7 +4207,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let contents = dir.path().join("Contents");
         std::fs::create_dir_all(&contents).unwrap();
-        // As scripts/package-zgx-beta.sh writes it.
+        // As scripts/package-zgx-macos.sh writes it.
         std::fs::write(
             contents.join("Info.plist"),
             "<plist><dict><key>CFBundleShortVersionString</key><string>0.2.137</string>\
