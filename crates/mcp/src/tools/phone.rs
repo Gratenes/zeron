@@ -11,7 +11,7 @@ use zeron_rpc::methods;
 
 use super::{ToolDef, Tools};
 
-pub(super) const NAMES: [&str; 17] = [
+pub(super) const NAMES: [&str; 20] = [
     "phone_ping",
     "phone_screen_read",
     "phone_screenshot",
@@ -29,6 +29,9 @@ pub(super) const NAMES: [&str; 17] = [
     "phone_sms_read",
     "phone_sms_send",
     "phone_contacts_search",
+    "phone_files_list",
+    "phone_files_stat",
+    "phone_files_hash",
 ];
 
 const SCREENSHOT: &str = "phone_screenshot";
@@ -169,6 +172,24 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                 "query": { "type": "string" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Default 10." }
             }), &["query"]),
+        },
+        ToolDef {
+            name: "phone_files_list",
+            description: "List files on the phone, only inside folders the person allowed (Settings → Agent phone access → Files, a switch that is off by default): path \"\" or \"/\" lists the allowed folders; a folder's path lists its entries (name, full path, kind file or dir, size in bytes, mtime in epoch milliseconds), sorted by name, 500 at a time (pass the returned `cursor` for the next page). Errors start with a code: files.no_grant (not allowed, and says which folders are), files.not_found, files.denied, files.unavailable. Reading or copying a file's bytes is done by Zeron's file transfer between devices, not by this tool.",
+            input_schema: schema(json!({
+                "path": { "type": "string", "description": "An absolute path inside an allowed folder, or \"\" for the allowed folders." },
+                "cursor": { "type": "string", "description": "From the previous page's reply." }
+            }), &[]),
+        },
+        ToolDef {
+            name: "phone_files_stat",
+            description: "Size, kind and modification time of one file or folder inside an allowed folder (see phone_files_list).",
+            input_schema: schema(json!({ "path": { "type": "string" } }), &["path"]),
+        },
+        ToolDef {
+            name: "phone_files_hash",
+            description: "The SHA-256 and size of a file inside an allowed folder, computed on the phone without moving it: to check a copy, or to skip a file that hasn't changed.",
+            input_schema: schema(json!({ "path": { "type": "string" } }), &["path"]),
         },
     ]
 }
@@ -389,6 +410,16 @@ mod tests {
         for said in ["PIN", "60 s", "3 minutes", "ONCE", "by hand"] {
             assert!(def.description.contains(said), "the description says {said:?}");
         }
+    }
+
+    #[test]
+    fn the_phones_files_are_listed_only_as_allowed_folders_and_never_read_by_an_agent_tool() {
+        for name in ["phone_files_list", "phone_files_stat", "phone_files_hash"] {
+            let def = full_catalog().into_iter().find(|d| d.name == name).expect("listed");
+            assert!(def.description.contains("allowed folder"), "{name} says it is limited to allowed folders");
+        }
+        // Moving bytes is the file transfer's job: no agent tool reads or writes a file's content.
+        assert!(!full_catalog().iter().any(|d| d.name == "phone_files_read" || d.name == "phone_files_write"));
     }
 
     #[test]
