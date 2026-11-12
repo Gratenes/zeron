@@ -37,6 +37,16 @@ pub(crate) fn link_idle_pending(device: &str) -> bool {
     LAST_CALL.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(device)
 }
 
+/// A phone that restarted keeps its agent link down until the person has unlocked it once by hand.
+fn with_restart_hint(error: RpcError) -> RpcError {
+    match error {
+        RpcError::Failed(message) if message.contains("is offline") => RpcError::Failed(format!(
+            "{message}. If the phone restarted, its agent link comes back after the person unlocks it once by hand."
+        )),
+        other => other,
+    }
+}
+
 impl EngineRpc {
     /// One ask of the phone over its device room. A phone is dialed whatever its registry
     /// presence says (it rests its workspace sockets): the room tells at once if its host is away.
@@ -123,7 +133,7 @@ impl EngineRpc {
                 "{} doesn't run Zeron's phone tools (update Zeron for Android there)",
                 device.name
             ))),
-            Ok(Err(error)) => Err(remote_error(device, error, Utc::now())),
+            Ok(Err(error)) => Err(with_restart_hint(remote_error(device, error, Utc::now()))),
             Err(_) => {
                 if let Some(links) = &self.links {
                     links.invalidate(target);
@@ -135,5 +145,23 @@ impl EngineRpc {
                 )))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_offline_phone_is_told_to_be_unlocked_by_hand_if_it_restarted() {
+        let said = |e: RpcError| match e {
+            RpcError::Failed(m) => m,
+            other => panic!("{other}"),
+        };
+        let away = with_restart_hint(RpcError::Failed("Pixel is offline (last seen 3 h ago)".into()));
+        assert!(said(away).contains("unlocks it once by hand"));
+        // Anything else (the phone's own refusal) passes through untouched.
+        let refusal = with_restart_hint(RpcError::Failed("Pixel: Reading the screen is switched off".into()));
+        assert_eq!(said(refusal), "Pixel: Reading the screen is switched off");
     }
 }

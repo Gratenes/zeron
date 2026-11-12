@@ -51,6 +51,9 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             val until = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(settings.pausedUntil))
             throw PhoneToolException("The person stopped agent access on this phone until $until")
         }
+        if (tool == "unlock" && !settings.unlockEnabled) {
+            throw PhoneToolException("Unlocking by agents is off on this phone (Zeron → Settings → Agent phone access → Let agents unlock this phone)")
+        }
         val group = GROUPS[tool] ?: if (tool in NO_GROUP) return else throw PhoneToolException("this phone doesn't know the tool $tool (update Zeron for Android)")
         if (!settings.groupOn(group)) throw PhoneToolException("${group.label} is switched off on this phone")
     }
@@ -58,8 +61,11 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
     private fun run(tool: String, args: JSONObject, who: String?): JSONObject {
         fun service() = PhoneAccessibilityService.instance
             ?: throw PhoneToolException("Zeron's accessibility service is off: turn it on in Android Settings → Accessibility → Zeron")
+        // A tool that acts on the screen needs it unlocked: unlock it (if the person allows that), or say it is locked.
+        if (tool in ACTS_ON_SCREEN) PhoneUnlock.ensureUnlocked(context)
         return when (tool) {
             "ping" -> ping()
+            "unlock" -> PhoneUnlock.unlock(context)
             "screen_read" -> service().readScreen(args.optInt("max_nodes", 400).coerceIn(1, 2000))
             "screenshot" -> service().screenshot(args.optInt("max_edge", 1280).coerceIn(200, 2400))
             "tap" -> service().tap(args)
@@ -106,6 +112,8 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             .put("accessibilityOn", service != null)
             .put("notificationAccessOn", PhoneNotificationListener.instance != null)
             .put("paused", settings.paused)
+            .put("locked", PhoneUnlock.isLocked(context))
+            .put("agentsMayUnlock", settings.unlockEnabled && !settings.unlockFailed && (PhonePinVault.has(context) || !context.getSystemService(android.app.KeyguardManager::class.java).isDeviceSecure))
             .put("confirmsTextSends", settings.confirmSmsSend)
             .put("allowed", JSONObject().also { o -> PhoneSettings.Group.entries.forEach { o.put(it.key, settings.groupOn(it)) } })
             .put("foregroundPackage", service?.foregroundPackage() ?: JSONObject.NULL)
@@ -157,6 +165,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
     /** One line for the log: what was done, with no message text and nothing typed. */
     private fun summarize(tool: String, a: JSONObject): String = when (tool) {
         "ping" -> "checked in"
+        "unlock" -> "unlocked the phone"
         "screen_read" -> "read the screen"
         "screenshot" -> "took a screenshot"
         "tap" -> "tapped ${a.optString("node").ifEmpty { "(${a.optInt("x")}, ${a.optInt("y")})" }}"
@@ -188,6 +197,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             "sms_send" to PhoneSettings.Group.SMS_SEND,
             "contacts_search" to PhoneSettings.Group.CONTACTS,
         )
-        private val NO_GROUP = setOf("ping")
+        private val NO_GROUP = setOf("ping", "unlock")
+        private val ACTS_ON_SCREEN = setOf("tap", "long_press", "type", "swipe", "scroll", "launch_app")
     }
 }

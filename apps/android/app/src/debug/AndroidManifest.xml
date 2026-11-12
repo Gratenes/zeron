@@ -20,5 +20,8 @@
         <receiver android:name="sh.zeron.android.phone.PhoneTestReplyReceiver" android:exported="false">
             <intent-filter><action android:name="sh.zeron.android.TEST_CHAT_REPLY" /></intent-filter>
         </receiver>
+        <receiver android:name="sh.zeron.android.phone.PhoneTestPinReceiver" android:exported="true">
+            <intent-filter><action android:name="sh.zeron.android.TEST_PIN" /></intent-filter>
+        </receiver>
     </application>
 </manifest>

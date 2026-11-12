@@ -38,6 +38,16 @@ class PhoneSettings(context: Context) {
         get() = prefs.getInt("keepalive-secs", 60)
         set(value) = prefs.edit().putInt("keepalive-secs", value.coerceIn(30, 300)).apply()
 
+    /** Agents may unlock the phone with the PIN the person stored (off by default). */
+    var unlockEnabled: Boolean
+        get() = prefs.getBoolean("unlock-enabled", false)
+        set(value) = prefs.edit().putBoolean("unlock-enabled", value).apply()
+
+    /** An unlock attempt failed: agents are refused until the person enters the PIN again. */
+    var unlockFailed: Boolean
+        get() = prefs.getBoolean("unlock-failed", false)
+        set(value) = prefs.edit().putBoolean("unlock-failed", value).apply()
+
     /** A new text from one of [wakeSenders] is sent to chat [wakeChatId] (an agent can then act on it). */
     var wakeEnabled: Boolean
         get() = prefs.getBoolean("wake-enabled", false)

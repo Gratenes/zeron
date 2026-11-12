@@ -2357,6 +2357,15 @@ mod tests {
     }
 
     #[test]
+    fn unlocking_the_phone_is_a_tool_without_arguments_that_says_its_limits() {
+        let def = catalog().into_iter().find(|d| d.name == "phone_unlock").expect("listed");
+        assert_eq!(def.input_schema["properties"].as_object().unwrap().keys().collect::<Vec<_>>(), ["device"]);
+        for said in ["PIN", "60 s", "3 minutes", "ONCE", "by hand"] {
+            assert!(def.description.contains(said), "the description says {said:?}");
+        }
+    }
+
+    #[test]
     fn a_message_is_sent_to_a_number_or_a_thread_by_sms_or_in_the_chat() {
         let send = catalog().into_iter().find(|d| d.name == "phone_sms_send").expect("listed");
         let props = &send.input_schema["properties"];

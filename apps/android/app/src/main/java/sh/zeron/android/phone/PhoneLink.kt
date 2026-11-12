@@ -46,6 +46,7 @@ object PhoneLink {
         Log.i(TAG, "accessibility bound: starting the host")
         main.post { model(context).bootHeadless() }
         watchMessages(context)
+        PhoneUnlock.watch(context)
     }
 
     fun onAccessibilityGone(context: Context) {
@@ -72,6 +73,7 @@ object PhoneLink {
     fun touch(context: Context) {
         this.context = context
         lastCall = System.currentTimeMillis()
+        PhoneUnlock.noteToolCall(context)
         if (PhoneAccessibilityService.instance == null) scheduleIdle()
     }
 

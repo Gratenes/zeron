@@ -42,7 +42,14 @@ class PhoneAccessibilityService : AccessibilityService() {
         return super.onUnbind(intent)
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // Any click, long click, scroll or touch that isn't ours is the person using the phone (agents don't unlock
+        // over them). Only the kind of event is looked at, never its content.
+        when (event?.eventType) {
+            AccessibilityEvent.TYPE_VIEW_CLICKED, AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED, AccessibilityEvent.TYPE_TOUCH_INTERACTION_START -> PhoneUnlock.onTouch()
+        }
+    }
 
     override fun onInterrupt() = Unit
 
@@ -117,6 +124,7 @@ class PhoneAccessibilityService : AccessibilityService() {
     // ── acting ───────────────────────────────────────────────────────────────
 
     fun tap(args: JSONObject): JSONObject {
+        PhoneUnlock.ours(2500)
         guardForeground()
         val id = args.optString("node").takeIf { it.isNotEmpty() }
         if (id != null) {
@@ -134,6 +142,7 @@ class PhoneAccessibilityService : AccessibilityService() {
     }
 
     fun longPress(args: JSONObject): JSONObject {
+        PhoneUnlock.ours(2500)
         guardForeground()
         val ms = args.optLong("duration_ms", 800).coerceIn(300, 3000)
         val id = args.optString("node").takeIf { it.isNotEmpty() }
@@ -159,6 +168,7 @@ class PhoneAccessibilityService : AccessibilityService() {
     }
 
     fun type(args: JSONObject): JSONObject {
+        PhoneUnlock.ours(2500)
         guardForeground()
         val text = args.optString("text", "")
         val id = args.optString("node").takeIf { it.isNotEmpty() }
@@ -180,6 +190,7 @@ class PhoneAccessibilityService : AccessibilityService() {
     }
 
     fun swipe(args: JSONObject): JSONObject {
+        PhoneUnlock.ours(2500)
         guardForeground()
         val m = resources.displayMetrics
         val w = m.widthPixels.toFloat()
@@ -209,6 +220,7 @@ class PhoneAccessibilityService : AccessibilityService() {
     }
 
     fun scroll(args: JSONObject): JSONObject {
+        PhoneUnlock.ours(2500)
         guardForeground()
         val forward = when (args.optString("direction")) {
             "forward" -> true
@@ -275,6 +287,7 @@ class PhoneAccessibilityService : AccessibilityService() {
     }
 
     private fun gesture(path: Path, durationMs: Long): Boolean {
+        PhoneUnlock.ours(durationMs + 1500)
         val gesture = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, durationMs.coerceAtLeast(1))).build()
         val done = CountDownLatch(1)
         var ok = false
@@ -289,6 +302,83 @@ class PhoneAccessibilityService : AccessibilityService() {
         if (!accepted) return false
         done.await(durationMs + 3000, TimeUnit.MILLISECONDS)
         return ok
+    }
+
+    // ── the lock screen ──────────────────────────────────────────────────────
+
+    /** Swipes up from the bottom of the screen: opens the lock screen's PIN pad. */
+    fun swipeUpFromBottom() {
+        val m = resources.displayMetrics
+        val path = Path().apply { moveTo(m.widthPixels / 2f, m.heightPixels * 0.88f); lineTo(m.widthPixels / 2f, m.heightPixels * 0.30f) }
+        gesture(path, 300)
+    }
+
+    fun pressBack() { performGlobalAction(GLOBAL_ACTION_BACK) }
+
+    fun lockScreen(): Boolean = performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
+
+    /**
+     * Presses the digits of [pin] on the lock screen's PIN pad (the keys are found by their ids `key0`…`key9`, or a
+     * clickable digit), then Enter if there is one. False if there is no PIN pad to be found: nothing was pressed.
+     * The digits are never logged.
+     */
+    fun enterPin(pin: String): Boolean {
+        var keys: Map<Char, AccessibilityNodeInfo> = emptyMap()
+        for (attempt in 0 until 6) {
+            keys = pinKeys()
+            if (keys.keys.containsAll(pin.toSet())) break
+            Thread.sleep(500)
+        }
+        if (!keys.keys.containsAll(pin.toSet())) return false
+        PhoneUnlock.ours(pin.length * 400L + 2500)
+        for (digit in pin) {
+            val key = keys[digit] ?: return false
+            press(key)
+            Thread.sleep(180)
+        }
+        Thread.sleep(300)
+        // Most PIN pads unlock on Enter (some at once, when the length is known).
+        pinEnter()?.let { press(it) }
+        return true
+    }
+
+    private fun press(node: AccessibilityNodeInfo) {
+        var n: AccessibilityNodeInfo? = node
+        while (n != null && !n.isClickable) n = n.parent
+        if (n != null && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return
+        val b = Rect().also(node::getBoundsInScreen)
+        val path = Path().apply { moveTo(b.exactCenterX(), b.exactCenterY()) }
+        gesture(path, 60)
+    }
+
+    private fun pinKeys(): Map<Char, AccessibilityNodeInfo> {
+        val found = HashMap<Char, AccessibilityNodeInfo>()
+        val root = rootInActiveWindow ?: return found
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val n = queue.removeFirst()
+            val byId = n.viewIdResourceName?.let { Regex(".*:id/key([0-9])$").matchEntire(it)?.groupValues?.get(1)?.get(0) }
+            val byText = (n.text?.toString() ?: n.contentDescription?.toString())?.takeIf { it.length == 1 && it[0].isDigit() && n.packageName == root.packageName }?.get(0)
+            val digit = byId ?: byText
+            if (digit != null && n.isVisibleToUser && digit !in found) found[digit] = n
+            for (i in 0 until n.childCount) n.getChild(i)?.let(queue::add)
+        }
+        return found
+    }
+
+    private fun pinEnter(): AccessibilityNodeInfo? {
+        val root = rootInActiveWindow ?: return null
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val n = queue.removeFirst()
+            val id = n.viewIdResourceName.orEmpty()
+            val label = (n.contentDescription ?: n.text)?.toString().orEmpty()
+            if (n.isVisibleToUser && (id.endsWith(":id/key_enter") || label.equals("Enter", ignoreCase = true) || label.equals("OK", ignoreCase = true))) return n
+            for (i in 0 until n.childCount) n.getChild(i)?.let(queue::add)
+        }
+        return null
     }
 
     companion object {

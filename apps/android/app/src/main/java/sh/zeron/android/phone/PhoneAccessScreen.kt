@@ -88,6 +88,11 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
     var wake by remember(refresh) { mutableStateOf(settings.wakeEnabled) }
     var senders by remember(refresh) { mutableStateOf(settings.wakeSenders) }
     var picking by remember { mutableStateOf(false) }
+    var unlockOn by remember(refresh) { mutableStateOf(settings.unlockEnabled) }
+    var unlockFailed by remember(refresh) { mutableStateOf(settings.unlockFailed) }
+    var pinStored by remember(refresh) { mutableStateOf(PhonePinVault.has(context)) }
+    var enteringPin by remember { mutableStateOf(false) }
+    val deviceSecure = remember(refresh) { context.getSystemService(android.app.KeyguardManager::class.java).isDeviceSecure }
     val sms = remember { PhoneSms(context) }
     val accessibilityOn = remember(refresh) { PhoneAccessibilityService.instance != null }
     val smsGranted = remember(refresh) {
@@ -181,6 +186,36 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
                 }
             }
 
+            section("Unlocking")
+            group {
+                SettingRow(0, if (unlockOn && deviceSecure) 2 else 1, R.drawable.zi_key_minimalistic, "Let agents unlock this phone",
+                    when {
+                        !unlockOn -> "Off. When on, an agent that needs the screen can unlock it with your PIN, and it locks again 60 s after it stops. Anyone who controls an agent could use this: leave it off unless you trust them."
+                        unlockFailed -> "Switched off after a failed attempt: enter the PIN again"
+                        !deviceSecure -> "On (this phone has no PIN: agents only swipe)"
+                        pinStored -> "On. PIN stored in ${PhonePinVault.protection(context).ifEmpty { "the Keystore" }}; only used when the phone is locked and you haven't touched it for 3 minutes"
+                        else -> "On, but no PIN is stored yet: tap to enter it"
+                    },
+                    trailing = {
+                        Switch(unlockOn, { on ->
+                            if (on) {
+                                if (deviceSecure && !pinStored) enteringPin = true else { settings.unlockEnabled = true; unlockOn = true }
+                            } else {
+                                settings.unlockEnabled = false
+                                unlockOn = false
+                                PhonePinVault.forget(context)
+                                pinStored = false
+                            }
+                        })
+                    }) { if (unlockOn && deviceSecure) enteringPin = true }
+                if (unlockOn && deviceSecure) {
+                    SettingRow(1, 2, R.drawable.zi_trash_bin_minimalistic, "Forget the PIN", "Deletes it and its key from this phone, and switches unlocking off") {
+                        settings.unlockEnabled = false; unlockOn = false
+                        PhonePinVault.forget(context); pinStored = false
+                    }
+                }
+            }
+
             section("Text messages")
             group {
                 SettingRow(0, 2, R.drawable.zi_chats, "Ask me before each message is sent", if (confirmSms) "A notification shows the whole text with Send and Don't send" else "Agents send without asking: only turn this off if you trust them", trailing = {
@@ -246,6 +281,43 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
                 item { TextButton({ PhoneActionLog.clear() }, Modifier.padding(horizontal = 16.dp)) { Text("Clear the log") } }
             }
         }
+    }
+
+    if (enteringPin) {
+        var pin by remember { mutableStateOf("") }
+        var again by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { enteringPin = false },
+            title = { Text("Your phone's PIN") },
+            text = {
+                Column {
+                    Text("It is encrypted with a key that never leaves this phone's secure hardware and is only used to unlock it for an agent. It is never shown, logged or sent anywhere.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(
+                        value = pin, onValueChange = { pin = it.filter(Char::isDigit).take(16) }, label = { Text("PIN") }, singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                    OutlinedTextField(
+                        value = again, onValueChange = { again = it.filter(Char::isDigit).take(16) }, label = { Text("PIN again") }, singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword),
+                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = pin.length >= 4 && pin == again, onClick = {
+                    runCatching { PhonePinVault.store(context, pin) }.onSuccess {
+                        settings.unlockEnabled = true; settings.unlockFailed = false
+                        unlockOn = true; unlockFailed = false; pinStored = true
+                        PhoneActionLog.add(context, "unlock_setup", "the person stored a PIN for agents", true, null)
+                    }
+                    enteringPin = false
+                }) { Text("Save") }
+            },
+            dismissButton = { TextButton({ enteringPin = false }) { Text("Cancel") } },
+        )
     }
 
     if (picking) {
