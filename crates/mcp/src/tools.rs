@@ -2366,6 +2366,16 @@ mod tests {
     }
 
     #[test]
+    fn the_phones_files_are_listed_only_as_allowed_folders_and_never_read_by_an_agent_tool() {
+        for name in ["phone_files_list", "phone_files_stat", "phone_files_hash"] {
+            let def = catalog().into_iter().find(|d| d.name == name).expect("listed");
+            assert!(def.description.contains("allowed folder"), "{name} says it is limited to allowed folders");
+        }
+        // Moving bytes is the file transfer's job: no agent tool reads or writes a file's content.
+        assert!(!catalog().iter().any(|d| d.name == "phone_files_read" || d.name == "phone_files_write"));
+    }
+
+    #[test]
     fn a_message_is_sent_to_a_number_or_a_thread_by_sms_or_in_the_chat() {
         let send = catalog().into_iter().find(|d| d.name == "phone_sms_send").expect("listed");
         let props = &send.input_schema["properties"];

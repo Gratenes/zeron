@@ -50,6 +50,18 @@ New texts can be passed to a chat (Settings → Agent phone access → Wake a ch
 only from numbers the user lists; the text goes in quoted and labelled as the sender's, not an
 instruction.
 
+## Files (device-to-device transfer, phone end)
+
+`files_list`, `files_stat`, `files_hash`, `files_read` (chunks of at most 512 KiB, base64), `files_write_part`
+(a `<name>.zeron-part` next to the target, offset must equal the bytes held, the final chunk checks size + sha256 and
+renames; `files.bad_offset` tells the sender how much is held, so a transfer resumes) ride `PhoneCall`. Paths are absolute
+strings; a path is canonicalised and must be inside a folder the person added (Settings → Agent phone access → Files, the
+"Use files in allowed folders" switch is off by default); each folder has a "may write" flag (off). With "All files access"
+the folders are plain files; without it, the tree the person picked is used (same path strings). Writes ask once per transfer
+(setting). Calls are logged with paths and byte counts (first and last chunk of a transfer only). Errors start with a code:
+files.no_grant, files.denied, files.not_found, files.exists, files.too_large, files.bad_offset, files.unavailable.
+Agents get only `phone_files_list/stat/hash`; moving bytes is the file transfer's job.
+
 ## Safety (all enforced on the phone)
 
 - Off by default. A master switch, six per-tool-group switches, Android permissions the user

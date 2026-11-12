@@ -21,6 +21,7 @@ import uniffi.zeron_core.PhoneToolReply
  */
 class PhoneTools(private val context: Context, private val settings: PhoneSettings) : PhoneToolHandler {
     private val sms by lazy { PhoneSms(context) }
+    private val files by lazy { PhoneFiles(context) }
 
     override fun call(tool: String, argsJson: String, originJson: String): PhoneToolReply {
         PhoneLink.touch(context)
@@ -31,9 +32,12 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
         val summary = summarize(tool, args)
         return try {
             gate(tool)
-            if (tool != "ping") PhoneNotice.active(context, who, summary)
+            // A long transfer is many calls: its first and last are logged and shown, the ones between are not.
+            val quiet = (tool == "files_read" && args.optLong("offset") > 0) ||
+                (tool == "files_write_part" && args.optLong("offset") > 0 && !args.optBoolean("final"))
+            if (tool != "ping" && !quiet) PhoneNotice.active(context, who, summary)
             val result = run(tool, args, who)
-            PhoneActionLog.add(context, tool, summary, true, who)
+            if (!quiet) PhoneActionLog.add(context, tool, if (tool == "files_read" && result.optBoolean("done")) "$summary (${result.optLong("size")} bytes in all)" else summary, true, who)
             PhoneToolReply(true, result.toString())
         } catch (e: PhoneToolException) {
             PhoneActionLog.add(context, tool, "$summary — refused: ${e.message}".take(300), false, who)
@@ -93,6 +97,18 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
                 sms.send(to, args.optString("thread_id").takeIf { it.isNotBlank() }, text, via, if (settings.confirmSmsSend) ({ how ->
                     PhoneConfirm.ask(context, "${who ?: "An agent"} wants to send a message $how".take(120), text)
                 }) else null)
+            }
+            "files_list" -> files.list(args.optString("path"), args.optString("cursor").takeIf { it.isNotEmpty() })
+            "files_stat" -> files.stat(args.optString("path"))
+            "files_hash" -> files.hash(args.optString("path"))
+            "files_read" -> files.read(args.optString("path"), args.optLong("offset", 0), args.optInt("len", PhoneFiles.CHUNK))
+            "files_write_part" -> {
+                val data = try { android.util.Base64.decode(args.optString("data"), android.util.Base64.DEFAULT) } catch (_: IllegalArgumentException) { throw PhoneToolException("files.denied: data is not base64") }
+                files.writePart(
+                    args.optString("transferId"), args.optString("path"), args.optLong("offset", 0), data, args.optBoolean("final", false),
+                    args.optString("sha256").takeIf { it.isNotEmpty() }, args.optBoolean("overwrite", false),
+                    if (settings.confirmFileWrites) ({ PhoneConfirm.ask(context, "${who ?: "An agent"} wants to put a file on your phone", args.optString("path")) }) else null,
+                )
             }
             "contacts_search" -> sms.contacts(args.optString("query"), args.optInt("limit", 10).coerceIn(1, 50))
             else -> throw PhoneToolException("this phone doesn't know the tool $tool")
@@ -181,6 +197,11 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
         "sms_read" -> "read texts from ${a.optString("thread_id").ifEmpty { a.optString("address") }}"
         "sms_send" -> "sent a message (${a.optString("text").length} characters) to ${a.optString("to").ifEmpty { "thread " + a.optString("thread_id") }}"
         "contacts_search" -> "searched contacts"
+        "files_list" -> "listed files in ${a.optString("path").ifEmpty { "the allowed folders" }}"
+        "files_stat" -> "looked at ${a.optString("path")}"
+        "files_hash" -> "checksummed ${a.optString("path")}"
+        "files_read" -> "read ${a.optString("path")} from byte ${a.optLong("offset")}"
+        "files_write_part" -> "wrote ${a.optString("path")} from byte ${a.optLong("offset")}${if (a.optBoolean("final")) " (final)" else ""}"
         else -> tool
     }
 
@@ -196,6 +217,8 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             "sms_threads" to PhoneSettings.Group.SMS_READ, "sms_read" to PhoneSettings.Group.SMS_READ,
             "sms_send" to PhoneSettings.Group.SMS_SEND,
             "contacts_search" to PhoneSettings.Group.CONTACTS,
+            "files_list" to PhoneSettings.Group.FILES, "files_stat" to PhoneSettings.Group.FILES, "files_hash" to PhoneSettings.Group.FILES,
+            "files_read" to PhoneSettings.Group.FILES, "files_write_part" to PhoneSettings.Group.FILES,
         )
         private val NO_GROUP = setOf("ping", "unlock")
         private val ACTS_ON_SCREEN = setOf("tap", "long_press", "type", "swipe", "scroll", "launch_app")

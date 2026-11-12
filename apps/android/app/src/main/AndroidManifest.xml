@@ -24,6 +24,9 @@
     <!-- Agents' phone tools (sh.zeron.android.phone): text messages, contacts, the list of
          installed apps (to open one by name), coming back after a reboot, and asking to be left
          out of battery optimization. The person grants each in Settings → Agent phone access. -->
+    <!-- Files in the folders the person allows (Settings → Agent phone access → Files): "All files access" lets them
+         be read and written as plain files; without it the folders the person picked are used. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.RECEIVE_SMS" />

@@ -38,6 +38,11 @@ class PhoneSettings(context: Context) {
         get() = prefs.getInt("keepalive-secs", 60)
         set(value) = prefs.edit().putInt("keepalive-secs", value.coerceIn(30, 300)).apply()
 
+    /** Ask the person before a file is written to the phone (once per transfer). */
+    var confirmFileWrites: Boolean
+        get() = prefs.getBoolean("confirm-file-writes", true)
+        set(value) = prefs.edit().putBoolean("confirm-file-writes", value).apply()
+
     /** Agents may unlock the phone with the PIN the person stored (off by default). */
     var unlockEnabled: Boolean
         get() = prefs.getBoolean("unlock-enabled", false)
@@ -73,5 +78,6 @@ class PhoneSettings(context: Context) {
         SMS_READ("sms-read", "Read text and chat messages", "SMS, picture messages and Google Messages (RCS) chats", true),
         SMS_SEND("sms-send", "Send text and chat messages", "From your number, or in a Messages chat (see the question below)", true),
         CONTACTS("contacts", "Search contacts", "Names and numbers", true),
+        FILES("files", "Use files in allowed folders", "List, read and (where you allow it) write files; set the folders below", false),
     }
 }

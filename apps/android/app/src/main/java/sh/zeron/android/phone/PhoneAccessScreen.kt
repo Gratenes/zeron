@@ -92,6 +92,19 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
     var unlockFailed by remember(refresh) { mutableStateOf(settings.unlockFailed) }
     var pinStored by remember(refresh) { mutableStateOf(PhonePinVault.has(context)) }
     var enteringPin by remember { mutableStateOf(false) }
+    var folders by remember(refresh) { mutableStateOf(PhoneFolders.all(context)) }
+    var confirmWrites by remember(refresh) { mutableStateOf(settings.confirmFileWrites) }
+    val allFiles = remember(refresh) { Build.VERSION.SDK_INT >= 30 && android.os.Environment.isExternalStorageManager() }
+    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
+        if (tree != null) {
+            runCatching { context.contentResolver.takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+            PhoneFolders.pathOfTree(tree)?.let { path ->
+                PhoneFolders.add(context, path, tree.toString(), write = false)
+                PhoneActionLog.add(context, "files_setup", "the person allowed the folder $path (read only)", true, null)
+                folders = PhoneFolders.all(context)
+            }
+        }
+    }
     val deviceSecure = remember(refresh) { context.getSystemService(android.app.KeyguardManager::class.java).isDeviceSecure }
     val sms = remember { PhoneSms(context) }
     val accessibilityOn = remember(refresh) { PhoneAccessibilityService.instance != null }
@@ -212,6 +225,35 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
                     SettingRow(1, 2, R.drawable.zi_trash_bin_minimalistic, "Forget the PIN", "Deletes it and its key from this phone, and switches unlocking off") {
                         settings.unlockEnabled = false; unlockOn = false
                         PhonePinVault.forget(context); pinStored = false
+                    }
+                }
+            }
+
+            section("Files")
+            group {
+                SettingRow(0, 3, R.drawable.zi_folder, "All files access", if (allFiles) "On: allowed folders are read and written as plain files" else "Off: tap to turn it on for Zeron. Without it only folders you pick below work, one tree at a time.") {
+                    context.startActivity(
+                        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+                SettingRow(1, 3, R.drawable.zi_folder_with_files, "Add a folder", "Agents and your other devices can only use folders you add here. Add read-only first; allow writing per folder.") {
+                    pickFolder.launch(null)
+                }
+                SettingRow(2, 3, R.drawable.zi_check, "Ask me before a file is written", if (confirmWrites) "A notification asks once per transfer" else "Allowed folders accept writes without asking: only turn this off if you trust them", trailing = {
+                    Switch(confirmWrites, { confirmWrites = it; settings.confirmFileWrites = it })
+                }) {}
+            }
+            if (folders.isNotEmpty()) group {
+                folders.forEachIndexed { i, f ->
+                    SettingRow(i, folders.size, R.drawable.zi_folder, f.path, if (f.write) "Read and write. Tap to remove this folder." else "Read only. Tap to remove this folder.", trailing = {
+                        Switch(f.write, { on ->
+                            PhoneFolders.setWrite(context, f.path, on)
+                            folders = PhoneFolders.all(context)
+                            PhoneActionLog.add(context, "files_setup", "the person ${if (on) "allowed writing in" else "made read-only"} ${f.path}", true, null)
+                        })
+                    }) {
+                        PhoneFolders.remove(context, f.path)
+                        folders = PhoneFolders.all(context)
                     }
                 }
             }
