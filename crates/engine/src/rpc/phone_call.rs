@@ -23,7 +23,58 @@ const DEADLINE: Duration = Duration::from_secs(45);
 const WAKE_WAIT: Duration = Duration::from_secs(20);
 const WAKE_POLL: Duration = Duration::from_millis(500);
 
+/// A link kept open to the phone pings it every 10 s (the client link's keepalive and echo),
+/// each ping waking its radio. So the link is let go [`LINK_IDLE`] after the last call, and
+/// the next call dials again (a second or two, and the phone is awake for it anyway).
+const LINK_IDLE: Duration = Duration::from_secs(30);
+
+/// The latest call to each phone, so only the last one's idle timer closes the link.
+static LAST_CALL: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Whether a call to `device` has armed the timer that lets its link go (for tests).
+pub(crate) fn link_idle_pending(device: &str) -> bool {
+    LAST_CALL.lock().unwrap_or_else(std::sync::PoisonError::into_inner).contains_key(device)
+}
+
 impl EngineRpc {
+    /// One ask of the phone over its device room. A phone is dialed whatever its registry
+    /// presence says (it rests its workspace sockets): the room tells at once if its host is away.
+    async fn ask_phone(&self, target: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        let links = self.links.as_ref().ok_or_else(|| RpcError::Failed("peer links unavailable (offline)".into()))?;
+        links.reset_cooldown(target);
+        let client = links.client_ignoring_presence(target).await?;
+        match client.call(methods::PHONE_CALL, params).await {
+            Ok(value) => Ok(RpcReply::Value(value)),
+            Err(error) => {
+                if matches!(error, RpcError::Closed) {
+                    links.invalidate(target);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Close the link to `target` after [`LINK_IDLE`] with no newer call.
+    fn close_phone_link_when_idle(&self, target: &str) {
+        let Some(links) = self.links.clone() else { return };
+        let generation = {
+            let mut last = LAST_CALL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let next = last.get(target).copied().unwrap_or(0) + 1;
+            last.insert(target.to_owned(), next);
+            next
+        };
+        let target = target.to_owned();
+        tokio::spawn(async move {
+            tokio::time::sleep(LINK_IDLE).await;
+            let mut last = LAST_CALL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if last.get(&target) == Some(&generation) {
+                last.remove(&target);
+                links.invalidate(&target);
+            }
+        });
+    }
+
     pub(super) async fn phone_call(&self, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         let target = params
             .get("targetDeviceId")
@@ -49,7 +100,7 @@ impl EngineRpc {
         let started = tokio::time::Instant::now();
         let asked = loop {
             let left = DEADLINE.saturating_sub(started.elapsed());
-            let reply = tokio::time::timeout(left, self.forward(target, methods::PHONE_CALL, params.clone())).await;
+            let reply = tokio::time::timeout(left, self.ask_phone(target, params.clone())).await;
             match reply {
                 Ok(Err(error)) if is_away(&error) && started.elapsed() < WAKE_WAIT => {
                     tracing::debug!(%target, %error, "phone call: the phone is away, waiting for it");
@@ -61,6 +112,7 @@ impl EngineRpc {
                 other => break other,
             }
         };
+        self.close_phone_link_when_idle(target);
         match asked {
             Ok(Ok(reply @ RpcReply::Value(_))) => Ok(reply),
             Ok(Ok(RpcReply::Stream(_))) => Err(RpcError::Failed(format!(

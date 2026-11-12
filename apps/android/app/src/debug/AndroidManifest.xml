@@ -9,5 +9,10 @@
                 <action android:name="sh.zeron.android.PHONE_WAKE" />
             </intent-filter>
         </receiver>
+        <receiver android:name="sh.zeron.android.phone.PhoneTestSmsReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="sh.zeron.android.TEST_SMS" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

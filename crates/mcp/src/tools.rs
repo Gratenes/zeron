@@ -2030,6 +2030,9 @@ mod tests {
         reads: Mutex<Vec<(String, Value)>>,
         /// `DeviceStats` reply; absent = an engine without the method.
         stats: Option<Value>,
+        /// Android phones on the account, `(id, name)`; each answers `PhoneCall` with `phone_reply`.
+        phones: Vec<(&'static str, &'static str)>,
+        phone_reply: Option<Value>,
     }
 
     fn stream(item: Value) -> RpcReply {
@@ -2066,10 +2069,23 @@ mod tests {
                 methods::ENGINE_INFO => RpcReply::Value(json!({
                     "deviceId": "dev-local", "workspaceScope": "local"
                 })),
-                methods::WATCH_DEVICES => stream(json!([{
-                    "id": "dev-local", "name": "Laptop", "platform": "linux",
-                    "lastSeenAt": null
-                }, {"id": "dev-remote", "name": "Worker", "platform": "linux", "lastSeenAt": null}])),
+                methods::WATCH_DEVICES => {
+                    let mut devices = vec![json!({
+                        "id": "dev-local", "name": "Laptop", "platform": "linux",
+                        "lastSeenAt": null
+                    }), json!({"id": "dev-remote", "name": "Worker", "platform": "linux", "lastSeenAt": null})];
+                    for (id, name) in &self.phones {
+                        devices.push(json!({"id": id, "name": name, "platform": "android", "lastSeenAt": null}));
+                    }
+                    stream(Value::Array(devices))
+                }
+                methods::PHONE_CALL if self.phone_reply.is_some() => {
+                    self.reads
+                        .lock()
+                        .unwrap()
+                        .push((method.into(), params.clone()));
+                    RpcReply::Value(self.phone_reply.clone().unwrap_or_default())
+                }
                 methods::WATCH_SPACES => stream(json!([{
                     "id": "space-1", "deviceId": "dev-local", "path": "/repo/comet",
                     "gitDetected": true, "createdAt": "2026-09-01T00:00:00Z"
@@ -2259,6 +2275,101 @@ mod tests {
         let old = Arc::new(World::default());
         let error = tools(old, Origin::default()).call(DEVICE_STATS, json!({})).await.unwrap_err();
         assert!(error.contains("too old to report stats"), "{error}");
+    }
+
+    fn phone_calls(world: &World) -> Vec<Value> {
+        world.reads.lock().unwrap().iter().filter(|(m, _)| m == methods::PHONE_CALL).map(|(_, p)| p.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn phone_tools_ask_the_accounts_only_android_phone() {
+        let world = Arc::new(World { phones: vec![("dev-phone", "Pixel")], phone_reply: Some(json!({ "ok": true })), ..Default::default() });
+        let tools = tools(world.clone(), Origin::default());
+        for name in ["phone_ping", "phone_tap", "phone_sms_send"] {
+            assert!(tools.has(name), "{name} is offered");
+        }
+        // No `device`: the one phone. The tool's own arguments go through untouched, and
+        // `device` never reaches the phone.
+        let reply = tools.call("phone_tap", json!({ "node": "n3" })).await.unwrap();
+        assert_eq!(reply, json!({ "ok": true }));
+        let by_name = tools.call("phone_sms_threads", json!({ "device": "pixel", "limit": 3 })).await.unwrap();
+        assert_eq!(by_name, json!({ "ok": true }));
+        let calls = phone_calls(&world);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["targetDeviceId"], "dev-phone");
+        assert_eq!(calls[0]["tool"], "tap");
+        assert_eq!(calls[0]["args"], json!({ "node": "n3" }));
+        assert_eq!(calls[1]["tool"], "sms_threads");
+        assert_eq!(calls[1]["args"], json!({ "limit": 3 }));
+        assert_eq!(calls[1]["origin"], Value::Null, "no chat, no origin");
+    }
+
+    #[tokio::test]
+    async fn phone_tools_tell_the_phone_which_chat_asked() {
+        let world = Arc::new(World { phones: vec![("dev-phone", "Pixel")], phone_reply: Some(json!({})), ..Default::default() });
+        let inside = tools(
+            world.clone(),
+            Origin { chat_id: Some("chat-alpha-1".into()), device_id: Some("dev-local".into()), ..Default::default() },
+        );
+        inside.call("phone_ping", json!({})).await.unwrap();
+        let origin = phone_calls(&world)[0]["origin"].clone();
+        assert_eq!(origin["chatId"], "chat-alpha-1");
+        assert_eq!(origin["chatTitle"], "Alpha", "the phone shows the chat's title in its notice");
+    }
+
+    #[tokio::test]
+    async fn phone_tools_say_when_there_is_no_phone_or_several() {
+        let none = tools(Arc::new(World::default()), Origin::default());
+        let error = none.call("phone_ping", json!({})).await.unwrap_err();
+        assert!(error.contains("no Android phone"), "{error}");
+
+        let two = Arc::new(World {
+            phones: vec![("dev-phone", "Pixel"), ("dev-phone-2", "Galaxy")],
+            phone_reply: Some(json!({})),
+            ..Default::default()
+        });
+        let tools = tools(two.clone(), Origin::default());
+        let error = tools.call("phone_ping", json!({})).await.unwrap_err();
+        assert!(error.contains("several Android phones") && error.contains("Pixel") && error.contains("Galaxy"), "{error}");
+        assert!(phone_calls(&two).is_empty(), "nothing was asked");
+        tools.call("phone_ping", json!({ "device": "Galaxy" })).await.unwrap();
+        assert_eq!(phone_calls(&two)[0]["targetDeviceId"], "dev-phone-2");
+    }
+
+    #[tokio::test]
+    async fn a_screenshot_is_saved_as_a_file_the_agent_can_read() {
+        use base64::Engine as _;
+        let bytes = b"\xff\xd8\xff\xe0 not really a jpeg";
+        let reply = json!({ "jpegBase64": base64::engine::general_purpose::STANDARD.encode(bytes), "width": 360, "height": 800, "package": "com.example" });
+        let world = Arc::new(World { phones: vec![("dev-phone", "Pixel")], phone_reply: Some(reply), ..Default::default() });
+        let out = tools(world, Origin::default()).call("phone_screenshot", json!({ "max_edge": 800 })).await.unwrap();
+        assert!(out.get("jpegBase64").is_none(), "the image isn't carried in the reply");
+        assert_eq!(out["width"], 360);
+        let path = out["path"].as_str().expect("a path");
+        assert!(path.ends_with(".jpg"), "{path}");
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        let _ = std::fs::remove_file(path);
+
+        // A phone that sends no image is an error, not an empty path.
+        let broken = Arc::new(World { phones: vec![("dev-phone", "Pixel")], phone_reply: Some(json!({ "width": 1 })), ..Default::default() });
+        let error = tools(broken, Origin::default()).call("phone_screenshot", json!({})).await.unwrap_err();
+        assert!(error.contains("no image"), "{error}");
+    }
+
+    #[test]
+    fn every_phone_tool_is_listed_once_with_the_shared_device_argument() {
+        let defs: Vec<ToolDef> = catalog().into_iter().filter(|d| d.name.starts_with("phone_")).collect();
+        let mut listed: Vec<&str> = defs.iter().map(|d| d.name).collect();
+        listed.sort_unstable();
+        let mut routed: Vec<&str> = phone::NAMES.to_vec();
+        routed.sort_unstable();
+        assert_eq!(listed, routed, "what is offered is what is routed to the phone");
+        for def in &defs {
+            assert_eq!(def.input_schema["properties"]["device"]["type"], "string", "{}", def.name);
+            for required in def.input_schema["required"].as_array().into_iter().flatten() {
+                assert!(def.input_schema["properties"].get(required.as_str().unwrap()).is_some(), "{} requires an unknown {required}", def.name);
+            }
+        }
     }
 
     #[test]

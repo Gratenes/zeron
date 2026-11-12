@@ -58,6 +58,7 @@ fun SettingsScreen(
     model: AppModel,
     onArchived: () -> Unit,
     onOpenVoiceSettings: () -> Unit = {},
+    onOpenPhoneAccess: () -> Unit = {},
     onBack: (() -> Unit)? = null,
     onOpenProviders: () -> Unit = {},
     onOpenCloud: () -> Unit = {},
@@ -224,6 +225,24 @@ fun SettingsScreen(
                         modifier = Modifier.padding(horizontal = 16.dp),
                     ) { Text("Voice") }
                 }
+            }
+        }
+        item {
+            Column {
+                Text(
+                    "Agent phone access",
+                    style = MaterialTheme.typography.titleSmallEmphasized,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 28.dp, top = 24.dp, bottom = 8.dp),
+                )
+                SegmentedListItem(
+                    onClick = onOpenPhoneAccess,
+                    shapes = segmentedShapes(0, 1),
+                    colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+                    leadingContent = { IconTile(sh.zeron.android.R.drawable.zi_smartphone) },
+                    supportingContent = { Text("What agents may do on this phone: screen, texts, apps") },
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                ) { Text("Agent phone access") }
             }
         }
         if (devices.isNotEmpty()) {

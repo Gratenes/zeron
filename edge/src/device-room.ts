@@ -62,6 +62,9 @@ interface SocketState {
   joinedAt?: number;
   nudgeAck?: boolean;
   nudgeInflight?: string[];
+  /** Hosts: how often this host says it pings, when slower than the usual
+   * (a phone's battery-friendly keepalive); see [`hostLivenessMs`]. */
+  keepaliveMs?: number;
 }
 
 const HOST_TAG = "host";
@@ -84,6 +87,22 @@ const clientTag = (connId: string) => `client:${connId}`;
  * to read. The window is sized for the 30s of older builds still in the fleet
  * — 2.5 of their intervals — so upgrading engines is never a prerequisite. */
 const HOST_LIVENESS_MS = 75_000;
+
+/** The slowest keepalive a host may declare (`keepalive` seconds on its join). */
+const MAX_KEEPALIVE_MS = 300_000;
+
+/** How long a host that says it pings every `keepaliveMs` (a phone, to spare
+ * its radio) may go without a ping before the relay stops routing to it: three
+ * of its intervals, never less than [`HOST_LIVENESS_MS`]. The host's own
+ * silence lease is 2.5 intervals, so it replaces a dead socket first. */
+export const hostLivenessMs = (keepaliveMs: number | undefined): number =>
+  keepaliveMs === undefined ? HOST_LIVENESS_MS : Math.max(HOST_LIVENESS_MS, 3 * Math.min(keepaliveMs, MAX_KEEPALIVE_MS));
+
+const declaredKeepaliveMs = (raw: string | null): number | undefined => {
+  const seconds = Number(raw);
+  if (!raw || !Number.isFinite(seconds) || seconds <= 15) return undefined;
+  return Math.min(Math.round(seconds * 1000), MAX_KEEPALIVE_MS);
+};
 
 /** Control frames the relay itself emits (kind " relay"). */
 // MUST byte-match packages/rpc device-frames.ts RELAY_KIND — clients compare
@@ -143,7 +162,8 @@ export class DeviceRoom implements DurableObject {
         lastSeenAt: Math.max(
           this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0,
           (ws.deserializeAttachment() as SocketState | null)?.joinedAt ?? 0
-        )
+        ),
+        livenessMs: hostLivenessMs((ws.deserializeAttachment() as SocketState | null)?.keepaliveMs)
       })),
       Date.now(),
       exclude
@@ -190,7 +210,10 @@ export class DeviceRoom implements DurableObject {
         ...(callerDevice ? { callerDevice } : {}),
         joinedAt: Date.now(),
         nudgeAck: url.searchParams.get("nudgeAck") === "1",
-        nudgeInflight: []
+        nudgeInflight: [],
+        ...(role === "host" && declaredKeepaliveMs(url.searchParams.get("keepalive"))
+          ? { keepaliveMs: declaredKeepaliveMs(url.searchParams.get("keepalive")) }
+          : {})
       };
       pair[1].serializeAttachment(state);
       if (role === "host") this.replayNudges(pair[1]);
@@ -373,16 +396,16 @@ export class DeviceRoom implements DurableObject {
  * that close exists to announce. Pure so the routing rule is testable without
  * a DO. */
 export const pickLiveHost = <T>(
-  hosts: ReadonlyArray<{ ws: T; lastSeenAt: number }>,
+  hosts: ReadonlyArray<{ ws: T; lastSeenAt: number; livenessMs?: number }>,
   now: number,
   exclude?: T
 ): T | undefined => {
-  let best: { ws: T; lastSeenAt: number } | undefined;
+  let best: { ws: T; lastSeenAt: number; livenessMs?: number } | undefined;
   for (const host of hosts) {
     if (host.ws === exclude) continue;
     if (!best || host.lastSeenAt > best.lastSeenAt) best = host;
   }
-  return best && now - best.lastSeenAt <= HOST_LIVENESS_MS ? best.ws : undefined;
+  return best && now - best.lastSeenAt <= (best.livenessMs ?? HOST_LIVENESS_MS) ? best.ws : undefined;
 };
 
 const encodeRelayError = (code: string): Uint8Array =>

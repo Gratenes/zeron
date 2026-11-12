@@ -63,6 +63,7 @@
 mod agent_gate;
 mod device_stats;
 mod phone_call;
+pub(crate) use phone_call::link_idle_pending as phone_link_idle_pending;
 mod remote_plugins;
 mod voice_chat;
 mod voice_remote;

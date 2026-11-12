@@ -356,7 +356,7 @@ class AppModel(private val app: Application) {
         if (launch.phoneHost) settings.enabled = true
         if (!settings.enabled) return
         try {
-            client.startPhoneHost(sh.zeron.android.phone.PhoneTools(app, settings))
+            client.startPhoneHost(sh.zeron.android.phone.PhoneTools(app, settings), settings.keepaliveSecs.toUInt())
             phoneHostUp = true
         } catch (e: Exception) {
             Log.e("Zeron", "phone host failed", e)
@@ -373,7 +373,24 @@ class AppModel(private val app: Application) {
      * arrives): the core and the phone host, nothing drawn.
      */
     fun bootHeadless() {
-        if (_client.value == null) boot(rigLaunch(launch)) else if (!phoneHostUp) startPhoneHost()
+        if (_client.value == null) {
+            boot(rigLaunch(launch))
+            // Nobody is looking: let the workspace sockets rest (registry, previews, chats each
+            // ping and keep the radio up), leaving only the phone link's own slow keepalive.
+            val visible = androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.currentState
+                .isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+            if (!visible && _client.value != null) {
+                inForeground = false
+                _client.value?.onBackground()
+                _client.value?.onBackgroundIdle()
+            }
+        } else if (!phoneHostUp) startPhoneHost()
+    }
+
+    /** The keepalive setting changed (or access was switched on): start over with the new one. */
+    fun restartPhoneHost() {
+        stopPhoneHost()
+        startPhoneHost()
     }
 
     /**

@@ -1,0 +1,308 @@
+package sh.zeron.android.phone
+
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedListItem
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import java.text.DateFormat
+import java.util.Date
+import sh.zeron.android.R
+import sh.zeron.android.core.AppModel
+import sh.zeron.android.ui.IconTile
+import sh.zeron.android.ui.TonalCircleButton
+import sh.zeron.android.ui.cardColor
+import sh.zeron.android.ui.segmentedShapes
+
+/**
+ * Settings → Agent phone access: whether agents may use this phone, which of its abilities, what they
+ * need from Android, how it spares the battery, the question before a text is sent, the wake rule
+ * for new texts, and the log of what agents did.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val settings = remember { PhoneSettings(context) }
+    // Android's own screens (accessibility, permissions, battery) change things behind our back.
+    var tick by remember { mutableIntStateOf(0) }
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) tick++ }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+    val refresh = tick
+    var enabled by remember(refresh) { mutableStateOf(settings.enabled) }
+    var paused by remember(refresh) { mutableStateOf(settings.paused) }
+    var confirmSms by remember(refresh) { mutableStateOf(settings.confirmSmsSend) }
+    var keepalive by remember(refresh) { mutableIntStateOf(settings.keepaliveSecs) }
+    var wake by remember(refresh) { mutableStateOf(settings.wakeEnabled) }
+    var senders by remember(refresh) { mutableStateOf(settings.wakeSenders) }
+    var picking by remember { mutableStateOf(false) }
+    val sms = remember { PhoneSms(context) }
+    val accessibilityOn = remember(refresh) { PhoneAccessibilityService.instance != null }
+    val smsGranted = remember(refresh) {
+        sms.has(Manifest.permission.READ_SMS) && sms.has(Manifest.permission.SEND_SMS) && sms.has(Manifest.permission.RECEIVE_SMS)
+    }
+    val contactsGranted = remember(refresh) { sms.has(Manifest.permission.READ_CONTACTS) }
+    val notificationsGranted = remember(refresh) {
+        Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+    val unrestricted = remember(refresh) {
+        context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
+    }
+    val permissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { tick++ }
+    val log by PhoneActionLog.entries.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(Unit) { PhoneActionLog.init(context) }
+    val workspace by model.workspace.collectAsState()
+
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(
+                top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + 8.dp,
+                bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 32.dp,
+            ),
+        ) {
+            item {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TonalCircleButton(R.drawable.zi_arrow_left, "Back", onClick = onBack, container = MaterialTheme.colorScheme.surfaceContainerHighest)
+                    Spacer(Modifier.size(12.dp))
+                    Text("Agent phone access", style = MaterialTheme.typography.titleLargeEmphasized)
+                }
+            }
+            item {
+                Text(
+                    "Lets the agents you run in Zeron use this phone: read and tap its screen, open apps, read and send text messages. Only you can turn this on, and you choose what they may do. A notice with a Stop button shows whenever one does.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 28.dp, vertical = 8.dp),
+                )
+            }
+            group {
+                SettingRow(0, 1, R.drawable.zi_smartphone, "Let agents use this phone", if (enabled) "On" else "Off", trailing = {
+                    Switch(enabled, { on ->
+                        settings.enabled = on
+                        enabled = on
+                        if (on) {
+                            settings.pausedUntil = 0
+                            paused = false
+                            model.restartPhoneHost()
+                        } else model.stopPhoneHost()
+                    })
+                }) {}
+            }
+            if (paused) group {
+                SettingRow(0, 1, R.drawable.zi_stop, "Stopped", "Agents are refused until ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(settings.pausedUntil))}. Tap to let them back in.") {
+                    settings.pausedUntil = 0
+                    paused = false
+                }
+            }
+
+            section("Android needs")
+            group {
+                SettingRow(0, 4, R.drawable.zi_keyboard, "Accessibility service", if (accessibilityOn) "On: reading and driving the screen works" else "Off: tap to turn on “Zeron” in Accessibility. On Android 13+, first allow restricted settings in the app's info page.") {
+                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+                SettingRow(1, 4, R.drawable.zi_chats, "Text messages", if (smsGranted) "Allowed" else "Tap to allow reading, sending and receiving texts") {
+                    permissions.launch(arrayOf(Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS))
+                }
+                SettingRow(2, 4, R.drawable.zi_bot, "Contacts", if (contactsGranted) "Allowed" else "Tap to allow, so texts show names") {
+                    permissions.launch(arrayOf(Manifest.permission.READ_CONTACTS))
+                }
+                SettingRow(3, 4, R.drawable.zi_bell, "Notifications", if (notificationsGranted) "Allowed" else "Tap to allow: the notice and the question before sending need them") {
+                    if (Build.VERSION.SDK_INT >= 33) permissions.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+                }
+            }
+
+            section("What agents may do")
+            group {
+                val groups = PhoneSettings.Group.entries
+                groups.forEachIndexed { i, g ->
+                    var on by remember(refresh) { mutableStateOf(settings.groupOn(g)) }
+                    SettingRow(i, groups.size, R.drawable.zi_check, g.label, g.about, trailing = {
+                        Switch(on, { on = it; settings.setGroup(g, it) })
+                    }) {}
+                }
+            }
+
+            section("Text messages")
+            group {
+                SettingRow(0, 2, R.drawable.zi_chats, "Ask me before each text is sent", if (confirmSms) "A notification shows the whole text with Send and Don't send" else "Agents send without asking: only turn this off if you trust them", trailing = {
+                    Switch(confirmSms, { confirmSms = it; settings.confirmSmsSend = it })
+                }) {}
+                SettingRow(1, 2, R.drawable.zi_bot, "Wake a chat on a new text", if (wake) "A new text from a number below is sent into “${settings.wakeChatTitle ?: "(pick a chat)"}”" else "Off: new texts are not passed to any agent", trailing = {
+                    Switch(wake, { wake = it; settings.wakeEnabled = it })
+                }) { picking = true }
+            }
+            if (wake) item {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    OutlinedTextField(
+                        value = senders,
+                        onValueChange = { senders = it; settings.wakeSenders = it },
+                        label = { Text("Numbers that wake the chat") },
+                        supportingText = { Text("Comma-separated. Anyone can text you, and the text goes to an agent as it is: list only numbers you trust. * means anyone.") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+
+            section("Battery")
+            group {
+                SettingRow(0, 2, R.drawable.zi_clock_circle, "Keep-alive", "How often the link checks in with Zeron: longer saves battery, an agent waits a little longer for a sleeping phone.") {}
+                SettingRow(1, 2, R.drawable.zi_settings_minimalistic, "Battery optimization", if (unrestricted) "Zeron is exempt, so Android doesn't pause it" else "Tap to let Zeron run without Android pausing it") {
+                    context.startActivity(
+                        Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                }
+            }
+            item {
+                Row(Modifier.padding(horizontal = 24.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(30 to "30 s", 60 to "1 min", 120 to "2 min").forEach { (secs, label) ->
+                        FilterChip(selected = keepalive == secs, onClick = {
+                            keepalive = secs
+                            settings.keepaliveSecs = secs
+                            if (settings.enabled) model.restartPhoneHost()
+                        }, label = { Text(label) })
+                    }
+                }
+            }
+
+            section("What agents did")
+            if (log.isEmpty()) item {
+                Text("Nothing yet.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 28.dp, vertical = 4.dp))
+            } else {
+                val recent = log.takeLast(40).reversed()
+                items(recent.size) { i ->
+                    val e = recent[i]
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 4.dp)) {
+                        Text(
+                            "${DateFormat.getTimeInstance(DateFormat.MEDIUM).format(Date(e.at))} · ${e.who ?: "no chat"}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            e.summary,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (e.ok) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+                item { TextButton({ PhoneActionLog.clear() }, Modifier.padding(horizontal = 16.dp)) { Text("Clear the log") } }
+            }
+        }
+    }
+
+    if (picking) {
+        val rows = ((workspace?.front?.pinned.orEmpty()) + (workspace?.front?.recent.orEmpty())).distinctBy { it.id }.take(40)
+        AlertDialog(
+            onDismissRequest = { picking = false },
+            confirmButton = { TextButton({ picking = false }) { Text("Cancel") } },
+            title = { Text("Send new texts into which chat?") },
+            text = {
+                androidx.compose.foundation.lazy.LazyColumn {
+                    if (rows.isEmpty()) item { Text("No chats yet.") }
+                    items(rows.size) { i ->
+                        TextButton({
+                            settings.wakeChatId = rows[i].id
+                            settings.wakeChatTitle = rows[i].title
+                            wake = true
+                            settings.wakeEnabled = true
+                            picking = false
+                        }, Modifier.fillMaxWidth()) { Text(rows[i].title, maxLines = 1) }
+                    }
+                }
+            },
+        )
+    }
+}
+
+private fun LazyListScope.section(title: String) {
+    item {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleSmallEmphasized,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(start = 28.dp, top = 24.dp, bottom = 8.dp),
+        )
+    }
+}
+
+/** One card of rows. */
+private fun LazyListScope.group(content: @Composable () -> Unit) {
+    item {
+        Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+            content()
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun SettingRow(
+    index: Int,
+    count: Int,
+    icon: Int,
+    title: String,
+    support: String,
+    trailing: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit,
+) {
+    SegmentedListItem(
+        onClick = onClick,
+        shapes = segmentedShapes(index, count),
+        colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+        leadingContent = { IconTile(icon) },
+        supportingContent = { Text(support) },
+        trailingContent = trailing,
+    ) { Text(title) }
+}

@@ -102,6 +102,7 @@ object Routes {
     const val ARCHIVED = "archived"
     const val VOICE = "voice"
     const val VOICE_SETTINGS = "voice-settings"
+    const val PHONE_ACCESS = "phone-access"
     const val PROVIDERS = "providers?target={target}"
     const val CLOUD = "cloud"
     const val BILLING = "billing"
@@ -467,6 +468,7 @@ private fun androidx.navigation.NavGraphBuilder.settingsGraph(
                 model,
                 onArchived = { nav.navigate(Routes.ARCHIVED) },
                 onOpenVoiceSettings = { nav.navigate(Routes.VOICE_SETTINGS) },
+                onOpenPhoneAccess = { nav.navigate(Routes.PHONE_ACCESS) },
                 onBack = ::back,
                 onOpenProviders = { nav.navigate(Routes.providers(null)) },
                 onOpenCloud = { nav.navigate(Routes.CLOUD) },
@@ -479,6 +481,9 @@ private fun androidx.navigation.NavGraphBuilder.settingsGraph(
     }
     composable(Routes.VOICE_SETTINGS) {
         sh.zeron.android.voice.VoiceSettingsScreen(model.voice, onBack = ::back)
+    }
+    composable(Routes.PHONE_ACCESS) {
+        sh.zeron.android.phone.PhoneAccessScreen(model, onBack = ::back)
     }
     composable(Routes.PROVIDERS, arguments = listOf(navArgument("target") { type = NavType.StringType; nullable = true })) { entry ->
         ProvidersScreen(

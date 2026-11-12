@@ -21,6 +21,18 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- Agents' phone tools (sh.zeron.android.phone): text messages, contacts, the list of
+         installed apps (to open one by name), coming back after a reboot, and asking to be left
+         out of battery optimization. The person grants each in Settings → Agent phone access. -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+
     <application
         android:name=".ZeronApplication"
         android:allowBackup="false"
@@ -85,6 +97,29 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/phone_accessibility" />
         </service>
+
+        <receiver android:name=".phone.PhoneSmsReceiver" android:exported="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
+            </intent-filter>
+        </receiver>
+        <receiver android:name=".phone.PhoneBootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+        <receiver android:name=".phone.PhoneStopReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="sh.zeron.android.PHONE_STOP" />
+            </intent-filter>
+        </receiver>
+        <receiver android:name=".phone.PhoneConfirmReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="sh.zeron.android.PHONE_CONFIRM" />
+            </intent-filter>
+        </receiver>
 
         <!-- Android Auto (sh.zeron.android.car): agents, talk and reports on the car screen. -->
         <service

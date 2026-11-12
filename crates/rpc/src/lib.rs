@@ -952,6 +952,16 @@ pub fn memory_client(service: Arc<dyn RpcService>) -> RpcClient {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_agent_may_call_the_phone_but_a_peer_may_too() {
+        // The tools' MCP server calls PhoneCall with the agent-scoped token...
+        assert!(agent_allowed(methods::PHONE_CALL));
+        // ...and it is not one of the methods a relay refuses a peer (a phone's own
+        // device room serves it to the account's other devices).
+        assert!(!local_only(methods::PHONE_CALL));
+        assert!(!peer_refused(methods::PHONE_CALL, &serde_json::json!({ "tool": "ping" })));
+    }
+
     use super::*;
     use futures::StreamExt;
     use std::sync::Mutex;
