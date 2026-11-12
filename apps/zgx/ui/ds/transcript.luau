@@ -235,9 +235,6 @@ local ESTIMATE = 96
 local WORD, ACTION, CLEAR, MARGIN, FOOT = 26, 32, 6, 8, 46
 -- How often a shown action looks whether the selection is still there.
 local WATCH = 200
--- How often a scroll under way is looked at, to tell when it has rested
--- (`moving`): its frames hear nothing of it meanwhile.
-local POLL = 50
 
 -- The room left under the conversation's last row, over what floats at its
 -- foot: Zeron's (transcript.rs, the fade band and 8).
@@ -484,10 +481,44 @@ local function waiting_line(row: State<Message>, on_retry: ((id: string) -> ())?
 	end
 	return ui.presence(function(): string?
 		local w = row:get().waiting
-		return if w == "failed" then "failed" elseif w and said() then "said" elseif w then "waiting" else nil
+		if w == "failed" then
+			return "failed"
+		end
+		local s = if w then said() else nil
+		return if s and s.step then "step" elseif s then "said" elseif w then "waiting" else nil
 	end, function(kind: string): Node
 		if kind == "said" then
 			return ui.row { w_full = true, mt = "$space.4", turn_line(said) }
+		end
+		-- Its Cloud machine coming up for it: the machine's first setup step,
+		-- a tool row as the reply's own are, in the reply's place, under the
+		-- id the machine's own step comes with (which takes over from it).
+		if kind == "step" then
+			local id = row:peek().id
+			return ui.column {
+				w_full = true,
+				mt = "$space.4",
+				Activity {
+					key = `{id}.cloud-setup:g:{id}.cloud-machine`,
+					live = function(): boolean
+						return true
+					end,
+					tools = function(): { Tool }
+						local s = said()
+						return {
+							{
+								id = `{id}.cloud-machine`,
+								kind = "cloud",
+								verb = if s then s.text else "",
+							} :: Tool,
+						}
+					end,
+					summary = function(): string?
+						local s = said()
+						return s and s.summary
+					end,
+				},
+			}
 		end
 		if kind == "failed" then
 			return ui.button {
@@ -560,7 +591,8 @@ end
 -- (Markdown's `window`), so a long reply builds only what's near the view.
 -- (And the pictures its replies show: Props' `pictures`.)
 -- (`at_end`: whether the list rests at its end, the end then what it holds.)
-export type TurnLine = { text: string, spinner: boolean? }
+-- (`step`: said as a setup step's tool row, `summary` its group's line.)
+export type TurnLine = { text: string, spinner: boolean?, step: string?, summary: string? }
 
 -- The line said in a working word's place: a ring while it's still on its
 -- way, then its words, in the working word's quiet ink.
@@ -1488,13 +1520,12 @@ local function Transcript(props: Props): Node
 		r.within = within
 	end
 	-- Once the offset has rested 150 ms: where it is remembered, the reading
-	-- place found again, the end let go if it was scrolled away from. Only a
-	-- scroll's first move is heard: while it moves, a poll every 50 ms sees
-	-- whether it has moved since (the effect then reads nothing, so a
-	-- scroll's frames run nothing here), and lets it go once it rests.
-	-- (Not `ui.debounced`: an offset back where it was 150 ms ago, as a
-	-- view opened at its end and scrolled to its top, changes nothing there,
-	-- and the place would go unwritten.)
+	-- place found again, the end let go if it was scrolled away from. Told
+	-- by zgx's own timer, begun again at each change (`ui.debounced`), so a
+	-- scroll's frames run nothing here; at every rest (`every`), an offset
+	-- back where it last rested included (a view opened at its end and
+	-- scrolled to its top), which would otherwise change nothing there and
+	-- leave the place unwritten.
 	local function rested()
 		remember()
 		find_reading()
@@ -1502,37 +1533,17 @@ local function Transcript(props: Props): Node
 			end_held = false
 		end
 	end
-	local moving = ui.state(`transcript_moving{kept}`, false)
-	local seen, moved_at = offset:peek(), 0
-	local function poll()
-		-- (Next look a poll on, or when it will have rested, if sooner.)
-		ui.after(math.max(0, math.min(POLL, moved_at + 150 - ui.now())), function()
-			local at = offset:peek()
-			if at ~= seen then
-				seen, moved_at = at, ui.now()
-			end
-			if ui.now() - moved_at >= 150 then
-				moving:set(false)
-				rested()
-			else
-				poll()
-			end
-		end)
-	end
+	local rest = ui.debounced(offset, 150, { every = true })
 	-- (A view just made: its place told once it has stood 150 ms.)
 	ui.after(150, rested)
+	local first = true
 	ui.effect(function()
-		if moving:get() then
-			-- (This run's: it goes as the next does, once at rest.)
-			poll()
+		rest:get()
+		if first then
+			first = false
 			return
 		end
-		local at = offset:get()
-		if at == seen then
-			return
-		end
-		seen, moved_at = at, ui.now()
-		moving:set(true)
+		rested()
 	end)
 	-- The selection the host read, and where its action stands: `y` from
 	-- the view's top, and its right edge, or its left when it stands above.

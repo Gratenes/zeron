@@ -16,13 +16,16 @@ local sessions = require("@account/sessions")
 -- (Its start as it is, a new chat: not the launch's jump to the latest
 -- session, which its tests drive themselves.)
 require("@app/screens/shell/route").launched:set(true)
--- (The sidebar these tests were written on: one list, Activity off, empty
--- projects listed. The app opens with Activity, by project then device and
--- no empty projects (tests/sidebar_defaults.test.luau); a test of those
--- views turns them on itself.)
+-- (The sidebar these tests were written on: grouped by project, Activity
+-- off, empty projects listed. The app opens with Activity, by project then
+-- device and no empty projects (tests/sidebar_defaults.test.luau); a test
+-- of those views turns them on itself. Each set once, to what it stays: a
+-- reload runs this again, and a value set and then changed back here moves
+-- the sidebar still showing (its list crossfading out takes the keyboard
+-- from its row before the reload can keep it there).)
 require("@app/screens/shell/activity").on:set(false)
 local sidebar_options = require("@app/screens/shell/sidebar").options
-sidebar_options.organize:set({})
+sidebar_options.organize:set("project")
 sidebar_options.details.empty_projects:set(true)
 local actions = require("@screens/onboarding/actions")
 local store = require("@app/screens/chat/store")
@@ -406,6 +409,10 @@ stub.delete = function(id: string): any
 			end
 		end,
 	}
+end
+-- What a delete takes with it, as the host counts it (`tidy_side_chats`).
+stub.deleted_with = function(id: string): any
+	return settle(((model :: any).deleted_with or {})[id] or { subagents = 0, sides = 0 })
 end
 -- (A link as the host makes it: its workspace hashed there.)
 stub.link = function(id: string): any
@@ -1383,6 +1390,40 @@ ui.command {
 			table.insert(kids, { id = `x{i}`, parent = "a1", kind = "side", title = `Extra {i}`, device = "mac", updated = NOW - (3 + i) * HOUR, created = NOW - (10 + i) * HOUR, agent = "claude" })
 		end
 		;(model :: any).children = { a1 = kids, archived_parent = ((model :: any).children or {}).archived_parent }
+-- Tidy the tests' side chats, one with a side chat of its own, and a Cloud
+-- delegate (a computer's chat keeps that one when it's deleted): what its
+-- delete says goes with it, as the host counts it (tests/
+-- sidebar_delete_children; the counting is src/sessions.rs `deleted_with`).
+ui.command {
+	id = "tidy_side_chats",
+	title = "Tidy the tests has three side chats",
+	run = function()
+		(model :: any).deleted_with = { a3 = { subagents = 0, sides = 3 } };
+		(model :: any).children = {
+			a3 = {
+				{ id = "t1", parent = "a3", title = "Split the slow suite", device = "mac", updated = NOW - 40, created = NOW - HOUR, agent = "claude" },
+				{ id = "t2", parent = "a3", title = "Drop the dead fixtures", device = "mac", updated = NOW - 50, created = NOW - HOUR, agent = "claude", child_kind = "side" },
+				{ id = "t3", parent = "a3", title = "Run it on Cloud", device = "cloud-t3", updated = NOW - 60, created = NOW - HOUR, agent = "claude", child_kind = "subagent" },
+			},
+			t1 = {
+				{ id = "t4", parent = "t1", title = "Time each test", device = "mac", updated = NOW - 70, created = NOW - HOUR, agent = "claude" },
+			},
+		}
+		publish()
+	end,
+}
+-- And a subagent of its own besides.
+ui.command {
+	id = "tidy_subagent",
+	title = "Tidy the tests has a subagent",
+	run = function()
+		local kids = (model :: any).children or {}
+		kids.a3 = kids.a3 or {}
+		table.insert(kids.a3, { id = "t5", parent = "a3", title = "Find the flaky one", device = "mac", updated = NOW - 80, created = NOW - HOUR, agent = "claude", child_kind = "subagent" })
+		;(model :: any).children = kids
+		local with = (model :: any).deleted_with or {}
+		with.a3 = { subagents = 1, sides = if with.a3 then with.a3.sides else 0 };
+		(model :: any).deleted_with = with
 		publish()
 	end,
 }
@@ -1614,10 +1655,6 @@ ui.command { id = "fixture.project_icons", title = "Fixture: projects with icons
 end }
 
 publish()
-
--- Grouped by project (a view option; one list is the default): the tests
--- here follow projects' headers.
-require("@app/screens/shell/sidebar").options.organize:set("project")
 
 -- The plugins screen (what plugins ask of the shell: a tab in a panel, a
 -- link), as the app loads it beside the shell: on for the tests that need

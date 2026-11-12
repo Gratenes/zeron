@@ -308,6 +308,7 @@ impl EngineCore {
         )?;
         doc_host.set_workspace(workspace.clone());
         doc_host.set_sessions(sessions.clone());
+        sessions.follow_chat_deletions(workspace.watch_chats());
         let plugins = plugins::Plugins::new(data_dir, &device_id);
         plugins.set_workspace(workspace.clone());
         // A service's `zeron.folders()`: where this device's chats and
@@ -1174,20 +1175,60 @@ impl Engine {
             }
             core.set_cloud(runner::CloudRunner::new(broker, activity, heartbeat));
         }
-        let preview_workspace = core.workspace.clone();
+        // The chats as last published (the list every view watches), not a
+        // fresh parse of every chat row on each scan.
+        let preview_chats = core.workspace.watch_chats();
         let preview_device = core.device_id.clone();
         let preview_terminals = core.terminals.clone();
+        let preview_sessions = core.sessions.clone();
         let projects = Arc::new(move || zeron_preview::Scope {
-            chats: preview_workspace
-                .read_chats()
-                .unwrap_or_default()
-                .into_iter()
+            chats: preview_chats
+                .borrow()
+                .iter()
                 .filter(|chat| chat.device_id == preview_device)
-                .filter_map(|chat| Some((chat.id, std::path::PathBuf::from(chat.cwd?))))
+                .filter_map(|chat| Some((chat.id.clone(), std::path::PathBuf::from(chat.cwd.clone()?))))
                 .collect(),
             terminals: preview_terminals.chats(),
             reserved_ports: zeron_harness::agent_ports::reserved(),
+            live: preview_sessions.active_count() > 0 || preview_terminals.any_open(),
         });
+        // Discovery parks while nothing Zeron started is alive. A run
+        // changing state (a turn starting) or a terminal opening is what can
+        // start a server: wake it then. It keeps its cadence from there for
+        // as long as the run, the terminal, or anything they started lives.
+        // The chats it serves changing (one arriving here with its folder,
+        // as the registry loads after a restart) also wakes it: a server
+        // one of them left running belongs to it from then on.
+        {
+            let previews = core.previews.clone();
+            let mut sessions = core.sessions.watch_sessions();
+            let mut terminals = core.terminals.watch_opened();
+            let mut chats = core.workspace.watch_chats();
+            let device = core.device_id.clone();
+            let folders = move |chats: &[zeron_proto::Chat]| -> Vec<(String, Option<String>)> {
+                chats
+                    .iter()
+                    .filter(|chat| chat.device_id == device)
+                    .map(|chat| (chat.id.clone(), chat.cwd.clone()))
+                    .collect()
+            };
+            let mut served = folders(&chats.borrow_and_update());
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        changed = sessions.changed() => if changed.is_err() { break },
+                        changed = terminals.changed() => if changed.is_err() { break },
+                        changed = chats.changed() => {
+                            if changed.is_err() { break }
+                            let now = folders(&chats.borrow_and_update());
+                            if now == served { continue }
+                            served = now;
+                        }
+                    }
+                    previews.rescan();
+                }
+            });
+        }
         let preview_signaling = edge_enabled.then(|| zeron_preview::signaling::Config {
             edge_url: config.edge_url.clone(),
             org_id: preview_org,
@@ -1209,6 +1250,28 @@ impl Engine {
         // dir (update-channel.json), so this report follows the app's choice.
         zeron_update::channel::set_data_dir(&config.data_dir);
         let updater = zeron_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+        // Whatever restarts this engine into another version (an update, a
+        // newer install, a channel switch's update), the store it leaves is
+        // one every version reads.
+        // (Held weakly: the hook is process-wide and outlives this graph;
+        // a strong hold kept a shut-down engine's whole graph alive.)
+        let version_change_docs = core.doc_host.downgrade();
+        let version_change_registry = core.workspace.downgrade();
+        zeron_update::set_before_restart(move || {
+            // Only this process's live engine restarts it: with its graph
+            // gone there is nothing left to prepare.
+            let (Some(version_change_docs), Some(version_change_registry)) =
+                (version_change_docs.upgrade(), version_change_registry.upgrade())
+            else {
+                return;
+            };
+            // No more deltas from here (a debounced registry save is whole
+            // too), the registry saved whole (older builds don't read row
+            // deltas), then every chat saved whole and the WAL folded in.
+            version_change_docs.store().stop_snapshot_deltas();
+            version_change_registry.flush();
+            version_change_docs.prepare_for_version_change();
+        });
         // (Not on a Cloud machine: every boot's first token would start a
         // release check, and possibly a download, as the message starts its run.
         // Its checks keep their own schedule; its token is never a recovery.)

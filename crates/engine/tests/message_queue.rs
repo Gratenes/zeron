@@ -260,8 +260,13 @@ async fn setup_with(
 fn assemble_at(path: &std::path::Path, harness: Arc<HeldHarness>) -> EngineCore {
     let registry = HarnessRegistry::new();
     registry.register(harness);
-    EngineCore::assemble(path, Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles")
+    let core = EngineCore::assemble(path, Arc::new(registry), HarnessId::Mock, None)
+        .expect("engine core assembles");
+    // As the engine's own boot says (deferred.rs): this one serves no IPC
+    // port. Left unsaid, a turn revived on boot waits out
+    // `ipc_port_ready`'s whole limit for a port never coming.
+    core.sessions.set_no_ipc_port();
+    core
 }
 
 async fn create_chat(core: &EngineCore) {
@@ -1431,6 +1436,71 @@ async fn an_acquired_edit_blocks_turn_end_and_commit_sends_the_new_text() {
     core.shutdown().await;
 }
 
+/// 2026-11-11, work-laptop: the person tapped Edit on a queued message on
+/// the Mac hosting the chat and was told it was "being edited on another
+/// device". The lease was their own: the same window asking again (its
+/// Acquired reply lost to a dropped app socket, or the chat reopened) must
+/// take its lease over. Any other editor, even on the same device, is still
+/// locked out until the lease ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_editor_asking_again_takes_its_own_lease_over() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "opening turn",
+    )
+    .await;
+    let id = core
+        .doc_host
+        .queue_message(CHAT, "mine", Vec::new())
+        .expect("queue row");
+
+    let BeginQueueEditOutcome::Acquired {
+        lease_id: first, ..
+    } = core
+        .doc_host
+        .begin_queued_message_edit(CHAT, &id, "laptop", "window-1")
+        .await
+        .expect("first begin")
+    else {
+        panic!("first edit must be acquired");
+    };
+    let again = core
+        .doc_host
+        .begin_queued_message_edit(CHAT, &id, "laptop", "window-1")
+        .await
+        .expect("second begin");
+    let BeginQueueEditOutcome::Acquired {
+        lease_id: second,
+        text,
+        ..
+    } = again
+    else {
+        panic!("the same editor must get its own lease back, got {again:?}");
+    };
+    assert_ne!(first, second, "a fresh lease generation");
+    assert_eq!(text, "mine");
+
+    // Another window on the same device, and another device, stay locked.
+    for (device, instance) in [("laptop", "window-2"), ("phone", "window-1")] {
+        let outcome = core
+            .doc_host
+            .begin_queued_message_edit(CHAT, &id, device, instance)
+            .await
+            .expect("other begin");
+        assert!(
+            matches!(&outcome, BeginQueueEditOutcome::Locked { owner_device_id, .. } if owner_device_id == "laptop"),
+            "{device}/{instance} must be locked out, got {outcome:?}"
+        );
+    }
+
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_one_editor_wins_and_an_expired_edit_requires_review() {
     let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
@@ -2053,6 +2123,53 @@ async fn a_send_during_a_mid_turn_steerable_turn_steers_it_immediately() {
     assert!(queue_texts(&core).is_empty());
     assert_eq!(user_messages(&core), vec!["opening", "steer me"]);
     assert_eq!(harness.requests.lock().unwrap().len(), 1);
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// A send reaches the agent while the open chat's transcript publish is
+/// still going: the publish runs beside the drains, never before them (a
+/// long chat's whole transcript read per change, before the drain, was V3
+/// Release's "sending…"). The publish is held where it hands the transcript
+/// to its watchers (a held read of the watch holds its `send_replace`), so
+/// the test needs no clock: with the publish before the drain, the send
+/// can't reach the agent until the hold ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_send_reaches_the_agent_while_the_open_chats_publish_is_held() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    let handle = core.doc_host.open(CHAT).unwrap();
+    // Watched, as the app watches the open chat.
+    let watch = handle.watch_messages();
+    {
+        let held = watch.borrow();
+        // (Off this thread: anything on the send's own path that published
+        // would wait on `held` and must fail the wait below, not hang here.)
+        let doc_host = core.doc_host.clone();
+        let queued = tokio::task::spawn_blocking(move || {
+            doc_host.queue_message(CHAT, "sent while publishing", Vec::new())
+        });
+        wait_for(
+            || prompts.lock().unwrap().iter().any(|p| p == "sent while publishing"),
+            "the send to reach the agent while the publish is held",
+        )
+        .await;
+        drop(held);
+        queued.await.unwrap().expect("queue message");
+    }
+    // Released, publishing goes on: the watcher sees the send (in the
+    // publish after the held one, which read the chat before the drain).
+    wait_for(
+        || {
+            watch.borrow().entries.iter().any(|e| {
+                e.role == MessageRole::User
+                    && e.parts.iter().any(|part| {
+                        matches!(part, MessagePart::Text { text, .. } if text == "sent while publishing")
+                    })
+            })
+        },
+        "the publish to land once released",
+    )
+    .await;
     let _ = harness.finish.send(());
     core.shutdown().await;
 }
