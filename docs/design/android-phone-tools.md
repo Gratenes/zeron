@@ -38,7 +38,11 @@ text in the row's `text/plain` part, `tr_id`/`sub` starting `proto:`), so `phone
 part id) with only READ_SMS and no root. There is no public RCS API, no exported conversation provider
 in Messages, and a non-default SMS app doesn't get RCS. New RCS/MMS arrivals are noticed by a ContentObserver
 on `content://mms-sms/` (`PhoneMessageWatcher`) while the link is up and fed to the same wake rule as SMS.
-Answering a chat: `phone_sms_send` fires the Reply action (RemoteInput) of Messages' live notification for that
+Sending prefers RCS: `phone_sms_send` (via `auto`) answers through Messages' live reply notification when
+one exists, else drives Google Messages itself (an `smsto:` intent with the text, then the Send button, through
+the accessibility service; unlocks first if allowed; refuses while the person is using the phone) and confirms in
+the provider; SMS only for `via: "sms"` or a plainly SMS-only conversation; `via: "rcs"` refuses to send unless
+Messages' compose screen says the transport is RCS. Old text on answering a chat: `phone_sms_send` fires the Reply action (RemoteInput) of Messages' live notification for that
 conversation (needs Notification access for Zeron, `PhoneNotificationListener`, which stores nothing); if there is
 none, an RCS conversation is refused (`via: "sms"` sends a plain text instead).
 

@@ -2374,7 +2374,7 @@ mod tests {
         }
         // Only the text is required here: who to send to is `to` or `thread_id`, which the phone checks.
         assert_eq!(send.input_schema["required"], json!(["text"]));
-        assert_eq!(props["via"]["enum"], json!(["auto", "sms"]));
+        assert_eq!(props["via"]["enum"], json!(["auto", "sms", "rcs"]));
         // The reading tools say the chats (RCS) are in them.
         for name in ["phone_sms_threads", "phone_sms_read"] {
             let def = catalog().into_iter().find(|d| d.name == name).expect("listed");

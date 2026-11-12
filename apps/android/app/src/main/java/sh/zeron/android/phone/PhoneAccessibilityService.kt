@@ -304,6 +304,87 @@ class PhoneAccessibilityService : AccessibilityService() {
         return ok
     }
 
+    // ── Google Messages ──────────────────────────────────────────────────────
+
+    /**
+     * Opens a Google Messages conversation with [number] with [text] in the compose box and taps Send: the way to
+     * answer in a chat (RCS) when there is no reply notification. Messages picks the transport (RCS when both
+     * sides have it). Returns the transport the screen announced (`rcs`, `sms`, `unknown`); with [requireRcs] it
+     * sends only if that is rcs, and throws before sending otherwise.
+     */
+    fun sendInMessages(number: String, text: String, requireRcs: Boolean): String {
+        val messages = "com.google.android.apps.messaging"
+        PhoneUnlock.ours(25_000)
+        val intent = Intent(Intent.ACTION_SENDTO, android.net.Uri.parse("smsto:" + android.net.Uri.encode(number)))
+            .setPackage(messages).putExtra("sms_body", text).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            throw PhoneToolException("Google Messages can't be opened here (${e.javaClass.simpleName}): is it installed?")
+        }
+        var screen: MessagesScreen? = null
+        for (i in 0 until 25) {
+            Thread.sleep(400)
+            val root = rootInActiveWindow ?: continue
+            if (root.packageName?.toString() != messages) continue
+            screen = scanMessages(root)
+            if (screen.send != null && screen.field != null) break
+        }
+        val field = screen?.field
+        var send = screen?.send
+        if (field == null) throw PhoneToolException("Google Messages didn't open a compose box for $number (is it the default messaging app, and is it set up?)")
+        // The text goes in through the intent; if it didn't arrive, put it in.
+        val shown = if (field.isShowingHintText) "" else field.text?.toString().orEmpty()
+        if (shown.trim() != text.trim()) {
+            val set = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) }
+            field.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            if (!field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, set)) throw PhoneToolException("Google Messages' compose box refused the text")
+            Thread.sleep(600)
+            rootInActiveWindow?.let { r -> scanMessages(r).also { m -> m.send?.let { send = it }; if (m.header != null) screen = m } }
+        }
+        val s = send ?: throw PhoneToolException("couldn't find Google Messages' Send button")
+        val hint = if (Build.VERSION.SDK_INT >= 26) field.hintText?.toString() else null
+        val label = s.contentDescription?.toString() ?: s.text?.toString() ?: s.getChild(0)?.contentDescription?.toString()
+        val transport = MessagesUi.transportOf(label, hint, screen?.header)
+        if (requireRcs && transport != "rcs") {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            throw PhoneToolException(
+                if (transport == "sms") "Google Messages says this conversation is SMS (the person isn't on RCS), so nothing was sent."
+                else "Google Messages' compose screen doesn't say whether this goes by RCS, so nothing was sent.",
+            )
+        }
+        if (!s.isEnabled || !s.performAction(AccessibilityNodeInfo.ACTION_CLICK)) throw PhoneToolException("Google Messages' Send button didn't respond")
+        Thread.sleep(800)
+        return transport
+    }
+
+    /** What a Google Messages conversation screen shows: its compose box, its Send button, the line that says how it will go. */
+    private class MessagesScreen(val field: AccessibilityNodeInfo?, val send: AccessibilityNodeInfo?, val header: String?)
+
+    private fun scanMessages(root: AccessibilityNodeInfo): MessagesScreen {
+        var field: AccessibilityNodeInfo? = null
+        var send: AccessibilityNodeInfo? = null
+        var header: String? = null
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val n = queue.removeFirst()
+            if (n.isVisibleToUser) {
+                if (field == null && n.isEditable && n.className?.toString()?.contains("EditText") == true) field = n
+                val label = n.contentDescription?.toString() ?: n.text?.toString()
+                if (send == null && (MessagesUi.isSendButton(label) || n.viewIdResourceName?.endsWith("Draft:Send") == true)) {
+                    // The label may be on a child of the button that takes the click.
+                    var target: AccessibilityNodeInfo? = n
+                    while (target != null && !target.isClickable) target = target.parent
+                    send = target ?: n
+                }
+                if (header == null && MessagesUi.isComposeHeader(n.text?.toString())) header = n.text?.toString()
+            }
+            for (i in 0 until n.childCount) n.getChild(i)?.let(queue::add)
+        }
+        return MessagesScreen(field, send, header)
+    }
+
     // ── the lock screen ──────────────────────────────────────────────────────
 
     /** Swipes up from the bottom of the screen: opens the lock screen's PIN pad. */
@@ -314,6 +395,8 @@ class PhoneAccessibilityService : AccessibilityService() {
     }
 
     fun pressBack() { performGlobalAction(GLOBAL_ACTION_BACK) }
+
+    fun pressHome() { performGlobalAction(GLOBAL_ACTION_HOME) }
 
     fun lockScreen(): Boolean = performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN)
 

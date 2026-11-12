@@ -75,6 +75,9 @@ object PhoneUnlock {
         })
     }
 
+    /** Whether the person used the phone (a touch, a click, the screen waking) within [ms]. */
+    fun personActiveWithin(ms: Long): Boolean = lastUser != 0L && System.currentTimeMillis() - lastUser < ms
+
     fun isLocked(context: Context): Boolean = context.getSystemService(KeyguardManager::class.java).isKeyguardLocked
 
     /** An agent's phone_* call happened: the phone link has work, and the re-lock clock restarts. */

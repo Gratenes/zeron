@@ -255,21 +255,55 @@ class PhoneSms(private val context: Context) {
         if (number.filter { it.isDigit() }.length < 3) throw PhoneToolException("that doesn't look like a phone number")
         val threads = runCatching { threadsForAddress(number) }.getOrDefault(emptySet())
         val rcsThread = threads.isNotEmpty() && inRcs(threads)
+        val wantRcs = via == "rcs"
         val handle = if (via == "sms") null else PhoneChatReply.find(context, number, contactName(number))
+        // RCS whenever possible: a live reply notification, else Google Messages itself (it picks RCS when both
+        // sides have it); plain SMS only when asked for, or when the conversation is plainly SMS-only.
         val transport = when {
             via == "sms" -> "sms"
-            handle != null -> "chat-reply"
-            rcsThread -> throw PhoneToolException(
-                "This is a Google Messages chat (RCS) conversation, and texts can only be answered inside it through Messages' own reply notification, " +
-                    "which exists while one of their messages is waiting in the notification shade" +
-                    (if (PhoneNotificationListener.instance == null) " (and Notification access for Zeron is off: turn it on in Settings → Agent phone access)" else "") +
-                    ". Send via=\"sms\" to send a plain text message instead (it may arrive as a separate SMS thread).",
-            )
+            handle != null && (!wantRcs || rcsThread) -> "chat-reply"
+            wantRcs || rcsThread || threads.isEmpty() -> "messages"
             else -> "sms"
         }
-        val how = if (transport == "sms") "as a plain text message (SMS)" else "as a reply in your Messages chat with ${handle?.title ?: number}"
+        val how = when (transport) {
+            "sms" -> "as a plain text message (SMS)"
+            "chat-reply" -> "as a reply in your Messages chat with ${handle?.title ?: number}"
+            else -> "by opening Google Messages and sending it there (a chat message, RCS, if they're on it)"
+        }
         if (confirm != null && !confirm("to $number, $how")) throw PhoneToolException("the person declined to send it (or didn't answer in ${PhoneConfirm.WAIT_SECONDS} s)")
-        return if (transport == "chat-reply") replyInChat(handle!!, number, threads, text) else sendSms(number, text)
+        return when (transport) {
+            "chat-reply" -> replyInChat(handle!!, number, threads, text)
+            "messages" -> sendViaMessages(number, text, wantRcs)
+            else -> sendSms(number, text)
+        }
+    }
+
+    /** Drives Google Messages' own compose screen (needs the accessibility service and, if locked, agent unlock). */
+    private fun sendViaMessages(number: String, text: String, requireRcs: Boolean): JSONObject {
+        val service = PhoneAccessibilityService.instance
+            ?: throw PhoneToolException("Sending a chat (RCS) message here means driving Google Messages, and Zeron's accessibility service is off. Turn it on, or send via=\"sms\" for a plain text.")
+        PhoneUnlock.ensureUnlocked(context)
+        if (PhoneUnlock.personActiveWithin(60_000)) {
+            throw PhoneToolException("The person is using the phone right now: not taking over its screen to send a message. Try again in a minute, or send via=\"sms\" for a plain text.")
+        }
+        val started = System.currentTimeMillis()
+        val transport = service.sendInMessages(number, text, requireRcs)
+        // The proof is in the message database a moment later, in the conversation with that person.
+        var seen: Message? = null
+        for (i in 0 until 24) {
+            val threads = runCatching { threadsForAddress(number) }.getOrDefault(emptySet())
+            if (threads.isNotEmpty()) {
+                val sel = "thread_id IN (${threads.joinToString(",") { "?" }})"
+                seen = (scanMms(sel, threads.toTypedArray(), 6) + scanSms(sel, threads.toTypedArray(), 6))
+                    .firstOrNull { !it.incoming && it.ts >= started - 3000 && bodyOf(it).trim() == text.trim() }
+            }
+            if (seen != null) break
+            Thread.sleep(500)
+        }
+        service.pressHome()
+        return JSONObject().put("ok", true).put("to", number).put("via", "Google Messages").put("announcedTransport", transport)
+            .put("confirmedInMessages", seen != null).put("kind", seen?.kind ?: JSONObject.NULL)
+            .put("note", if (seen != null) "Sent in the person's Google Messages conversation as ${seen.kind}." else "Tapped Send in Google Messages; not yet seen in the message database: check with phone_sms_read.")
     }
 
     private fun singleAddress(threadId: String): String? {

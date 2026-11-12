@@ -88,7 +88,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             "sms_send" -> {
                 val text = args.optString("text")
                 val via = args.optString("via").ifEmpty { "auto" }
-                if (via != "auto" && via != "sms") throw PhoneToolException("via is auto or sms")
+                if (via != "auto" && via != "sms" && via != "rcs") throw PhoneToolException("via is auto, sms or rcs")
                 val to = args.optString("to").takeIf { it.isNotBlank() }
                 sms.send(to, args.optString("thread_id").takeIf { it.isNotBlank() }, text, via, if (settings.confirmSmsSend) ({ how ->
                     PhoneConfirm.ask(context, "${who ?: "An agent"} wants to send a message $how".take(120), text)
