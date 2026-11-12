@@ -1423,11 +1423,11 @@ fn usage_reasons_name_each_providers_vendor_and_cli() {
     let rejected = ProbeError::Unauthorized { status: 401 };
     assert_eq!(
         reason(HarnessId::Grok, None, true, limited.clone()),
-        "Rate limited by xAI"
+        "Usage check rate-limited by xAI"
     );
     assert_eq!(
         reason(HarnessId::Opencode, Some("github-copilot"), false, limited),
-        "Rate limited by GitHub"
+        "Usage check rate-limited by GitHub"
     );
     assert_eq!(
         reason(HarnessId::Grok, None, true, rejected.clone()),

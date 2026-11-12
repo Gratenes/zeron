@@ -1252,8 +1252,8 @@ impl AccountsPage {
                 _ => "Couldn't identify this login".to_string(),
             }
         } else if let Some(reason) = &account.usage_error {
-            // The engine's reason ("Rate limited by Anthropic — retrying in
-            // 2m", "Signed out — sign in again"), not a bare shrug.
+            // The engine's reason ("Usage check rate-limited by Anthropic —
+            // retrying in 2m", "Signed out — sign in again"), not a bare shrug.
             reason.clone()
         } else if self.refreshing {
             "Checking usage…".to_string()
@@ -1348,6 +1348,11 @@ impl AccountsPage {
                 .flex_none()
                 .into_any_element()
         } else {
+            // A failed re-check keeps the last good meters; say how old
+            // they are rather than passing them off as current.
+            if let Some(note) = stale_usage_note(account, now) {
+                meta.push(div().child(SharedString::from(note)).into_any_element());
+            }
             let resets = usage_resets(&account.usage_windows, now);
             div()
                 .id(("account-usage", ix))
@@ -2522,8 +2527,72 @@ impl Render for AccountsPage {
     }
 }
 
+/// How old the meters are, when the last re-check failed and they are the
+/// last good reading ("Usage as of 2h ago"). `None` when there is nothing
+/// stale to flag: no failure, no meters, or a reading under a few minutes old.
+pub(crate) fn stale_usage_note(account: &AgentAccount, now: DateTime<Utc>) -> Option<String> {
+    const STALE_AFTER_MS: i64 = 5 * 60 * 1000;
+    account.usage_error.as_ref()?;
+    if account.usage_windows.is_empty() {
+        return None;
+    }
+    let fetched = account.usage_fetched_at?;
+    (now.timestamp_millis() - fetched >= STALE_AFTER_MS)
+        .then(|| format!("Usage as of {}", crate::cloud::ago(fetched, now)))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_usage_note_flags_old_meters_after_a_failed_recheck() {
+        use zeron_proto::AgentUsageWindow;
+        let now = Utc::now();
+        let ms = |mins: i64| now.timestamp_millis() - mins * 60_000;
+        let window = AgentUsageWindow {
+            label: "Session".into(),
+            used_fraction: 0.04,
+            resets_at: None,
+        };
+        let account = |windows: Vec<AgentUsageWindow>, error: Option<&str>, fetched: i64| {
+            AgentAccount {
+                id: "a".into(),
+                harness: HarnessId::ClaudeCode,
+                email: None,
+                plan_label: None,
+                active: false,
+                usage_windows: windows,
+                usage_fetched_at: Some(fetched),
+                usage_error: error.map(Into::into),
+                codex_reset_credits: None,
+                display_name: None,
+                organization: None,
+                auth_kind: None,
+                switchable: true,
+                saved_at: None,
+                provider: None,
+            }
+        };
+        let limited = "Usage check rate-limited by Anthropic — retrying in 30m";
+        assert_eq!(
+            stale_usage_note(&account(vec![window.clone()], Some(limited), ms(120)), now)
+                .as_deref(),
+            Some("Usage as of 2h ago")
+        );
+        // Fresh reading, no failure, or nothing to be stale: no note.
+        assert_eq!(
+            stale_usage_note(&account(vec![window.clone()], Some(limited), ms(1)), now),
+            None
+        );
+        assert_eq!(
+            stale_usage_note(&account(vec![window], None, ms(120)), now),
+            None
+        );
+        assert_eq!(
+            stale_usage_note(&account(vec![], Some(limited), ms(120)), now),
+            None
+        );
+    }
+
     #[test]
     fn only_web_and_loopback_login_urls_open() {
         assert!(is_openable_login_url(

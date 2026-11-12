@@ -616,6 +616,11 @@ impl AccountUsage {
                     meta.push(div().child(SharedString::from(reason)).into_any_element());
                 }
                 meta.extend(account_rotation::marker_fragments(&marks, theme));
+                if let Some(note) =
+                    crate::settings::accounts::stale_usage_note(account, chrono::Utc::now())
+                {
+                    meta.push(div().child(SharedString::from(note)).into_any_element());
+                }
                 let switch_to = account.clone();
                 popover::menu_row(theme, account.active, format!("account-usage-row-{ix}"))
                     .id(("account-usage-row", ix))
