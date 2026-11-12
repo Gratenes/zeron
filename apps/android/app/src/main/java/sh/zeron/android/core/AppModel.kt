@@ -93,6 +93,8 @@ data class LaunchOptions(
     val noRelayLayer: Boolean = false,
     /** `--es send-on-open <text>`: with `route chat:<id>`, send this once the session is open, for rigs (debuggable builds). */
     val sendOnOpen: String? = null,
+    /** `--ez phone-host true`: switch agent phone access on (all groups) for rigs (debuggable builds). */
+    val phoneHost: Boolean = false,
 )
 
 /**
@@ -247,7 +249,7 @@ class AppModel(private val app: Application) {
     }
 
     fun boot(options: LaunchOptions) {
-        launch = options
+        launch = rigLaunch(options)
         if (_client.value != null) return
         if (options.signedOut) credentials.clear()
         // The demo starts from the in-memory defaults, never a real account's options.
@@ -327,6 +329,7 @@ class AppModel(private val app: Application) {
             val client = CoreClient(config, credentials, listener)
             if (credentials is Credentials.WorkOs) this.credentials.store(credentials)
             _client.value = client
+            startPhoneHost()
             client.setNetworkOnline(networkPath.online)
             refreshWorkspace()
             client.preloadSessions()
@@ -337,6 +340,56 @@ class AppModel(private val app: Application) {
             Log.e("Zeron", "core start failed", e)
             false
         }
+    }
+
+    @Volatile
+    private var phoneHostUp = false
+
+    /**
+     * Agents' phone tools: this phone hosts its own device room while the person has them
+     * on. Safe to call again; a no-op signed out, in the demo, or with access switched off.
+     */
+    fun startPhoneHost() {
+        val client = _client.value ?: return
+        if (client.isDemo()) return
+        val settings = sh.zeron.android.phone.PhoneSettings(app)
+        if (launch.phoneHost) settings.enabled = true
+        if (!settings.enabled) return
+        try {
+            client.startPhoneHost(sh.zeron.android.phone.PhoneTools(app, settings))
+            phoneHostUp = true
+        } catch (e: Exception) {
+            Log.e("Zeron", "phone host failed", e)
+        }
+    }
+
+    fun stopPhoneHost() {
+        phoneHostUp = false
+        _client.value?.stopPhoneHost()
+    }
+
+    /**
+     * Start from the stored sign-in with no screen (the accessibility service binds, a push
+     * arrives): the core and the phone host, nothing drawn.
+     */
+    fun bootHeadless() {
+        if (_client.value == null) boot(rigLaunch(launch)) else if (!phoneHostUp) startPhoneHost()
+    }
+
+    /**
+     * Debuggable builds only: a rig's dev sign-in (`--es dev-user … --es edge …`) is kept so a
+     * headless start (no activity to carry the extras) signs in the same way.
+     */
+    private fun rigLaunch(options: LaunchOptions): LaunchOptions {
+        if (app.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0) return options
+        val prefs = app.getSharedPreferences("rig", 0)
+        options.dev?.let { (user, org) ->
+            prefs.edit().putString("user", user).putString("org", org).putString("edge", options.edge).apply()
+            return options
+        }
+        val user = prefs.getString("user", null) ?: return options
+        val org = prefs.getString("org", null) ?: return options
+        return options.copy(dev = user to org, edge = prefs.getString("edge", null))
     }
 
     fun startDemo() {

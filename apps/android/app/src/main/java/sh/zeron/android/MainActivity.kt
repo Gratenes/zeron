@@ -52,6 +52,7 @@ class MainActivity : ComponentActivity() {
                 edge = rig?.getString("edge"),
                 noRelayLayer = rig?.getBoolean("no-relay-layer") == true,
                 sendOnOpen = rig?.getString("send-on-open"),
+                phoneHost = rig?.getBoolean("phone-host") == true,
             ),
         )
         handleCallback(intent)

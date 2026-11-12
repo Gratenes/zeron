@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Zeron</string>
+    <string name="phone_accessibility_description">Lets the agents you run in Zeron read this phone\'s screen and, when you allow it, tap, type and swipe for them. You choose what they may do in Zeron\'s settings, and a notice shows while they use the phone.</string>
 </resources>

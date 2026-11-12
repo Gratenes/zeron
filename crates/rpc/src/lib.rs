@@ -183,6 +183,11 @@ pub mod methods {
     /// `DeviceStats`. Another of the account's devices answers through its
     /// relay within a few seconds, or the call says it's offline or too old.
     pub const DEVICE_STATS: &str = "DeviceStats";
+    /// An agent's call to a phone's tools (`phone_*` in Zeron's MCP):
+    /// `{targetDeviceId, tool, args}` → whatever the phone's tool returns.
+    /// Only a phone device (Zeron for Android) answers it; every other engine
+    /// refuses. The calling engine forwards it over the relay with a deadline.
+    pub const PHONE_CALL: &str = "PhoneCall";
     /// Readiness barrier for the engine runtime. The call completes once stores
     /// and journals are assembled, or fails with the assembly error.
     pub const ENGINE_READY: &str = "EngineReady";
@@ -780,6 +785,7 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::LOCAL_DEVICE
             | methods::WATCH_DEVICES
             | methods::DEVICE_STATS
+            | methods::PHONE_CALL
             | methods::WATCH_SPACES
             | methods::WATCH_CHATS
             | methods::WATCH_SESSIONS

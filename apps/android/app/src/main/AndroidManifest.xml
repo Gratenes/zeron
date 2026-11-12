@@ -71,6 +71,21 @@
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
+        <!-- Agents' phone tools (sh.zeron.android.phone): bound by Android once the
+             person turns it on in Settings → Accessibility. -->
+        <service
+            android:name=".phone.PhoneAccessibilityService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/phone_accessibility" />
+        </service>
+
         <!-- Android Auto (sh.zeron.android.car): agents, talk and reports on the car screen. -->
         <service
             android:name=".car.ZeronCarAppService"

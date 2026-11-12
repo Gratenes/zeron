@@ -82,6 +82,16 @@ impl EngineRpc {
     }
 }
 
+/// Whether a failed remote ask means the device isn't there (asleep, offline,
+/// its relay host gone) rather than that it answered no.
+pub(crate) fn is_away(error: &RpcError) -> bool {
+    let lower = error.to_string().to_ascii_lowercase();
+    matches!(error, RpcError::Transport(_) | RpcError::Closed)
+        || ["offline", "unreachable", "cannot reach", "host_offline", "host_closed"]
+            .iter()
+            .any(|word| lower.contains(word))
+}
+
 /// What a failed remote ask says, in the device's own name.
 pub(crate) fn remote_error(device: &Device, error: RpcError, now: DateTime<Utc>) -> RpcError {
     let said = error.to_string();
@@ -97,16 +107,7 @@ pub(crate) fn remote_error(device: &Device, error: RpcError, now: DateTime<Utc>)
             device.name
         ));
     }
-    let away = matches!(error, RpcError::Transport(_) | RpcError::Closed)
-        || [
-            "offline",
-            "unreachable",
-            "cannot reach",
-            "host_offline",
-            "host_closed",
-        ]
-        .iter()
-        .any(|word| lower.contains(word));
+    let away = is_away(&error);
     if away {
         return RpcError::Failed(format!(
             "{} is offline ({})",

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug only: `adb shell am broadcast -a sh.zeron.android.PHONE_WAKE` stands in for the push. -->
+        <receiver
+            android:name="sh.zeron.android.phone.PhoneWakeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="sh.zeron.android.PHONE_WAKE" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
