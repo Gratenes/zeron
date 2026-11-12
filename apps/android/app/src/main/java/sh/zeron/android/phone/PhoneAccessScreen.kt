@@ -94,6 +94,9 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
         sms.has(Manifest.permission.READ_SMS) && sms.has(Manifest.permission.SEND_SMS) && sms.has(Manifest.permission.RECEIVE_SMS)
     }
     val contactsGranted = remember(refresh) { sms.has(Manifest.permission.READ_CONTACTS) }
+    val listenerOn = remember(refresh) {
+        androidx.core.app.NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
+    }
     val notificationsGranted = remember(refresh) {
         Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
     }
@@ -150,17 +153,20 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
 
             section("Android needs")
             group {
-                SettingRow(0, 4, R.drawable.zi_keyboard, "Accessibility service", if (accessibilityOn) "On: reading and driving the screen works" else "Off: tap to turn on “Zeron” in Accessibility. On Android 13+, first allow restricted settings in the app's info page.") {
+                SettingRow(0, 5, R.drawable.zi_keyboard, "Accessibility service", if (accessibilityOn) "On: reading and driving the screen works" else "Off: tap to turn on “Zeron” in Accessibility. On Android 13+, first allow restricted settings in the app's info page.") {
                     context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }
-                SettingRow(1, 4, R.drawable.zi_chats, "Text messages", if (smsGranted) "Allowed" else "Tap to allow reading, sending and receiving texts") {
+                SettingRow(1, 5, R.drawable.zi_chats, "Text messages", if (smsGranted) "Allowed (covers SMS, picture messages and Google Messages chats)" else "Tap to allow reading, sending and receiving messages") {
                     permissions.launch(arrayOf(Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS))
                 }
-                SettingRow(2, 4, R.drawable.zi_bot, "Contacts", if (contactsGranted) "Allowed" else "Tap to allow, so texts show names") {
+                SettingRow(2, 5, R.drawable.zi_bot, "Contacts", if (contactsGranted) "Allowed" else "Tap to allow, so texts show names") {
                     permissions.launch(arrayOf(Manifest.permission.READ_CONTACTS))
                 }
-                SettingRow(3, 4, R.drawable.zi_bell, "Notifications", if (notificationsGranted) "Allowed" else "Tap to allow: the notice and the question before sending need them") {
+                SettingRow(3, 5, R.drawable.zi_bell, "Notifications", if (notificationsGranted) "Allowed" else "Tap to allow: the notice and the question before sending need them") {
                     if (Build.VERSION.SDK_INT >= 33) permissions.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
+                }
+                SettingRow(4, 5, R.drawable.zi_chats, "Notification access", if (listenerOn) "On: Zeron can answer a Google Messages chat" else "Optional: tap to turn on “Zeron”, so agents can reply in Google Messages chats (RCS)") {
+                    context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }
             }
 
@@ -177,10 +183,10 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
 
             section("Text messages")
             group {
-                SettingRow(0, 2, R.drawable.zi_chats, "Ask me before each text is sent", if (confirmSms) "A notification shows the whole text with Send and Don't send" else "Agents send without asking: only turn this off if you trust them", trailing = {
+                SettingRow(0, 2, R.drawable.zi_chats, "Ask me before each message is sent", if (confirmSms) "A notification shows the whole text with Send and Don't send" else "Agents send without asking: only turn this off if you trust them", trailing = {
                     Switch(confirmSms, { confirmSms = it; settings.confirmSmsSend = it })
                 }) {}
-                SettingRow(1, 2, R.drawable.zi_bot, "Wake a chat on a new text", if (wake) "A new text from a number below is sent into “${settings.wakeChatTitle ?: "(pick a chat)"}”" else "Off: new texts are not passed to any agent", trailing = {
+                SettingRow(1, 2, R.drawable.zi_bot, "Wake a chat on a new message", if (wake) "A new message from a number below is sent into “${settings.wakeChatTitle ?: "(pick a chat)"}”" else "Off: new messages are not passed to any agent", trailing = {
                     Switch(wake, { wake = it; settings.wakeEnabled = it })
                 }) { picking = true }
             }
@@ -190,7 +196,7 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
                         value = senders,
                         onValueChange = { senders = it; settings.wakeSenders = it },
                         label = { Text("Numbers that wake the chat") },
-                        supportingText = { Text("Comma-separated. Anyone can text you, and the text goes to an agent as it is: list only numbers you trust. * means anyone.") },
+                        supportingText = { Text("Comma-separated. Anyone can message you, and it goes to an agent as it is: list only numbers you trust. Covers texts, picture messages and Google Messages chats (RCS). * means anyone.") },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }

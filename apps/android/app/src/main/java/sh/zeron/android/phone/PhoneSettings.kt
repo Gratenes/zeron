@@ -60,8 +60,8 @@ class PhoneSettings(context: Context) {
         SCREEN_READ("screen-read", "Read the screen", "What an app shows, as text", true),
         SCREENSHOT("screenshot", "Take screenshots", "A picture of the screen", true),
         CONTROL("control", "Tap, type and swipe", "Use apps, open apps, press Back and Home", true),
-        SMS_READ("sms-read", "Read text messages", "Conversations and messages", true),
-        SMS_SEND("sms-send", "Send text messages", "From your number (see the question below)", true),
+        SMS_READ("sms-read", "Read text and chat messages", "SMS, picture messages and Google Messages (RCS) chats", true),
+        SMS_SEND("sms-send", "Send text and chat messages", "From your number, or in a Messages chat (see the question below)", true),
         CONTACTS("contacts", "Search contacts", "Names and numbers", true),
     }
 }

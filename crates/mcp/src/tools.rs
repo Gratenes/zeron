@@ -2357,6 +2357,23 @@ mod tests {
     }
 
     #[test]
+    fn a_message_is_sent_to_a_number_or_a_thread_by_sms_or_in_the_chat() {
+        let send = catalog().into_iter().find(|d| d.name == "phone_sms_send").expect("listed");
+        let props = &send.input_schema["properties"];
+        for field in ["to", "thread_id", "text", "via"] {
+            assert!(props.get(field).is_some(), "{field}");
+        }
+        // Only the text is required here: who to send to is `to` or `thread_id`, which the phone checks.
+        assert_eq!(send.input_schema["required"], json!(["text"]));
+        assert_eq!(props["via"]["enum"], json!(["auto", "sms"]));
+        // The reading tools say the chats (RCS) are in them.
+        for name in ["phone_sms_threads", "phone_sms_read"] {
+            let def = catalog().into_iter().find(|d| d.name == name).expect("listed");
+            assert!(def.description.contains("RCS"), "{name} says it reads Google Messages chats");
+        }
+    }
+
+    #[test]
     fn every_phone_tool_is_listed_once_with_the_shared_device_argument() {
         let defs: Vec<ToolDef> = catalog().into_iter().filter(|d| d.name.starts_with("phone_")).collect();
         let mut listed: Vec<&str> = defs.iter().map(|d| d.name).collect();

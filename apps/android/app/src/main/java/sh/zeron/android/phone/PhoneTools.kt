@@ -81,8 +81,11 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             )
             "sms_send" -> {
                 val text = args.optString("text")
-                sms.send(args.optString("to"), text, if (settings.confirmSmsSend) ({
-                    PhoneConfirm.ask(context, "${who ?: "An agent"} wants to send a text to ${args.optString("to")}", text)
+                val via = args.optString("via").ifEmpty { "auto" }
+                if (via != "auto" && via != "sms") throw PhoneToolException("via is auto or sms")
+                val to = args.optString("to").takeIf { it.isNotBlank() }
+                sms.send(to, args.optString("thread_id").takeIf { it.isNotBlank() }, text, via, if (settings.confirmSmsSend) ({ how ->
+                    PhoneConfirm.ask(context, "${who ?: "An agent"} wants to send a message $how".take(120), text)
                 }) else null)
             }
             "contacts_search" -> sms.contacts(args.optString("query"), args.optInt("limit", 10).coerceIn(1, 50))
@@ -101,6 +104,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             .put("sdk", Build.VERSION.SDK_INT)
             .put("batteryPercent", if (level >= 0) level * 100 / scale else JSONObject.NULL)
             .put("accessibilityOn", service != null)
+            .put("notificationAccessOn", PhoneNotificationListener.instance != null)
             .put("paused", settings.paused)
             .put("confirmsTextSends", settings.confirmSmsSend)
             .put("allowed", JSONObject().also { o -> PhoneSettings.Group.entries.forEach { o.put(it.key, settings.groupOn(it)) } })
@@ -166,7 +170,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
         "wait" -> "waited ${a.optInt("ms", 1000)} ms"
         "sms_threads" -> "listed text conversations"
         "sms_read" -> "read texts from ${a.optString("thread_id").ifEmpty { a.optString("address") }}"
-        "sms_send" -> "sent a text (${a.optString("text").length} characters) to ${a.optString("to")}"
+        "sms_send" -> "sent a message (${a.optString("text").length} characters) to ${a.optString("to").ifEmpty { "thread " + a.optString("thread_id") }}"
         "contacts_search" -> "searched contacts"
         else -> tool
     }

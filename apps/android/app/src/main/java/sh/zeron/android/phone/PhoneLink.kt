@@ -45,6 +45,7 @@ object PhoneLink {
         main.removeCallbacks(idle)
         Log.i(TAG, "accessibility bound: starting the host")
         main.post { model(context).bootHeadless() }
+        watchMessages(context)
     }
 
     fun onAccessibilityGone(context: Context) {
@@ -58,7 +59,13 @@ object PhoneLink {
         lastCall = System.currentTimeMillis()
         Log.i(TAG, "wake ($reason) at $lastCall")
         main.post { model(context).bootHeadless() }
+        watchMessages(context)
         scheduleIdle()
+    }
+
+    /** Chat and picture messages arrive in the provider: watch it while the person has agent access on. */
+    private fun watchMessages(context: Context) {
+        if (PhoneSettings(context).enabled) PhoneMessageWatcher.start(context) else PhoneMessageWatcher.stop()
     }
 
     /** An agent's call arrived: the link has work. */

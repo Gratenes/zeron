@@ -30,6 +30,18 @@ agent ── zeron mcp ── engine ──(device room, PhoneCall)── edge �
 (back/home/recents/shade/…), `phone_launch_app`, `phone_list_apps`, `phone_wait`,
 `phone_sms_threads`, `phone_sms_read`, `phone_sms_send`, `phone_contacts_search`.
 
+### Texts, picture messages and Google Messages chats (RCS)
+
+Google Messages keeps RCS chats in the phone's own Telephony provider, as MMS rows (`content://mms`,
+text in the row's `text/plain` part, `tr_id`/`sub` starting `proto:`), so `phone_sms_threads` and
+`phone_sms_read` read SMS, MMS and RCS together (each message has a `kind`; attachments are listed as type +
+part id) with only READ_SMS and no root. There is no public RCS API, no exported conversation provider
+in Messages, and a non-default SMS app doesn't get RCS. New RCS/MMS arrivals are noticed by a ContentObserver
+on `content://mms-sms/` (`PhoneMessageWatcher`) while the link is up and fed to the same wake rule as SMS.
+Answering a chat: `phone_sms_send` fires the Reply action (RemoteInput) of Messages' live notification for that
+conversation (needs Notification access for Zeron, `PhoneNotificationListener`, which stores nothing); if there is
+none, an RCS conversation is refused (`via: "sms"` sends a plain text instead).
+
 New texts can be passed to a chat (Settings → Agent phone access → Wake a chat on a new text),
 only from numbers the user lists; the text goes in quoted and labelled as the sender's, not an
 instruction.
