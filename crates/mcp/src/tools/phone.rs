@@ -11,7 +11,7 @@ use zeron_rpc::methods;
 
 use super::{ToolDef, Tools};
 
-pub(super) const NAMES: [&str; 16] = [
+pub(super) const NAMES: [&str; 17] = [
     "phone_ping",
     "phone_screen_read",
     "phone_screenshot",
@@ -21,6 +21,7 @@ pub(super) const NAMES: [&str; 16] = [
     "phone_swipe",
     "phone_scroll",
     "phone_press",
+    "phone_unlock",
     "phone_launch_app",
     "phone_list_apps",
     "phone_wait",
@@ -112,6 +113,11 @@ pub(super) fn catalog() -> Vec<ToolDef> {
             name: "phone_press",
             description: "A system button or gesture: back, home, recents, notifications (pull the shade), quick_settings, lock_screen.",
             input_schema: schema(json!({ "button": { "type": "string", "enum": ["back", "home", "recents", "notifications", "quick_settings", "lock_screen"] } }), &["button"]),
+        },
+        ToolDef {
+            name: "phone_unlock",
+            description: "Unlock the phone's screen with the PIN the person stored for agents (their choice, off by default). Phone tools that act on the screen (tap, type, swipe, scroll, open app) do this by themselves when the phone is locked and unlocking is on, so you rarely need to call it. The phone locks itself again 60 s after your last phone_* call, but only if you unlocked it and the person hasn't touched it since. It refuses if the person used the phone in the last 3 minutes. It tries the PIN ONCE: if that fails unlocking is switched off until the person enters the PIN again, and the call says so. After the phone restarted it can't be unlocked this way until the person has unlocked it once by hand. Every unlock is in the phone's log.",
+            input_schema: schema(json!({}), &[]),
         },
         ToolDef {
             name: "phone_launch_app",
@@ -374,6 +380,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("no image"), "{error}");
+    }
+
+    #[test]
+    fn unlocking_the_phone_is_a_tool_without_arguments_that_says_its_limits() {
+        let def = full_catalog().into_iter().find(|d| d.name == "phone_unlock").expect("listed");
+        assert_eq!(def.input_schema["properties"].as_object().unwrap().keys().collect::<Vec<_>>(), ["device"]);
+        for said in ["PIN", "60 s", "3 minutes", "ONCE", "by hand"] {
+            assert!(def.description.contains(said), "the description says {said:?}");
+        }
     }
 
     #[test]
