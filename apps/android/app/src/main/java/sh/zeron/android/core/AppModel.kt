@@ -383,8 +383,24 @@ class AppModel(private val app: Application) {
                 inForeground = false
                 _client.value?.onBackground()
                 _client.value?.onBackgroundIdle()
+                restSoon()
             }
-        } else if (!phoneHostUp) startPhoneHost()
+        } else {
+            if (!phoneHostUp) startPhoneHost()
+            restSoon()
+        }
+    }
+
+    /**
+     * Sockets the core opens a moment after a start (previews, rooms) are let go again: nobody
+     * is looking, so only the phone link's own slow keepalive may keep the radio up.
+     */
+    fun restSoon() {
+        val visible = androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.currentState
+            .isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+        if (visible || carConnected) return
+        main.removeCallbacks(rest)
+        main.postDelayed(rest, 12_000)
     }
 
     /** The keepalive setting changed (or access was switched on): start over with the new one. */
