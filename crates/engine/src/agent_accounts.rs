@@ -174,6 +174,16 @@ const CLAUDE_SHARED_CREDENTIAL_KEYS: &[&str] = &[
 /// than this — the page's paint-then-refresh pair and Refresh mashing must
 /// not multiply provider calls (Anthropic's usage endpoint 429s eagerly).
 const FORCED_MIN_INTERVAL: Duration = Duration::from_secs(30);
+/// How long a healthy Claude reading is served before a forced list probes
+/// it again. Every open composer, Settings page and device polls with
+/// `forceUsage` every 5 minutes, and Anthropic's usage endpoint rate-limits
+/// all of one user's accounts together, so the 30s floor alone let several
+/// clients walk every account into a 429. Under the poll period, so a lone
+/// client's poll always lands past it.
+const CLAUDE_USAGE_FRESH: Duration = Duration::from_secs(4 * 60);
+/// Between two Claude probes of one list: the accounts are asked one at a
+/// time, not as a burst.
+const CLAUDE_PROBE_SPACING: Duration = Duration::from_millis(250);
 /// How long a Claude login swap waits for Claude Code to finish saving a
 /// refresh it has in flight (its token POST alone may take 30s).
 const CLAUDE_REFRESH_LOCK_WAIT: Duration = Duration::from_secs(45);
@@ -680,7 +690,18 @@ struct UsageEntry {
 impl UsageEntry {
     /// Whether a forced list should probe this account now.
     fn probe_due(&self, credentials: &str, now: i64) -> bool {
-        if now - self.checked_at < FORCED_MIN_INTERVAL.as_millis() as i64 {
+        self.probe_due_after(credentials, now, FORCED_MIN_INTERVAL)
+    }
+
+    /// [`Self::probe_due`] with the floor a HEALTHY reading holds for: a
+    /// failed one is governed by its backoff (and the 30s floor), not this.
+    fn probe_due_after(&self, credentials: &str, now: i64, healthy_floor: Duration) -> bool {
+        let floor = if self.error.is_none() && self.usage.is_some() {
+            healthy_floor.max(FORCED_MIN_INTERVAL)
+        } else {
+            FORCED_MIN_INTERVAL
+        };
+        if now - self.checked_at < floor.as_millis() as i64 {
             return false;
         }
         match (self.retry_at, &self.error) {
@@ -3209,8 +3230,12 @@ impl AgentAccounts {
     /// moment ago, or already being probed by an overlapping list are left
     /// alone — they keep serving their last known usage.
     async fn refresh_usage(&self, targets: &[(HarnessId, &Slot, bool)]) {
+        /// A claimed probe: provider, slot, whether it is the live login, the
+        /// cache key and the credentials fingerprint.
+        type Claimed<'a> = (HarnessId, &'a Slot, bool, String, String);
         let now = now_ms();
-        let mut probes = Vec::new();
+        let mut others: Vec<Claimed> = Vec::new();
+        let mut claude: Vec<Claimed> = Vec::new();
         let mut claimed = Vec::new();
         {
             let usage = lock(&self.inner.usage);
@@ -3223,8 +3248,16 @@ impl AgentAccounts {
                 }
                 let key = usage_key(harness, &slot.account_key);
                 let credentials = credentials_fingerprint(&slot.credentials);
+                if provider_rate_limited(&usage, harness, now) {
+                    tracing::debug!(
+                        provider = harness_slug(harness),
+                        slot = %slot.id,
+                        "usage probe skipped (provider rate-limited)"
+                    );
+                    continue;
+                }
                 if let Some(entry) = usage.get(&key)
-                    && !entry.probe_due(&credentials, now)
+                    && !entry.probe_due_after(&credentials, now, usage_fresh_for(harness))
                 {
                     tracing::debug!(
                         provider = harness_slug(harness),
@@ -3238,20 +3271,50 @@ impl AgentAccounts {
                     continue;
                 }
                 claimed.push(key.clone());
-                probes.push(async move {
-                    let result = self.probe_usage(harness, slot, active).await;
-                    (key, credentials, result)
-                });
+                let probe = (harness, slot, active, key, credentials);
+                if harness == HarnessId::ClaudeCode {
+                    claude.push(probe);
+                } else {
+                    others.push(probe);
+                }
             }
         }
         let _release = InflightGuard {
             set: &self.inner.inflight_probes,
             keys: claimed,
         };
-        if probes.is_empty() {
+        if others.is_empty() && claude.is_empty() {
             return;
         }
-        let results = futures::future::join_all(probes).await;
+        // The live login first: it is the one on screen, and the one to
+        // spend the request on if the endpoint is already limiting.
+        claude.sort_by_key(|(_, _, active, _, _)| !*active);
+        let concurrent = futures::future::join_all(others.into_iter().map(
+            |(harness, slot, active, key, credentials)| async move {
+                let result = self.probe_usage(harness, slot, active).await;
+                (key, credentials, result)
+            },
+        ));
+        // Claude's accounts share one rate limit: ask one at a time, and once
+        // it answers 429 stop — the rest would only be limited too (and
+        // extend it). They stay unprobed, held back by the limit's backoff.
+        let one_by_one = async {
+            let mut done = Vec::new();
+            for (ix, (harness, slot, active, key, credentials)) in claude.into_iter().enumerate() {
+                if ix > 0 {
+                    tokio::time::sleep(CLAUDE_PROBE_SPACING).await;
+                }
+                let result = self.probe_usage(harness, slot, active).await;
+                let limited = matches!(result, Err(ProbeError::RateLimited { .. }));
+                done.push((key, credentials, result));
+                if limited {
+                    break;
+                }
+            }
+            done
+        };
+        let (mut results, claude_results) = futures::future::join(concurrent, one_by_one).await;
+        results.extend(claude_results);
         let now = now_ms();
         let mut usage = lock(&self.inner.usage);
         for (key, credentials, result) in results {
@@ -4352,6 +4415,35 @@ fn parse_when(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
 
 fn usage_key(harness: HarnessId, account_key: &str) -> String {
     format!("{}:{account_key}", harness_slug(harness))
+}
+
+/// How long a healthy reading of this provider is served to forced lists.
+fn usage_fresh_for(harness: HarnessId) -> Duration {
+    match harness {
+        HarnessId::ClaudeCode => CLAUDE_USAGE_FRESH,
+        _ => FORCED_MIN_INTERVAL,
+    }
+}
+
+/// Whether a rate limit one of this provider's accounts is still serving
+/// holds the others back too. Claude's usage endpoint limits all of a user's
+/// accounts together (their 429s land in the same second, again and again),
+/// so one account's `Retry-After` is every account's. Derived from the
+/// persisted entries, so a relaunch can't forget it and burst.
+fn provider_rate_limited(
+    usage: &HashMap<String, UsageEntry>,
+    harness: HarnessId,
+    now: i64,
+) -> bool {
+    if harness != HarnessId::ClaudeCode {
+        return false;
+    }
+    let prefix = format!("{}:", harness_slug(harness));
+    usage.iter().any(|(key, entry)| {
+        key.starts_with(&prefix)
+            && matches!(entry.error, Some(ProbeError::RateLimited { .. }))
+            && entry.retry_at.is_some_and(|at| now < at)
+    })
 }
 
 /// A short digest of a slot's credential blob — tells "same token that was
@@ -5888,6 +5980,62 @@ mod probe_tests {
     }
 
     #[test]
+    fn a_healthy_claude_reading_is_served_for_its_freshness_window() {
+        let mut entry = UsageEntry::default();
+        entry.record(Ok(snapshot()), "creds".into(), 1_000);
+        let fresh = CLAUDE_USAGE_FRESH.as_millis() as i64;
+        // Clients polling every few minutes share one probe...
+        assert!(!entry.probe_due_after("creds", 1_000 + fresh - 1, CLAUDE_USAGE_FRESH));
+        assert!(entry.probe_due_after("creds", 1_000 + fresh + 1, CLAUDE_USAGE_FRESH));
+        // ...and the default floor is the old 30s for every other provider.
+        assert!(entry.probe_due("creds", 1_000 + FORCED_MIN_INTERVAL.as_millis() as i64 + 1));
+        assert_eq!(usage_fresh_for(HarnessId::Codex), FORCED_MIN_INTERVAL);
+        // A failed reading is the backoff's business, not the freshness window's.
+        let mut failed = UsageEntry::default();
+        failed.record(Ok(snapshot()), "creds".into(), 1_000);
+        failed.record(
+            Err(ProbeError::Unauthorized { status: 401 }),
+            "old".into(),
+            2_000,
+        );
+        let soon = 2_000 + FORCED_MIN_INTERVAL.as_millis() as i64 + 1;
+        assert!(failed.probe_due_after("refreshed", soon, CLAUDE_USAGE_FRESH));
+    }
+
+    #[test]
+    fn one_claude_rate_limit_holds_every_claude_account_back() {
+        let limited = |retry_at| {
+            let mut entry = UsageEntry::default();
+            entry.record(
+                Err(ProbeError::RateLimited {
+                    retry_after_secs: Some(600),
+                }),
+                "c".into(),
+                0,
+            );
+            entry.retry_at = Some(retry_at);
+            entry
+        };
+        let mut usage = HashMap::new();
+        usage.insert("claude-code:a".to_string(), limited(600_000));
+        usage.insert("claude-code:b".to_string(), UsageEntry::default());
+        assert!(provider_rate_limited(&usage, HarnessId::ClaudeCode, 1_000));
+        // Over, so everyone may probe again.
+        assert!(!provider_rate_limited(
+            &usage,
+            HarnessId::ClaudeCode,
+            600_001
+        ));
+        // Another provider's accounts, and a non-rate-limit failure, don't count.
+        assert!(!provider_rate_limited(&usage, HarnessId::Codex, 1_000));
+        let mut rejected = UsageEntry::default();
+        rejected.record(Err(ProbeError::Unauthorized { status: 401 }), "c".into(), 0);
+        let mut usage = HashMap::new();
+        usage.insert("claude-code:a".to_string(), rejected);
+        assert!(!provider_rate_limited(&usage, HarnessId::ClaudeCode, 1_000));
+    }
+
+    #[test]
     fn usage_errors_read_as_reasons() {
         let mut entry = UsageEntry::default();
         entry.record(
@@ -6352,6 +6500,131 @@ mod login_tests {
             &serde_json::json!({}),
             &pair("new", 20.into())
         ));
+    }
+
+    /// Answers every request with `status`, `headers` and `body`, counting them.
+    async fn counting_server(
+        status: &'static str,
+        headers: &'static [(&'static str, &'static str)],
+        body: &'static str,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = vec![0u8; 16 * 1024];
+                // Only usage reads count: not an empty connection, nor the
+                // engine's `HEAD` reachability check of the same host.
+                let read = socket.read(&mut request).await.unwrap_or(0);
+                if !request[..read].starts_with(b"GET ") {
+                    let _ = socket
+                        .write_all(http_response("200 OK", &[], "").as_bytes())
+                        .await;
+                    continue;
+                }
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = socket
+                    .write_all(http_response(status, headers, body).as_bytes())
+                    .await;
+            }
+        });
+        (url, hits)
+    }
+
+    fn four_claude_accounts(root: &Path, usage_url: String) -> AgentAccounts {
+        let endpoints = ProbeEndpoints {
+            claude_usage: usage_url,
+            ..Default::default()
+        };
+        let accounts = AgentAccounts::with_endpoints(config(root), endpoints, Default::default());
+        for n in 0..4 {
+            let slot = claude_slot(
+                &format!("acct-{n}"),
+                &format!("{n}@example.com"),
+                &format!("rt-{n}"),
+                now_ms() + 3_600_000,
+            );
+            accounts.write_slot(&slot).unwrap();
+        }
+        accounts
+    }
+
+    #[tokio::test]
+    async fn a_claude_rate_limit_stops_the_list_and_holds_every_account_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (usage_url, hits) = counting_server(
+            "429 Too Many Requests",
+            &[
+                ("Content-Type", "application/json"),
+                ("Retry-After", "3600"),
+            ],
+            "{}",
+        )
+        .await;
+        let accounts = four_claude_accounts(tmp.path(), usage_url.clone());
+        let hit = || hits.load(std::sync::atomic::Ordering::SeqCst);
+
+        // Opening the page asks ONE account, learns it is limited, and stops:
+        // not four requests in a burst.
+        let snapshot = accounts.list(true).await.unwrap();
+        assert_eq!(hit(), 1);
+        let reasons: Vec<_> = snapshot
+            .accounts
+            .iter()
+            .filter_map(|a| a.usage_error.as_deref())
+            .collect();
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(reasons[0].starts_with("Usage check rate-limited by Anthropic"));
+        // Retry-After is honoured, as the whole provider's cooldown.
+        {
+            let usage = lock(&accounts.inner.usage);
+            let retry_at = usage.values().filter_map(|e| e.retry_at).max().unwrap();
+            let wait = retry_at - now_ms();
+            assert!((3_590_000..=3_600_000).contains(&wait), "waits {wait}ms");
+        }
+
+        // Reopening, Refresh mashing, other clients' polls: no probes at all,
+        // for the limited account or any of its siblings.
+        for _ in 0..3 {
+            accounts.list(true).await.unwrap();
+        }
+        assert_eq!(hit(), 1);
+
+        // A relaunch remembers the cooldown (the cache is on disk).
+        let relaunched = AgentAccounts::with_endpoints(
+            config(tmp.path()),
+            ProbeEndpoints {
+                claude_usage: usage_url,
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        relaunched.list(true).await.unwrap();
+        assert_eq!(hit(), 1);
+    }
+
+    #[tokio::test]
+    async fn healthy_claude_accounts_are_probed_once_however_often_lists_ask() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (usage_url, hits) = counting_server(
+            "200 OK",
+            &[("Content-Type", "application/json")],
+            r#"{"five_hour":{"utilization":6.0,"resets_at":"2026-04-08T18:59:59Z"}}"#,
+        )
+        .await;
+        let accounts = four_claude_accounts(tmp.path(), usage_url);
+        let first = accounts.list(true).await.unwrap();
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert!(first.accounts.iter().all(|a| !a.usage_windows.is_empty()));
+        for _ in 0..3 {
+            let again = accounts.list(true).await.unwrap();
+            assert!(again.accounts.iter().all(|a| !a.usage_windows.is_empty()));
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 4);
     }
 
     #[tokio::test]
