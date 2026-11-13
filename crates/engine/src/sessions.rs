@@ -1676,6 +1676,11 @@ impl SessionsEngine {
     /// under their own ids. Otherwise, or when the stop doesn't settle, it
     /// is an ordinary steer ([`Self::steer_at`]), read at the next step
     /// boundary. Nothing here tears a runtime down.
+    ///
+    /// A message from another chat never stops the turn: Claude Code words
+    /// every interrupt as the person rejecting the tool call and telling the
+    /// agent to stop and wait, so the agent would take the other chat's
+    /// message as an order to stop. It waits for the step boundary instead.
     pub(crate) async fn steer_now(
         &self,
         chat_id: &str,
@@ -1684,7 +1689,11 @@ impl SessionsEngine {
         message_id: Option<String>,
         issued_at: i64,
     ) -> Result<SteerOutcome, EngineError> {
-        if self.steer_stops_tool(chat_id) && self.stop_turn_keeping_runtime(chat_id).await {
+        let from_another_chat = zeron_proto::agent_messages::agent_message_sender(prompt).is_some();
+        if !from_another_chat
+            && self.steer_stops_tool(chat_id)
+            && self.stop_turn_keeping_runtime(chat_id).await
+        {
             let earlier = lock(&self.inner.runs)
                 .get(chat_id)
                 .map(|h| std::mem::take(&mut *lock(&h.redeliver)))
@@ -6328,7 +6337,9 @@ mod tests {
         let journal =
             serde_json::to_string(&sessions.inner.journal.replay("chat", 0).unwrap()).unwrap();
         assert!(!journal.contains(png_b64));
-        assert!(journal.contains(&preview_paths[0]));
+        // (As the journal's JSON writes it: a Windows path's `\` escaped.)
+        let stored = serde_json::to_string(&preview_paths[0]).unwrap();
+        assert!(journal.contains(stored.trim_matches('"')), "{journal}");
 
         let bad = AgentEvent::ToolResult {
             exit_code: None,
