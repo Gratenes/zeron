@@ -813,6 +813,13 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::MUTATE
             | methods::QUEUE_MESSAGE
             | methods::QUEUE_COMMAND
+            // Device files: looking at, and copying between, the account's devices' files.
+            // The engine's own policy (allowed folders, deny-list) bounds them; the byte-level
+            // Hash/Read/WritePart stay with the engines that talk to each other.
+            | methods::DEVICE_FILE_LIST
+            | methods::DEVICE_FILE_STAT
+            | methods::DEVICE_FILE_COPY
+            | methods::DEVICE_FILE_COPY_STATUS
             // Showing the person something in the calling chat.
             | methods::PUBLISH_VISUAL
             | methods::PUBLISH_IMAGE
@@ -1476,6 +1483,15 @@ mod tests {
         // it to Zeron's plugin-exports folder (R29).
         let asked = agent.call(methods::EXPORT_PLUGIN, serde_json::json!({})).await.unwrap();
         assert!(asked.as_str().unwrap().starts_with("Agent"), "{asked}");
+        // Device files: what the MCP tools call, and nothing at the byte level.
+        for method in [methods::DEVICE_FILE_LIST, methods::DEVICE_FILE_STAT, methods::DEVICE_FILE_COPY, methods::DEVICE_FILE_COPY_STATUS] {
+            assert!(agent_allowed(method), "{method}");
+            let asked = agent.call(method, serde_json::json!({})).await.unwrap();
+            assert!(asked.as_str().unwrap().starts_with("Agent"), "{method}: {asked}");
+        }
+        for method in [methods::DEVICE_FILE_HASH, methods::DEVICE_FILE_READ, methods::DEVICE_FILE_WRITE_PART] {
+            assert!(!agent_allowed(method), "{method}");
+        }
         // The theme tools' methods, exactly: data only.
         for method in [methods::LIST_THEMES, methods::GET_THEME, methods::CREATE_THEME, methods::UPDATE_THEME, methods::DELETE_THEME, methods::USE_THEME] {
             assert!(agent_allowed(method), "{method}");
