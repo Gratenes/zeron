@@ -31,6 +31,11 @@ export interface Env {
    * derives the head from the rows: older code reads the stored copy, and a
    * stale one collides on `rows.seq`. */
   CHAT_ROOM_WRITE_THROUGH?: string;
+  /** "1": RegistryRoom also stores its seq on every push. Set this and wait
+   * out one bookkeeping flush (5 min) before rolling back past the release
+   * that derives the seq from the rows: older code reads the stored copy,
+   * and a stale one would stamp new rows below cursors clients already hold. */
+  REGISTRY_ROOM_WRITE_THROUGH?: string;
   /** Who the chat rooms offer the relay layer to (docs/design/relay-layer.md): "1" for
    * everyone, or a comma-separated list of user ids. Empty, nothing changes at all. */
   CHAT_RELAY_LAYER?: string;
@@ -159,10 +164,6 @@ export const apnsConfig = (env: Env) =>
  * the caller's JWT. DOs trust it blindly — they are only reachable through
  * the Worker (design §2: "DO never sees an unauthenticated frame"). */
 export const AUTH_USER_HEADER = "x-zeron-auth-user";
-/** Worker-controlled, like the user header: the caller's org, for a chat room
- * that has to ask the registry who hosts its chat. */
-export const AUTH_ORG_HEADER = "x-zeron-auth-org";
-
 /** Worker-controlled, like the user header: the caller's org, for a chat room
  * that has to ask the registry who hosts its chat. */
 export const AUTH_ORG_HEADER = "x-zeron-auth-org";
