@@ -199,8 +199,17 @@ class PhoneSms(private val context: Context) {
     private fun resolveWho(m: Message): List<String> {
         if (m.mmsId == null) return listOfNotNull(m.smsAddress?.takeIf { it.isNotBlank() })
         val a = addresses(m.mmsId)
-        val others = if (m.incoming) (listOfNotNull(a.from) + a.to) else a.to
-        return others.distinct().filter { it.isNotBlank() }.ifEmpty { listOfNotNull(a.from) }
+        return Participants.others(m.incoming, a.from, a.to, ownNumbers()).ifEmpty { listOfNotNull(a.from) }
+    }
+
+    /** The phone's own numbers, when Android will say (it often will not without the phone-number permission). */
+    private fun ownNumbers(): List<String> {
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
+        if (!granted) return emptyList()
+        return runCatching {
+            val tm = context.getSystemService(android.telephony.TelephonyManager::class.java)
+            listOfNotNull(tm?.line1Number?.takeIf { it.isNotBlank() })
+        }.getOrDefault(emptyList())
     }
 
     private fun bodyOf(m: Message): String =
