@@ -92,6 +92,8 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
     var unlockFailed by remember(refresh) { mutableStateOf(settings.unlockFailed) }
     var pinStored by remember(refresh) { mutableStateOf(PhonePinVault.has(context)) }
     var enteringPin by remember { mutableStateOf(false) }
+    var typingPath by remember { mutableStateOf(false) }
+    var filesOn by remember(refresh) { mutableStateOf(settings.groupOn(PhoneSettings.Group.FILES)) }
     var folders by remember(refresh) { mutableStateOf(PhoneFolders.all(context)) }
     var confirmWrites by remember(refresh) { mutableStateOf(settings.confirmFileWrites) }
     val allFiles = remember(refresh) { Build.VERSION.SDK_INT >= 30 && android.os.Environment.isExternalStorageManager() }
@@ -231,15 +233,25 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
 
             section("Files")
             group {
-                SettingRow(0, 3, R.drawable.zi_folder, "All files access", if (allFiles) "On: allowed folders are read and written as plain files" else "Off: tap to turn it on for Zeron. Without it only folders you pick below work, one tree at a time.") {
-                    context.startActivity(
-                        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                    )
+                SettingRow(0, if (allFiles) 5 else 4, R.drawable.zi_check, "Use files in allowed folders", if (filesOn) "On: agents and your other devices can list and read the folders below" else "Off. Nothing below works until this is on.", trailing = {
+                    Switch(filesOn, { filesOn = it; settings.setGroup(PhoneSettings.Group.FILES, it) })
+                }) {}
+                SettingRow(1, if (allFiles) 5 else 4, R.drawable.zi_folder, "All files access", if (allFiles) "On: allowed folders are read and written as plain files, any file type" else "Off: tap, then switch “Allow access to manage all files” on for Zeron. Without it only folders picked below work.") {
+                    val pkg = Uri.parse("package:${context.packageName}")
+                    try {
+                        context.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    } catch (_: android.content.ActivityNotFoundException) {
+                        // The per-app screen isn't there: the list of apps is, find Zeron in it.
+                        context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
                 }
-                SettingRow(1, 3, R.drawable.zi_folder_with_files, "Add a folder", "Agents and your other devices can only use folders you add here. Add read-only first; allow writing per folder.") {
+                SettingRow(2, if (allFiles) 5 else 4, R.drawable.zi_folder_with_files, "Add a folder", "Pick it with Android's folder picker (the folder itself, not a file). Added read-only; allow writing per folder.") {
                     pickFolder.launch(null)
                 }
-                SettingRow(2, 3, R.drawable.zi_check, "Ask me before a file is written", if (confirmWrites) "A notification asks once per transfer" else "Allowed folders accept writes without asking: only turn this off if you trust them", trailing = {
+                if (allFiles) SettingRow(3, 5, R.drawable.zi_pen, "Add a folder by path", "Type a path such as /storage/emulated/0/Shiz: no picker, any folder in shared storage.") {
+                    typingPath = true
+                }
+                SettingRow(if (allFiles) 4 else 3, if (allFiles) 5 else 4, R.drawable.zi_check, "Ask me before a file is written", if (confirmWrites) "A notification asks once per transfer" else "Allowed folders accept writes without asking: only turn this off if you trust them", trailing = {
                     Switch(confirmWrites, { confirmWrites = it; settings.confirmFileWrites = it })
                 }) {}
             }
@@ -323,6 +335,35 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
                 item { TextButton({ PhoneActionLog.clear() }, Modifier.padding(horizontal = 16.dp)) { Text("Clear the log") } }
             }
         }
+    }
+
+    if (typingPath) {
+        var typed by remember { mutableStateOf("/storage/emulated/0/") }
+        var problem by remember { mutableStateOf<String?>(null) }
+        AlertDialog(
+            onDismissRequest = { typingPath = false },
+            title = { Text("Add a folder by path") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = typed, onValueChange = { typed = it; problem = null }, label = { Text("Folder path") }, singleLine = true,
+                        isError = problem != null, supportingText = { Text(problem ?: "It is added read-only.") }, modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    runCatching { PhoneFolders.addByPath(context, typed) }
+                        .onSuccess {
+                            folders = PhoneFolders.all(context)
+                            PhoneActionLog.add(context, "files_setup", "the person allowed the folder ${typed.trim()} (read only)", true, null)
+                            typingPath = false
+                        }
+                        .onFailure { problem = it.message }
+                }) { Text("Add") }
+            },
+            dismissButton = { TextButton({ typingPath = false }) { Text("Cancel") } },
+        )
     }
 
     if (enteringPin) {

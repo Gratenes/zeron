@@ -42,6 +42,21 @@ object PhoneFolders {
         save(context, rest + Folder(clean, write, uri))
     }
 
+    /**
+     * Adds a folder by its path (typed by the person; needs All files access, since there is no picked tree to read it
+     * through). Throws a message to show if it isn't a real folder in shared storage.
+     */
+    fun addByPath(context: Context, typed: String) {
+        val raw = typed.trim()
+        require(raw.startsWith("/")) { "Type the full path, starting with / (for example /storage/emulated/0/Shiz)" }
+        require(android.os.Build.VERSION.SDK_INT >= 30 && android.os.Environment.isExternalStorageManager()) { "Turn on All files access for Zeron first (the row above)" }
+        val dir = java.io.File(raw).canonicalFile
+        require(dir.isDirectory) { "${dir.path} isn't a folder on this phone" }
+        require(dir.path.startsWith("/storage/")) { "Only folders in shared storage (under /storage/) can be added" }
+        require(!dir.path.startsWith("/storage/emulated/0/Android/")) { "Android keeps each app's own files private (Android/data and Android/obb can't be used)" }
+        add(context, dir.path, null, write = false)
+    }
+
     fun remove(context: Context, path: String) {
         all(context).firstOrNull { it.path == path }?.uri?.let { u ->
             runCatching { context.contentResolver.releasePersistableUriPermission(Uri.parse(u), 3) }
