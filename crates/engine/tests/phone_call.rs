@@ -309,6 +309,11 @@ impl RpcService for FilesPhone {
                     "files_write_part" => Op::WritePart,
                     other => return Err(RpcError::Failed(format!("unknown tool {other}"))),
                 };
+                // Android's `optString` turns a JSON null cursor into the text "null", which
+                // filters out every name that sorts before it.
+                if op == Op::List && params["args"].get("cursor").is_some_and(serde_json::Value::is_null) {
+                    return RpcReply::value(&serde_json::json!({ "entries": [] }));
+                }
                 run_local(&self.policy, op, params["args"].clone()).map(RpcReply::Value).map_err(RpcError::Failed)
             }
             other => Err(RpcError::UnknownMethod(other.into())),
@@ -394,4 +399,22 @@ async fn files_move_between_the_engine_and_a_phone_through_its_files_tools() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("files.no_grant"), "{error}");
+
+    // A recursive copy of a phone's folder finds its files (and a Windows-style folder target
+    // ending in a separator is made).
+    std::fs::create_dir_all(phone_dir.join("Shiz")).unwrap();
+    for name in ["2026-01-01 Call.ogg", "Alice.ogg"] {
+        std::fs::write(phone_dir.join("Shiz").join(name), name.as_bytes()).unwrap();
+    }
+    let started = client
+        .call(methods::DEVICE_FILE_COPY, serde_json::json!({
+            "fromDeviceId": "pixel", "fromPath": phone_dir.join("Shiz").to_string_lossy(),
+            "toPath": format!("{}/Call Recordings/", pc_dir.to_string_lossy()), "recursive": true
+        }))
+        .await
+        .unwrap();
+    let job = finished(&client, started["transferId"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(job["filesTotal"], 2, "{job}");
+    assert_eq!(std::fs::read(pc_dir.join("Call Recordings/Alice.ogg")).unwrap(), b"Alice.ogg");
 }
