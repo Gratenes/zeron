@@ -173,20 +173,29 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
 
             section("Android needs")
             group {
-                SettingRow(0, 5, R.drawable.zi_keyboard, "Accessibility service", if (accessibilityOn) "On: reading and driving the screen works" else "Off: tap to turn on “Zeron” in Accessibility. On Android 13+, first allow restricted settings in the app's info page.") {
+                SettingRow(0, 6, R.drawable.zi_keyboard, "Accessibility service", if (accessibilityOn) "On: reading and driving the screen works" else "Off: tap to turn on “Zeron” in Accessibility. On Android 13+, first allow restricted settings in the app's info page.") {
                     context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }
-                SettingRow(1, 5, R.drawable.zi_chats, "Text messages", if (smsGranted) "Allowed (covers SMS, picture messages and Google Messages chats)" else "Tap to allow reading, sending and receiving messages") {
+                SettingRow(1, 6, R.drawable.zi_chats, "Text messages", if (smsGranted) "Allowed (covers SMS, picture messages and Google Messages chats)" else "Tap to allow reading, sending and receiving messages") {
                     permissions.launch(arrayOf(Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS))
                 }
-                SettingRow(2, 5, R.drawable.zi_bot, "Contacts", if (contactsGranted) "Allowed" else "Tap to allow, so texts show names") {
+                SettingRow(2, 6, R.drawable.zi_bot, "Contacts", if (contactsGranted) "Allowed" else "Tap to allow, so texts show names") {
                     permissions.launch(arrayOf(Manifest.permission.READ_CONTACTS))
                 }
-                SettingRow(3, 5, R.drawable.zi_bell, "Notifications", if (notificationsGranted) "Allowed" else "Tap to allow: the notice and the question before sending need them") {
+                SettingRow(3, 6, R.drawable.zi_bell, "Notifications", if (notificationsGranted) "Allowed" else "Tap to allow: the notice and the question before sending need them") {
                     if (Build.VERSION.SDK_INT >= 33) permissions.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
                 }
-                SettingRow(4, 5, R.drawable.zi_chats, "Notification access", if (listenerOn) "On: Zeron can answer a Google Messages chat" else "Optional: tap to turn on “Zeron”, so agents can reply in Google Messages chats (RCS)") {
+                SettingRow(4, 6, R.drawable.zi_chats, "Notification access", if (listenerOn) "On: Zeron can answer a Google Messages chat" else "Optional: tap to turn on “Zeron”, so agents can reply in Google Messages chats (RCS)") {
                     context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+                SettingRow(5, 6, R.drawable.zi_folder, "All files access", if (allFiles) "On: allowed folders are read and written as plain files, any file type" else "Off: tap, then switch “Allow access to manage all files” on for Zeron. Needed for the Files section below (without it only folders picked with the picker work).") {
+                    val pkg = Uri.parse("package:${context.packageName}")
+                    try {
+                        context.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    } catch (_: android.content.ActivityNotFoundException) {
+                        // The per-app screen isn't there: the list of apps is, find Zeron in it.
+                        context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
                 }
             }
 
@@ -233,25 +242,16 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
 
             section("Files")
             group {
-                SettingRow(0, if (allFiles) 5 else 4, R.drawable.zi_check, "Use files in allowed folders", if (filesOn) "On: agents and your other devices can list and read the folders below" else "Off. Nothing below works until this is on.", trailing = {
+                SettingRow(0, if (allFiles) 4 else 3, R.drawable.zi_check, "Use files in allowed folders", if (filesOn) "On: agents and your other devices can list and read the folders below" else "Off. Nothing below works until this is on.", trailing = {
                     Switch(filesOn, { filesOn = it; settings.setGroup(PhoneSettings.Group.FILES, it) })
                 }) {}
-                SettingRow(1, if (allFiles) 5 else 4, R.drawable.zi_folder, "All files access", if (allFiles) "On: allowed folders are read and written as plain files, any file type" else "Off: tap, then switch “Allow access to manage all files” on for Zeron. Without it only folders picked below work.") {
-                    val pkg = Uri.parse("package:${context.packageName}")
-                    try {
-                        context.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                    } catch (_: android.content.ActivityNotFoundException) {
-                        // The per-app screen isn't there: the list of apps is, find Zeron in it.
-                        context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                    }
-                }
-                SettingRow(2, if (allFiles) 5 else 4, R.drawable.zi_folder_with_files, "Add a folder", "Pick it with Android's folder picker (the folder itself, not a file). Added read-only; allow writing per folder.") {
+                SettingRow(1, if (allFiles) 4 else 3, R.drawable.zi_folder_with_files, "Add a folder", "Pick it with Android's folder picker (the folder itself, not a file). Added read-only; allow writing per folder.") {
                     pickFolder.launch(null)
                 }
-                if (allFiles) SettingRow(3, 5, R.drawable.zi_pen, "Add a folder by path", "Type a path such as /storage/emulated/0/Shiz: no picker, any folder in shared storage.") {
+                if (allFiles) SettingRow(2, 4, R.drawable.zi_pen, "Add a folder by path", "Type a path such as /storage/emulated/0/Shiz: no picker, any folder in shared storage.") {
                     typingPath = true
                 }
-                SettingRow(if (allFiles) 4 else 3, if (allFiles) 5 else 4, R.drawable.zi_check, "Ask me before a file is written", if (confirmWrites) "A notification asks once per transfer" else "Allowed folders accept writes without asking: only turn this off if you trust them", trailing = {
+                SettingRow(if (allFiles) 3 else 2, if (allFiles) 4 else 3, R.drawable.zi_check, "Ask me before a file is written", if (confirmWrites) "A notification asks once per transfer" else "Allowed folders accept writes without asking: only turn this off if you trust them", trailing = {
                     Switch(confirmWrites, { confirmWrites = it; settings.confirmFileWrites = it })
                 }) {}
             }
