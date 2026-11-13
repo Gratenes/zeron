@@ -116,9 +116,14 @@ object PhoneUnlock {
         // The screen has to be awake, then the lock screen swiped up to show the PIN pad.
         wake(context)
         Thread.sleep(700)
-        if (isLocked(context)) {
-            service.swipeUpFromBottom()
-            Thread.sleep(700)
+        // The pad appears after the swipe's animation: look for it, and swipe again (differently) if it doesn't show.
+        for (attempt in 0 until 3) {
+            if (!isLocked(context) || service.pinPadShown()) break
+            service.swipeUpFromBottom(attempt)
+            for (i in 0 until 6) {
+                Thread.sleep(300)
+                if (service.pinPadShown()) break
+            }
         }
         if (pin != null && isLocked(context)) {
             val entered = service.enterPin(pin)

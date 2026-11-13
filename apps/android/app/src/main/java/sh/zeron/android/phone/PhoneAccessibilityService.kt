@@ -387,11 +387,21 @@ class PhoneAccessibilityService : AccessibilityService() {
 
     // ── the lock screen ──────────────────────────────────────────────────────
 
-    /** Swipes up from the bottom of the screen: opens the lock screen's PIN pad. */
-    fun swipeUpFromBottom() {
+    /**
+     * Swipes up on the lock screen to open its PIN pad. [attempt] varies the stroke: the first starts a little above
+     * the bottom edge, off the in-display fingerprint sensor (a swipe that starts on it is taken by the sensor, which
+     * Nothing OS puts at the bottom centre), the others start left of it, and faster.
+     */
+    fun swipeUpFromBottom(attempt: Int = 0) {
         val m = resources.displayMetrics
-        val path = Path().apply { moveTo(m.widthPixels / 2f, m.heightPixels * 0.88f); lineTo(m.widthPixels / 2f, m.heightPixels * 0.30f) }
-        gesture(path, 300)
+        val w = m.widthPixels.toFloat()
+        val h = m.heightPixels.toFloat()
+        val (x, y0, ms) = when (attempt) {
+            0 -> Triple(w * 0.5f, h * 0.78f, 250L)
+            1 -> Triple(w * 0.25f, h * 0.90f, 180L)
+            else -> Triple(w * 0.5f, h * 0.70f, 120L)
+        }
+        gesture(Path().apply { moveTo(x, y0); lineTo(x, h * 0.22f) }, ms)
     }
 
     fun pressBack() { performGlobalAction(GLOBAL_ACTION_BACK) }
@@ -434,32 +444,44 @@ class PhoneAccessibilityService : AccessibilityService() {
         gesture(path, 60)
     }
 
+    /** The roots to search for the PIN pad: the active window's, and every other window's (the bouncer can be one). */
+    private fun lockRoots(): List<AccessibilityNodeInfo> {
+        val roots = ArrayList<AccessibilityNodeInfo>()
+        rootInActiveWindow?.let(roots::add)
+        runCatching { windows.forEach { w -> w.root?.let(roots::add) } }
+        return roots
+    }
+
+    private fun padNode(n: AccessibilityNodeInfo) = PadNode(n.viewIdResourceName, n.text?.toString(), n.contentDescription?.toString(), n.packageName?.toString(), n.isVisibleToUser)
+
     private fun pinKeys(): Map<Char, AccessibilityNodeInfo> {
         val found = HashMap<Char, AccessibilityNodeInfo>()
-        val root = rootInActiveWindow ?: return found
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(root)
-        while (queue.isNotEmpty()) {
-            val n = queue.removeFirst()
-            val byId = n.viewIdResourceName?.let { Regex(".*:id/key([0-9])$").matchEntire(it)?.groupValues?.get(1)?.get(0) }
-            val byText = (n.text?.toString() ?: n.contentDescription?.toString())?.takeIf { it.length == 1 && it[0].isDigit() && n.packageName == root.packageName }?.get(0)
-            val digit = byId ?: byText
-            if (digit != null && n.isVisibleToUser && digit !in found) found[digit] = n
-            for (i in 0 until n.childCount) n.getChild(i)?.let(queue::add)
+        for (root in lockRoots()) {
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(root)
+            while (queue.isNotEmpty()) {
+                val n = queue.removeFirst()
+                val digit = PinPad.digit(padNode(n), root.packageName?.toString())
+                if (digit != null && digit !in found) found[digit] = n
+                for (i in 0 until n.childCount) n.getChild(i)?.let(queue::add)
+            }
+            if (found.size >= 10) break
         }
         return found
     }
 
+    /** Whether a PIN pad (any digit keys) is on the screen now. */
+    fun pinPadShown(): Boolean = pinKeys().size >= 4
+
     private fun pinEnter(): AccessibilityNodeInfo? {
-        val root = rootInActiveWindow ?: return null
-        val queue = ArrayDeque<AccessibilityNodeInfo>()
-        queue.add(root)
-        while (queue.isNotEmpty()) {
-            val n = queue.removeFirst()
-            val id = n.viewIdResourceName.orEmpty()
-            val label = (n.contentDescription ?: n.text)?.toString().orEmpty()
-            if (n.isVisibleToUser && (id.endsWith(":id/key_enter") || label.equals("Enter", ignoreCase = true) || label.equals("OK", ignoreCase = true))) return n
-            for (i in 0 until n.childCount) n.getChild(i)?.let(queue::add)
+        for (root in lockRoots()) {
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(root)
+            while (queue.isNotEmpty()) {
+                val n = queue.removeFirst()
+                if (PinPad.isEnter(padNode(n))) return n
+                for (i in 0 until n.childCount) n.getChild(i)?.let(queue::add)
+            }
         }
         return null
     }
