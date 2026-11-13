@@ -303,7 +303,7 @@ async fn run_inner(
         j.bytes_total = total;
         j.files_total = items.len();
     });
-    let make_parents = request.recursive;
+    let make_parents = request.recursive || request.to_path.ends_with(['/', '\\']);
     for item in items {
         with_job(job, |j| j.current = Some(item.from.clone()));
         let before = job
@@ -312,17 +312,21 @@ async fn run_inner(
             .bytes_done;
         let result = copy_file(src, dst, &item, request.overwrite, make_parents, job).await;
         with_job(job, |j| {
-            // A skipped or failed file still counts as passed, so progress ends at the total.
-            j.bytes_done = before + item.size;
             j.files.push(match result {
-                Ok((outcome, sha)) => FileResult {
-                    from: item.from.clone(),
-                    to: item.to.clone(),
-                    bytes: item.size,
-                    outcome,
-                    sha256: Some(sha),
-                    error: None,
-                },
+                Ok((outcome, sha, size)) => {
+                    // Progress counts what the file really was (the hashed size), not what an
+                    // earlier listing said.
+                    j.bytes_done = before + size;
+                    FileResult {
+                        from: item.from.clone(),
+                        to: item.to.clone(),
+                        bytes: size,
+                        outcome,
+                        sha256: Some(sha),
+                        error: None,
+                    }
+                }
+                // A failed file moves progress only as far as its bytes really went.
                 Err(error) => FileResult {
                     from: item.from.clone(),
                     to: item.to.clone(),
@@ -350,7 +354,14 @@ async fn collect(
             let reply = call_retry(
                 src,
                 Op::List,
-                json!({ "path": dir, "cursor": cursor }),
+                {
+                    // No `cursor` on the first page: a phone reads a JSON null as the text "null".
+                    let mut params = json!({ "path": dir });
+                    if let Some(c) = &cursor {
+                        params["cursor"] = json!(c);
+                    }
+                    params
+                },
                 CALL_DEADLINE,
             )
             .await?;
@@ -421,7 +432,7 @@ async fn copy_file(
     overwrite: bool,
     make_parents: bool,
     job: &Arc<Mutex<Job>>,
-) -> Result<(&'static str, String), String> {
+) -> Result<(&'static str, String, u64), String> {
     let hashed = call_retry(
         src,
         Op::Hash,
@@ -445,7 +456,7 @@ async fn copy_file(
                 )
                 .await?;
                 if there["sha256"].as_str() == Some(sha.as_str()) {
-                    return Ok(("identical", sha));
+                    return Ok(("identical", sha, size));
                 }
             }
             if !overwrite {
@@ -495,7 +506,7 @@ async fn copy_file(
         )
         .await
         {
-            Ok(()) => return Ok(("copied", sha)),
+            Ok(()) => return Ok(("copied", sha, size)),
             Err(Stop::Resync(held)) if resyncs < RESYNCS => {
                 resyncs += 1;
                 offset = held.min(size);
@@ -983,5 +994,77 @@ mod tests {
         assert_eq!(job.state, "failed");
         assert!(job.error.unwrap().contains("aren't moved"));
         assert!(!b.root.join("huge.zeron-part").exists());
+    }
+
+    /// A phone as `optString` reads it: a null `cursor` is the text "null", so every name that
+    /// sorts before it is filtered out of the page.
+    struct NullIsText(Arc<dyn Peer>);
+
+    #[async_trait]
+    impl Peer for NullIsText {
+        async fn call(&self, op: Op, params: Value, deadline: Duration) -> Result<Value, String> {
+            if op == Op::List && params.get("cursor").is_some_and(Value::is_null) {
+                return Ok(json!({ "entries": [] }));
+            }
+            self.0.call(op, params, deadline).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_folder_on_a_source_that_reads_a_null_cursor_as_text_still_lists() {
+        let (a, b) = (side(), side());
+        fs::create_dir_all(a.root.join("Shiz")).unwrap();
+        for name in ["2026-01-01 Call.ogg", "Alice.ogg", "call.m4a"] {
+            fs::write(a.root.join("Shiz").join(name), pattern(2000)).unwrap();
+        }
+        let src = Side {
+            _dir: tempfile::tempdir().unwrap(),
+            root: a.root.clone(),
+            peer: Arc::new(NullIsText(a.peer.clone())),
+        };
+        let mut r = req(&a.root.join("Shiz"), &b.root.join("Call Recordings/"));
+        r.recursive = true;
+        let job = copy(&src, &b, r).await;
+        assert_eq!(job.state, "done", "{:?}", job.error);
+        assert_eq!(job.files_total, 3);
+        assert_eq!(
+            fs::read(b.root.join("Call Recordings/Alice.ogg")).unwrap(),
+            pattern(2000)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_file_into_a_folder_that_does_not_exist_yet_makes_it() {
+        let (a, b) = (side(), side());
+        fs::write(a.root.join("x.ogg"), pattern(100)).unwrap();
+        let job = copy(
+            &a,
+            &b,
+            Request {
+                from_path: a.root.join("x.ogg").display().to_string(),
+                to_path: format!("{}/Call Recordings/", b.root.display()),
+                overwrite: false,
+                recursive: false,
+            },
+        )
+        .await;
+        assert_eq!(job.state, "done", "{:?}", job.error);
+        assert_eq!(
+            fs::read(b.root.join("Call Recordings/x.ogg")).unwrap(),
+            pattern(100)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_file_does_not_count_as_moved() {
+        let (a, b) = (side(), side());
+        fs::write(a.root.join("f"), b"new!").unwrap();
+        fs::write(b.root.join("f"), b"old!").unwrap();
+        let job = copy(&a, &b, req(&a.root.join("f"), &b.root.join("f"))).await;
+        assert_eq!(
+            (job.state, job.bytes_total, job.bytes_done),
+            ("failed", 4, 0)
+        );
+        assert_eq!(job.files[0].bytes, 0);
     }
 }

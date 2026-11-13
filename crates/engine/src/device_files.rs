@@ -15,7 +15,7 @@
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -75,6 +75,41 @@ impl From<FileError> for zeron_rpc::RpcError {
 }
 
 type Result<T> = std::result::Result<T, FileError>;
+
+/// A path as it is compared: `/`-separated, without a Windows verbatim prefix (`\\?\C:\…`, what
+/// canonicalizing gives there) or a trailing separator, and case-folded when it is a Windows path
+/// (a drive letter or a UNC share), whose names don't differ by case.
+fn key(path: &Path) -> String {
+    let mut s = path.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = s.strip_prefix("//?/UNC/") {
+        s = format!("//{rest}");
+    } else if let Some(rest) = s.strip_prefix("//?/") {
+        s = rest.to_owned();
+    }
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    if is_windows_key(&s) {
+        s = s.to_lowercase();
+    }
+    s
+}
+
+fn is_windows_key(s: &str) -> bool {
+    let b = s.as_bytes();
+    (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') || s.starts_with("//")
+}
+
+/// Whether `candidate` is `root` or inside it (both from [`key`]).
+fn key_under(root: &str, candidate: &str) -> bool {
+    if root == "/" {
+        return candidate.starts_with('/');
+    }
+    candidate == root
+        || candidate
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
 
 /// What this device lets other devices reach.
 #[derive(Debug, Clone)]
@@ -165,27 +200,19 @@ impl Policy {
     }
 
     fn denied(&self, path: &Path) -> bool {
-        let lower = |p: &Path| p.to_string_lossy().to_lowercase();
-        let candidate = lower(path);
-        let under = |root: &str| {
-            candidate == root
-                || candidate
-                    .strip_prefix(root)
-                    .is_some_and(|rest| rest.starts_with(['/', '\\']))
-        };
-        if self.deny.iter().any(|d| under(&lower(d))) {
+        let candidate = key(path);
+        if self.deny.iter().any(|d| key_under(&key(d), &candidate)) {
             return true;
         }
         // A repository's own git config can hold a token in a remote URL.
-        let mut tail = path.components().rev();
-        tail.next().is_some_and(|last| last.as_os_str() == "config")
-            && tail
-                .next()
-                .is_some_and(|parent| parent.as_os_str() == ".git")
+        candidate.ends_with("/.git/config")
     }
 
     fn inside_roots(&self, path: &Path) -> bool {
-        self.roots.iter().any(|root| path.starts_with(root))
+        let candidate = key(path);
+        self.roots
+            .iter()
+            .any(|root| key_under(&key(root), &candidate))
     }
 
     /// An existing path, resolved through links and checked against the policy.
@@ -257,13 +284,13 @@ impl Policy {
         } else {
             PathBuf::from(raw)
         };
-        if !path.is_absolute() {
+        if !path.is_absolute() && !is_windows_key(&key(&path)) {
             return Err(FileError::new(
                 "denied",
                 format!("{raw} isn't an absolute path"),
             ));
         }
-        if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        if key(&path).split('/').any(|part| part == "..") {
             return Err(FileError::new(
                 "no_grant",
                 format!("{raw} leaves the folders agents may reach"),
@@ -871,5 +898,63 @@ mod tests {
         .unwrap();
         assert!(second["entries"].as_array().unwrap().len() >= 20);
         assert!(second.get("cursor").is_none());
+    }
+
+    #[test]
+    fn windows_paths_compare_without_the_verbatim_prefix_or_case() {
+        let home = Path::new(r"C:\Users\chanc");
+        let policy = Policy::new(home, Path::new(r"C:\Users\chanc\AppData\Roaming\zeron"), []);
+        // Canonicalizing there gives `\\?\C:\…` for the root; the caller's path is plain.
+        let verbatim = Policy {
+            roots: vec![PathBuf::from(r"\\?\C:\Users\chanc")],
+            ..policy.clone()
+        };
+        for p in [
+            r"C:\Users\chanc\Documents\Call Recordings\a.ogg",
+            r"c:\users\CHANC\Documents\a.ogg",
+            r"C:/Users/chanc/Documents/a.ogg",
+            r"\\?\C:\Users\chanc\Documents\a.ogg",
+        ] {
+            assert!(policy.inside_roots(Path::new(p)), "{p}");
+            assert!(verbatim.inside_roots(Path::new(p)), "{p}");
+        }
+        for p in [
+            r"C:\Users\chanc2\x",
+            r"D:\Users\chanc\x",
+            r"C:\Users",
+            r"\\?\D:\x",
+        ] {
+            assert!(!verbatim.inside_roots(Path::new(p)), "{p}");
+        }
+        // The deny-list holds in every spelling, and `.git\config` too.
+        for p in [
+            r"C:\Users\chanc\.ssh\id_ed25519",
+            r"\\?\C:\Users\chanc\.SSH\id_ed25519",
+            r"C:\Users\chanc\AppData\Roaming\Mozilla\Firefox\x",
+            r"C:\Users\chanc\AppData\Roaming\zeron\token",
+            r"C:\Users\chanc\proj\.git\config",
+        ] {
+            assert!(policy.denied(Path::new(p)), "{p}");
+        }
+        assert!(!policy.denied(Path::new(r"C:\Users\chanc\Documents\.sshnot\a")));
+    }
+
+    #[test]
+    fn a_windows_path_outside_the_roots_is_no_grant_whether_or_not_it_exists() {
+        let policy = Policy::new(
+            Path::new(r"C:\Users\chanc"),
+            Path::new(r"C:\Users\chanc\zeron"),
+            [],
+        );
+        assert_eq!(code(stat(&policy, &p(r"D:\secret\x.ogg"))), "no_grant");
+        assert_eq!(
+            code(stat(&policy, &p(r"C:\Users\chanc\Documents\..\..\x"))),
+            "no_grant"
+        );
+        // Inside, a missing file is just missing (not "outside").
+        assert_eq!(
+            code(stat(&policy, &p(r"C:\Users\chanc\Documents\x.ogg"))),
+            "not_found"
+        );
     }
 }
