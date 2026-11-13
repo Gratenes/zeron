@@ -2896,17 +2896,29 @@ async fn device_files_copy_between_two_engines_over_the_relay() {
     assert_eq!(job["bytesDone"], 1_300_000);
     assert_eq!(std::fs::read(viewer_dir.join("call.m4a")).unwrap(), data);
 
-    // Viewer -> host (a push), into a folder that doesn't exist yet.
+    // Viewer -> host (a push) into a folder that doesn't exist yet: a path ending in a
+    // separator names a folder and makes it; a file path in a missing folder is not_found.
     let started = client
         .call(methods::DEVICE_FILE_COPY, serde_json::json!({
             "toDeviceId": "files-host", "fromPath": viewer_dir.join("call.m4a").to_string_lossy(),
-            "toPath": host_dir.join("back/").to_string_lossy(), "recursive": false
+            "toPath": host_dir.join("missing").join("call.m4a").to_string_lossy()
         }))
         .await
         .unwrap();
     let job = finished(&client, started["transferId"].as_str().unwrap()).await;
     assert_eq!(job["state"], "failed", "{job}");
     assert!(job["error"].as_str().unwrap().starts_with("files.not_found"), "{job}");
+    assert!(!host_dir.join("missing").exists());
+    let started = client
+        .call(methods::DEVICE_FILE_COPY, serde_json::json!({
+            "toDeviceId": "files-host", "fromPath": viewer_dir.join("call.m4a").to_string_lossy(),
+            "toPath": format!("{}/back/", host_dir.to_string_lossy())
+        }))
+        .await
+        .unwrap();
+    let job = finished(&client, started["transferId"].as_str().unwrap()).await;
+    assert_eq!(job["state"], "done", "{job}");
+    assert_eq!(std::fs::read(host_dir.join("back/call.m4a")).unwrap(), data);
     let started = client
         .call(methods::DEVICE_FILE_COPY, serde_json::json!({
             "toDeviceId": "files-host", "fromPath": viewer_dir.join("call.m4a").to_string_lossy(),
