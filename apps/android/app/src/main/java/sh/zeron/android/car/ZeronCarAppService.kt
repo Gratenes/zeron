@@ -114,7 +114,7 @@ class CarSession : Session() {
     private val followed = HashSet<String>()
 
     private fun follows(report: Report) =
-        report.chatId in followed || report.orchestrator || report.createdAtMs >= connectedAt
+        report.chatId in followed || agents.isFollowed(report.chatId) || report.orchestrator || report.createdAtMs >= connectedAt
 
     /** Zeron is what the car screen shows (not Maps or the launcher). */
     private val onScreen get() = lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
@@ -224,7 +224,10 @@ class CarSession : Session() {
     private suspend fun respond(chatId: String, flow: QuestionFlow, answers: List<UserInputAnswer>, spoken: Boolean) {
         if (spoken) say(flow.confirmation(answers))
         val outcome = agents.respond(chatId, flow.input.requestId, answers)
-        if (outcome is CarAgents.Outcome.Sent) followed += outcome.chatId
+        if (outcome is CarAgents.Outcome.Sent) {
+            followed += outcome.chatId
+            agents.follow(outcome.chatId)
+        }
         Log.i(TAG, "answer $chatId: ${answers.size} answers → $outcome")
         reportOutcome(chatId, outcome)
     }
@@ -302,8 +305,9 @@ class CarSession : Session() {
         if (model.voice.live) return
         if (!onScreen) {
             // Off Zeron's screen: a notification to come back to (and no microphone opening over Maps).
-            if (follows(report)) notifications.post(report)
-            voice.speak(report.spoken)
+            // Posted, Assistant reads it aloud: don't say it twice.
+            val posted = follows(report) && notifications.post(report)
+            if (!posted) voice.speak(report.spoken)
             return
         }
         if (!report.orchestrator) alert(report)

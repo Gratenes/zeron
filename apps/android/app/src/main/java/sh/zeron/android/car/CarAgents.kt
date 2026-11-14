@@ -87,6 +87,7 @@ class CarAgents(app: Application, private val model: AppModel) {
     private val prefs = app.getSharedPreferences("car", 0)
     private val states = AgentStates()
     private var watching: Job? = null
+    private val followed = HashSet<String>()
 
     private val _agents = MutableStateFlow<List<CarAgent>>(emptyList())
     val agents: StateFlow<List<CarAgent>> = _agents.asStateFlow()
@@ -102,6 +103,13 @@ class CarAgents(app: Application, private val model: AppModel) {
     /** [orchestratorId] while its chat is still around. */
     val liveOrchestrator: String?
         get() = orchestratorId?.takeIf { id -> model.row(id)?.archived == false }
+
+    /** Chats the driver talked to from the car (by voice or Assistant): their reports reach them off screen. */
+    fun follow(chatId: String) {
+        followed += chatId
+    }
+
+    fun isFollowed(chatId: String) = chatId in followed
 
     /** Watch the workspace while a car is connected. */
     fun start() {
