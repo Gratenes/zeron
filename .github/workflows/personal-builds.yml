@@ -68,6 +68,10 @@ jobs:
     if: inputs.targets == 'windows' || inputs.targets == 'both'
     runs-on: windows-2022
     timeout-minutes: 150
+    # id-token: the OIDC token azure/login trades for Azure (signing below).
+    permissions:
+      id-token: write
+      contents: read
     defaults:
       run:
         shell: pwsh
@@ -146,6 +150,43 @@ jobs:
           }
           Get-ChildItem out -Recurse -File | Measure-Object Length -Sum | ForEach-Object { "$($_.Count) files, $($_.Sum) bytes" }
           Get-ChildItem "$beta/ui/templates/zeron-v2" -Recurse -File | Select-Object -First 5 FullName
+      # Authenticode signing (Azure Artifact Signing), off until the repository
+      # variable SIGNING_ENABLED is "true". Every .exe and .dll in the bundle is
+      # signed, before it is uploaded: Smart App Control blocks any unsigned
+      # binary a signed one loads. No secrets: the login is OIDC (the job's
+      # id-token), the ids are repository variables.
+      - name: azure login (OIDC)
+        if: vars.SIGNING_ENABLED == 'true'
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: sign every exe and dll in the bundle
+        if: vars.SIGNING_ENABLED == 'true'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: MediaSave
+          certificate-profile-name: ${{ vars.SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}/out
+          files-folder-filter: exe,dll
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: verify every exe and dll is signed
+        if: vars.SIGNING_ENABLED == 'true'
+        run: |
+          $files = Get-ChildItem out -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' }
+          if (-not $files) { throw 'nothing to verify in out/' }
+          $bad = @()
+          foreach ($f in $files) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $f.FullName
+            "{0}  {1}  {2}" -f $sig.Status, $f.FullName.Substring($PWD.Path.Length + 1), $sig.SignerCertificate.Subject
+            if ($sig.Status -ne 'Valid') { $bad += $f.FullName }
+          }
+          if ($bad) { throw "not validly signed: $($bad -join ', ')" }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: zeron-windows-pc
