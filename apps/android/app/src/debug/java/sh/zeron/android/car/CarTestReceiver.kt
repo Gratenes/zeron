@@ -22,6 +22,7 @@ import kotlin.math.sin
  * Debug only: drives the car's speech and notifications without a signed-in chat, for the DHU.
  *
  * - `am broadcast -a sh.zeron.android.TEST_CAR_REPORT --es text "…" [--es kind needs|failed]` posts a report notification.
+ * - `am broadcast -a sh.zeron.android.TEST_CAR_ENGINE --es engine Local|Android` picks the dictation engine.
  * - `am broadcast -a sh.zeron.android.TEST_CAR_SPEAK [--es text "…"]` reads text aloud like a readback.
  * - `am broadcast -a sh.zeron.android.TEST_CAR_REPLY [--es text "…"]` fires the reply service as Android Auto does for a dictated reply.
  * - `am broadcast -a sh.zeron.android.TEST_CAR_MUSIC --es op start|stop` plays a tone under its own media session (a stand-in music app).
@@ -42,9 +43,15 @@ class CarTestReceiver : BroadcastReceiver() {
                 val ok = CarNotifications(app).post(Report("test-chat", title, kind, text, spoken, orchestrator = false, createdAtMs = System.currentTimeMillis()))
                 Log.i(TAG, "test report posted: $ok")
             }
+            ACTION_ENGINE -> {
+                // Which recognizer the car dictates with: Local or Android.
+                val engine = runCatching { DictationEngine.valueOf(intent.getStringExtra("engine") ?: "Local") }.getOrDefault(DictationEngine.Local)
+                (app as sh.zeron.android.ZeronApplication).model.setCarDictationEngine(engine)
+                Log.i(TAG, "test dictation engine: $engine")
+            }
             ACTION_SPEAK -> {
                 val text = intent.getStringExtra("text") ?: LONG
-                val voice = voice ?: CarVoice(app) { false }.also { voice = it }
+                val voice = voice ?: CarVoice(app, pausesMusic = { false }).also { voice = it }
                 CoroutineScope(Dispatchers.Main).launch { Log.i(TAG, "test speak: ${voice.speak(text)}") }
             }
             ACTION_REPLY_TEST -> {
@@ -117,6 +124,7 @@ class CarTestReceiver : BroadcastReceiver() {
         private const val TAG = "ZeronCarTest"
         const val ACTION_REPORT = "sh.zeron.android.TEST_CAR_REPORT"
         const val ACTION_SPEAK = "sh.zeron.android.TEST_CAR_SPEAK"
+        const val ACTION_ENGINE = "sh.zeron.android.TEST_CAR_ENGINE"
         const val ACTION_REPLY_TEST = "sh.zeron.android.TEST_CAR_REPLY"
         const val ACTION_MUSIC = "sh.zeron.android.TEST_CAR_MUSIC"
         private var voice: CarVoice? = null

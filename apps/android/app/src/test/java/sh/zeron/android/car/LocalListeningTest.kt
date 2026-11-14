@@ -122,6 +122,15 @@ class LocalListeningTest {
     }
 
     @Test
+    fun audioArrivingMarksTheMicrophoneAsAlive() {
+        val listening = LocalListening(FakeSession(final = "x"))
+        val before = listening.lastAudioNanos
+        Thread.sleep(5)
+        listening.run(Mic(script(200, 3_000)), {}) { false }
+        assertTrue(listening.lastAudioNanos > before)
+    }
+
+    @Test
     fun audioIsHandedOverInWholeSteps() {
         val session = FakeSession(final = "x")
         LocalListening(session, stepBytes = 5_120).run(Mic(script(1_000, 3_000)), {}) { false }

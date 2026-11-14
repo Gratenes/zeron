@@ -291,10 +291,29 @@ class CarVoice(
             return null
         }
         cancelListening = { cancelled.set(true) }
+        // On a thread of its own: a read from a microphone that delivers nothing blocks, and only
+        // stopping the stream (below) frees it.
+        val done = CompletableDeferred<LocalResult>()
+        val listening = LocalListening(session)
+        val started = SystemClock.elapsedRealtime()
+        thread(name = "car-local-asr", isDaemon = true) {
+            done.complete(listening.run(stream, { text -> main.post { onPartial(text) } }, { cancelled.get() }))
+        }
         return try {
-            val result = withContext(Dispatchers.IO) {
-                LocalListening(session).run(stream, { text -> main.post { onPartial(text) } }, { cancelled.get() })
+            // Only a guard: the end of speech ends a normal utterance. A microphone that delivers
+            // nothing for a while is stuck, not quiet (quiet audio still arrives).
+            while (!done.isCompleted) {
+                withTimeoutOrNull(1_000) { done.await() }
+                val silentMs = (System.nanoTime() - listening.lastAudioNanos) / 1_000_000
+                if (SystemClock.elapsedRealtime() - started > LISTEN_LIMIT || silentMs > MIC_STALL_MS) {
+                    Log.w(TAG, "on-device dictation: the microphone stalled or ran past the limit, stopping")
+                    cancelled.set(true)
+                    stream.stop()
+                    break
+                }
             }
+            val result = withTimeoutOrNull(5_000) { done.await() } ?: LocalResult.Cancelled
+            Log.i(TAG, "on-device dictation: ${result.javaClass.simpleName} after ${SystemClock.elapsedRealtime() - started} ms, ${listening.bytesRead / 32} ms of audio" + ((result as? LocalResult.Text)?.let { ", ${it.text.length} chars" } ?: ""))
             when (result) {
                 is LocalResult.Text -> result.text.takeIf { it.isNotBlank() }?.let { Heard.Words(it) } ?: Heard.Silence
                 LocalResult.Cancelled -> Heard.Silence
@@ -305,7 +324,8 @@ class CarVoice(
             }
         } finally {
             cancelListening = null
-            session.close()
+            // The native session can't be closed under a feed still running (a stuck microphone read).
+            if (done.isCompleted) session.close()
         }
     }
 
@@ -464,6 +484,8 @@ class CarVoice(
         /** No word from the engine for this long: it is stuck, not slow. */
         private const val STALL_MS = 30_000L
         private const val MAX_HINTS = 50
+        /** No audio at all from the microphone for this long: it is stuck. */
+        private const val MIC_STALL_MS = 10_000L
     }
 }
 

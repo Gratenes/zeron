@@ -572,3 +572,7 @@ imply affiliation with or endorsement by those owners.
 (`apps/zgx/ui/assets/art/clouds-*.png`, `plate-*.jpg`) and
 `apps/zgx/ui/assets/favicons/ios.png` are original Zeron artwork, not
 third-party material.
+
+### Android Auto dictation (Parakeet Unified)
+
+Licensed by NVIDIA Corporation under the NVIDIA Open Model License. NVIDIA Parakeet Unified 0.6B (EN) weights are by NVIDIA (https://huggingface.co/nvidia/parakeet-unified-en-0.6b, NVIDIA Open Model License: https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/). The optional on-device download is the INT8 ONNX conversion `bobNight/parakeet-unified-en-0.6b-onnx` (card: CC-BY-4.0), pinned to revision `09e9060322d99c5f070010724786e6ee090fd51d` with per-file SHA-256 verification; it is a conversion and quantization of NVIDIA's model, not a fine-tune. Zeron does not include the weights in the app. Runtime: parakeet-rs 0.3.8 and ort 2.0.0-rc.13 (MIT OR Apache-2.0), jni 0.21 (MIT OR Apache-2.0), ONNX Runtime 1.32.0 (MIT). See `docs/reference/android-car-dictation.md`.

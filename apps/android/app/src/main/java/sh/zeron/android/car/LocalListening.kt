@@ -33,6 +33,14 @@ class LocalListening(
     /** A guard like the Android path's: the end of speech ends a normal utterance, this a stuck one. */
     private val limitBytes: Long = LIMIT_BYTES,
 ) {
+    /** When audio last arrived (System.nanoTime), or when listening began: a silent microphone is a stuck one. */
+    @Volatile var lastAudioNanos: Long = System.nanoTime()
+        private set
+
+    /** Bytes of audio read so far (for logs: how much a microphone really delivered). */
+    @Volatile var bytesRead: Long = 0
+        private set
+
     fun run(stream: AudioStream, onPartial: (String) -> Unit, cancelled: () -> Boolean): LocalResult {
         var lastPartial: String? = null
         try {
@@ -44,7 +52,9 @@ class LocalListening(
                 val n = stream.read(read, 0, read.size)
                 if (n < 0) break
                 if (n > 0) {
+                    lastAudioNanos = System.nanoTime()
                     total += n
+                    bytesRead = total
                     System.arraycopy(read, 0, step, filled, n)
                     filled += n
                     if (filled >= stepBytes) {

@@ -94,4 +94,20 @@ class LocalAsrDeviceTest {
         assertEquals("", transcribe(asr, ByteArray(0)))
         transcribe(asr, ByteArray(300)) // under one frame: no crash, whatever it says
     }
+
+    /** The whole production path: download all four files from Hugging Face (about 654 MB), verify, load, decode.
+     *  Run with `-e full true`. */
+    @Test
+    fun theWholeModelDownloadsVerifiesAndDecodes() = runBlocking<Unit> {
+        assumeTrue("pass -e full true", InstrumentationRegistry.getArguments().getString("full") == "true")
+        val dir = File(context.filesDir, "downloaded-model").apply { deleteRecursively() }
+        val model = LocalModel(dir)
+        val started = System.nanoTime()
+        model.download()
+        android.util.Log.i("ZeronCar", "downloaded the model in ${(System.nanoTime() - started) / 1_000_000_000} s")
+        assertTrue(model.isReady())
+        val text = transcribe(LocalAsr(context, model), clip("plain.wav")).lowercase()
+        assertTrue("final text: $text", text.contains("main branch"))
+        dir.deleteRecursively()
+    }
 }

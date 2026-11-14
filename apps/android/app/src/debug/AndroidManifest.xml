@@ -30,6 +30,7 @@
             <intent-filter>
                 <action android:name="sh.zeron.android.TEST_CAR_REPORT" />
                 <action android:name="sh.zeron.android.TEST_CAR_SPEAK" />
+                <action android:name="sh.zeron.android.TEST_CAR_ENGINE" />
                 <action android:name="sh.zeron.android.TEST_CAR_MUSIC" />
                 <action android:name="sh.zeron.android.TEST_CAR_REPLY" />
             </intent-filter>
