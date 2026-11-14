@@ -343,6 +343,18 @@ pub mod methods {
     /// the harness's saved accounts) on or off for this device. Answers the
     /// device's `AgentAccountsSnapshot`.
     pub const SET_AGENT_ACCOUNT_ROTATION: &str = "SetAgentAccountRotation";
+    /// `{harness, provider, key}`: an API key for one model provider of an
+    /// agent that keeps a login per provider (Pi, OpenCode, Hermes), checked
+    /// with the provider and stored as the agent's own CLI stores it. This
+    /// device's own IPC only ([`local_only`]): never forwarded to, or
+    /// accepted from, another device — the key goes nowhere but its agent's
+    /// store and its provider. Answers the snapshot (keys shown by their
+    /// last four characters).
+    pub const ADD_AGENT_API_KEY: &str = "AddAgentApiKey";
+    /// `{harness, accountId, name}`: an API key's name (no secret: it
+    /// travels to the device that holds the key like any account action).
+    /// An empty name restores its default ("OpenRouter ···a1b2").
+    pub const RENAME_AGENT_ACCOUNT: &str = "RenameAgentAccount";
     pub const START_AGENT_LOGIN: &str = "StartAgentLogin";
     /// `{loginId, requesterDeviceId, path}`: replay a sign-in's browser
     /// callback the requesting device caught on its own loopback (a phone
@@ -704,6 +716,8 @@ pub fn local_only(method: &str) -> bool {
         method,
         methods::ACCESS_TOKEN
             | methods::STEP_UP
+            // An API key typed into this device's app: stored here alone.
+            | methods::ADD_AGENT_API_KEY
             | methods::DELETE_ACCOUNT
             | methods::REVIEW_TEMPLATE
             // Plugins: authoring, tools and the window's channel stay this
