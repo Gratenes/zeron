@@ -40,33 +40,41 @@ internal class CarNotifications(context: Context) {
      * notifications are off, so the caller can speak it itself.
      */
     fun post(report: Report): Boolean {
-        if (!manager.areNotificationsEnabled()) {
-            Log.w(TAG, "notifications are off: report for ${report.chatId} not posted")
-            return false
-        }
-        val title = when (report.kind) {
+        val header = when (report.kind) {
             ReportKind.Finished -> "${report.title} is done"
             ReportKind.NeedsInput -> "${report.title} needs you"
             ReportKind.Failed -> "${report.title} failed"
         }
-        val body = CarMessaging.body(report)
-        val agent = Person.Builder().setName(report.title).setKey(report.chatId).setBot(true).build()
+        return notify(report.chatId, report.title, header, CarMessaging.body(report), report.createdAtMs)
+    }
+
+    /** A dictated reply that didn't go through, said in the same conversation (so it can be retried). */
+    fun failed(chatId: String, title: String, message: String) {
+        notify(chatId, title, "Reply not sent", "Your reply wasn't sent. $message", System.currentTimeMillis())
+    }
+
+    private fun notify(chatId: String, title: String, header: String, body: String, atMs: Long): Boolean {
+        if (!manager.areNotificationsEnabled()) {
+            Log.w(TAG, "notifications are off: report for $chatId not posted")
+            return false
+        }
+        val agent = Person.Builder().setName(title).setKey(chatId).setBot(true).build()
         val style = NotificationCompat.MessagingStyle(Person.Builder().setName("You").build())
-            .setConversationTitle(report.title)
+            .setConversationTitle(title)
             .setGroupConversation(false)
-            .addMessage(body, report.createdAtMs.takeIf { it > 0 } ?: System.currentTimeMillis(), agent)
-        val reply = NotificationCompat.Action.Builder(R.drawable.ic_car_mic, "Reply", service(report.chatId, CarReplyService.ACTION_REPLY, mutable = true))
+            .addMessage(body, atMs.takeIf { it > 0 } ?: System.currentTimeMillis(), agent)
+        val reply = NotificationCompat.Action.Builder(R.drawable.ic_car_mic, "Reply", service(chatId, CarReplyService.ACTION_REPLY, mutable = true))
             .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
             .setShowsUserInterface(false)
-            .addRemoteInput(RemoteInput.Builder(CarMessaging.REPLY_KEY).setLabel("Reply to ${report.title}").build())
+            .addRemoteInput(RemoteInput.Builder(CarMessaging.REPLY_KEY).setLabel("Reply to $title").build())
             .build()
-        val read = NotificationCompat.Action.Builder(R.drawable.ic_car_mic, "Mark as read", service(report.chatId, CarReplyService.ACTION_MARK_READ, mutable = false))
+        val read = NotificationCompat.Action.Builder(R.drawable.ic_car_mic, "Mark as read", service(chatId, CarReplyService.ACTION_MARK_READ, mutable = false))
             .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
             .setShowsUserInterface(false)
             .build()
         val notification = NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.zi_microphone)
-            .setContentTitle(title)
+            .setContentTitle(header)
             .setContentText(Spoken.summary(body, 120))
             .setStyle(style)
             .addAction(reply)
@@ -77,25 +85,12 @@ internal class CarNotifications(context: Context) {
             .setOnlyAlertOnce(false)
             // On the phone itself it just opens the app.
             .setContentIntent(
-                PendingIntent.getActivity(context, report.chatId.hashCode(), Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE),
+                PendingIntent.getActivity(context, chatId.hashCode(), Intent(context, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE),
             )
             .build()
-        return runCatching { manager.notify(TAG_NOTIFICATION, report.chatId.hashCode(), notification) }
+        return runCatching { manager.notify(TAG_NOTIFICATION, chatId.hashCode(), notification) }
             .onFailure { Log.w(TAG, "report notification failed", it) }
             .isSuccess
-    }
-
-    /** A dictated reply that didn't go through, said where the driver will see it. */
-    fun failed(chatId: String, message: String) {
-        if (!manager.areNotificationsEnabled()) return
-        val notification = NotificationCompat.Builder(context, CHANNEL)
-            .setSmallIcon(R.drawable.zi_microphone)
-            .setContentTitle("Reply not sent")
-            .setContentText(message)
-            .setCategory(NotificationCompat.CATEGORY_ERROR)
-            .setAutoCancel(true)
-            .build()
-        runCatching { manager.notify(TAG_NOTIFICATION, chatId.hashCode(), notification) }
     }
 
     /** Fired by Android Auto: the reply (with its dictated text) or the mark-as-read. */
