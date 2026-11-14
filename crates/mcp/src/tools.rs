@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeron_doc::{SessionCommandPayload, TranscriptWindow};
 use zeron_proto::{
-    AccessMode, Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
-    Space, UserInputAnswer,
+    AccessMode, Chat, ChatConfig, HarnessId, Model, ModelOption, ModelOptionChoice, ReasoningLevel, RunRequest,
+    SandboxLevel, Session, SessionStatus, Space, UserInputAnswer,
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
@@ -114,7 +114,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_models",
-            description: "Models a harness offers on the chosen device (local engine when omitted). Model ids are harness-specific strings; pass one to create_chat.",
+            description: "Models a harness offers on the chosen device (local engine when omitted). Model ids are harness-specific strings; pass one to create_chat. Each model lists its `options` (e.g. contextWindow 200k/1m, fastMode off/on) with the choice ids and `defaultChoice`; pass the ones you want as create_chat's `options`. `default` marks the model a chat without `model` runs.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -156,6 +156,7 @@ fn catalog() -> Vec<ToolDef> {
                     "harness": { "type": "string", "description": "Harness id (see list_harnesses with the chosen device). Prefers a connected provider, claude-code first." },
                     "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
+                    "options": { "type": "object", "additionalProperties": { "type": ["string", "boolean"] }, "description": "Model options by option id, each a choice id from the model's `options` in list_models, e.g. {\"contextWindow\": \"1m\"} or {\"fastMode\": \"on\"} (true/false also work for on/off options). Options left out keep the model's default. Validated against the model's catalog (the harness default model when `model` is omitted); not available with cloud." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "description": "Never wider than the sandbox of the chat you are speaking from: more is lowered to it (accessCapped)." },
                     "access": { "type": "string", "enum": ["supervised", "auto-accept-edits", "full-access"], "description": "What the agent may do without asking: supervised asks before commands and file changes, auto-accept-edits applies edits and asks before the rest, full-access asks nothing. Questions go to the person in the chat. Must be one of the harness's accessModes (list_harnesses). Defaults to the access of the chat you are speaking from, and never exceeds it: more is lowered to it (the reply's accessCapped says so)." },
                     "plan": { "type": "boolean", "default": false, "description": "Plan mode: explore and propose a plan before changing anything. Only for harnesses with supportsPlan." },
@@ -726,6 +727,8 @@ struct CreateChatArgs {
     harness: Option<String>,
     model: Option<String>,
     reasoning: Option<String>,
+    /// Model option id -> choice id (see `list_models`).
+    options: Option<serde_json::Map<String, Value>>,
     sandbox: Option<String>,
     access: Option<String>,
     #[serde(default)]
@@ -815,6 +818,126 @@ struct RespondArgs {
 struct AnswerArg {
     question_id: String,
     labels: Vec<String>,
+}
+
+/// The catalog as an agent should see it. A Claude `<model>[1m]` row is the
+/// same model with the 1M Context Window the pickers fold into a select; as a
+/// row of its own it reads like a second model, often with the raw id as its
+/// label. Fold it into its base (which gains the Context Window option), or,
+/// with no base listed, present it as the base.
+fn fold_long_context(models: Vec<Model>) -> Vec<Model> {
+    let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
+    let mut folded: Vec<Model> = Vec::with_capacity(models.len());
+    let mut long: Vec<Model> = Vec::new();
+    for mut model in models {
+        match model.id.strip_suffix("[1m]").map(str::to_owned) {
+            Some(base) if ids.contains(&base) => long.push(Model { id: base, ..model }),
+            Some(base) => {
+                if model.label == model.id {
+                    model.label = base.clone();
+                }
+                model.id = base;
+                folded.push(model);
+            }
+            None => folded.push(model),
+        }
+    }
+    for row in long {
+        if let Some(base) = folded.iter_mut().find(|m| m.id == row.id) {
+            base.default |= row.default;
+            if row.description.is_some() && base.description.is_none() {
+                base.description = row.description;
+            }
+        }
+    }
+    for model in &mut folded {
+        let has_variant = ids.contains(&format!("{}[1m]", model.id));
+        let listed_as_variant = !ids.contains(&model.id);
+        if (has_variant || listed_as_variant) && !model.options.iter().any(|o| o.id == "contextWindow") {
+            model.options.push(ModelOption {
+                id: "contextWindow".into(),
+                label: "Context Window".into(),
+                choices: vec![
+                    ModelOptionChoice { id: "200k".into(), label: "200K".into() },
+                    ModelOptionChoice { id: "1m".into(), label: "1M".into() },
+                ],
+                default_choice: "200k".into(),
+            });
+        }
+    }
+    folded
+}
+
+/// Check `asked` (option id -> choice id) against the catalog row of `model`
+/// (the default row when `model` is omitted) and return the model to store
+/// and the option selections as the pickers store them. A leftover
+/// `<model>[1m]` id means the base model with `contextWindow` 1m.
+fn resolve_model_options(
+    models: &[Model],
+    model: Option<&str>,
+    asked: &serde_json::Map<String, Value>,
+) -> Result<(Option<String>, serde_json::Map<String, Value>), String> {
+    let mut model = model.map(str::to_owned);
+    let mut chosen = serde_json::Map::new();
+    if let Some(id) = model.as_deref()
+        && !models.iter().any(|m| m.id == id)
+        && let Some(base) = id.strip_suffix("[1m]")
+        && models.iter().any(|m| m.id == base)
+    {
+        chosen.insert("contextWindow".into(), json!("1m"));
+        model = Some(base.to_owned());
+    }
+    let implied = chosen.get("contextWindow").cloned();
+    if asked.is_empty() {
+        return Ok((model, chosen));
+    }
+    let row = match model.as_deref() {
+        Some(id) => models.iter().find(|m| m.id == id),
+        None => models.iter().find(|m| m.default).or(models.first()),
+    }
+    .ok_or("options need a model to check them against, and the catalog lists none")?;
+    for (key, value) in asked {
+        let option = row.options.iter().find(|o| o.id == *key).ok_or_else(|| {
+            format!(
+                "model {:?} has no option {key:?}; {}",
+                row.id,
+                if row.options.is_empty() {
+                    "it has no options".to_owned()
+                } else {
+                    format!("its options: {}", row.options.iter().map(|o| o.id.as_str()).collect::<Vec<_>>().join(", "))
+                }
+            )
+        })?;
+        let wanted = match value {
+            Value::String(text) => text.trim().to_owned(),
+            Value::Bool(on) => (if *on { "on" } else { "off" }).to_owned(),
+            other => {
+                return Err(format!("option {key:?} takes a choice id (string), not {other}"));
+            }
+        };
+        let choice = option
+            .choices
+            .iter()
+            .find(|c| c.id.eq_ignore_ascii_case(&wanted) || c.label.eq_ignore_ascii_case(&wanted))
+            .ok_or_else(|| {
+                format!(
+                    "option {key:?} of model {:?} has no choice {wanted:?}; choices: {}",
+                    row.id,
+                    option.choices.iter().map(|c| c.id.as_str()).collect::<Vec<_>>().join(", ")
+                )
+            })?;
+        if key == "contextWindow"
+            && implied.as_ref().is_some_and(|v| v.as_str() != Some(choice.id.as_str()))
+        {
+            return Err(format!(
+                "model id {:?} means contextWindow 1m, but options asks for {:?}",
+                format!("{}[1m]", row.id),
+                choice.id
+            ));
+        }
+        chosen.insert(key.clone(), json!(choice.id));
+    }
+    Ok((model, chosen))
 }
 
 fn parse<T: serde::de::DeserializeOwned>(args: Value) -> Result<T, String> {
@@ -1152,14 +1275,16 @@ impl Tools {
             Some(key) => Some(self.zeron.resolve_device_id(Some(key)).await?),
             None => None,
         };
-        let models = self.zeron.models_on(harness, device.as_deref()).await?;
+        let models = fold_long_context(self.zeron.models_on(harness, device.as_deref()).await?);
         Ok(json!({
             "harness": harness,
             "models": models.iter().map(|m| json!({
                 "id": m.id,
                 "label": m.label,
                 "description": m.description,
+                "default": m.default,
                 "reasoningLevels": m.reasoning_levels,
+                "options": m.options,
             })).collect::<Vec<_>>()
         }))
     }
@@ -1319,18 +1444,30 @@ impl Tools {
             None => default_harness(&harnesses).with_context(|| format!("device {device_id}"))?,
         };
         // A Cloud machine's catalog is checked when it runs, not here.
-        if let Some(model) = args.model.as_deref().filter(|_| !args.cloud) {
-            let models = self.zeron.models_on(harness, Some(&device_id)).await?;
-            anyhow::ensure!(
-                models.iter().any(|m| m.id == model),
-                "model {model:?} is not offered by {harness:?} on device {device_id}; available: {}",
-                models
-                    .iter()
-                    .map(|m| m.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
+        let asked_options = args.options.clone().unwrap_or_default();
+        anyhow::ensure!(
+            asked_options.is_empty() || !args.cloud,
+            "options are checked against a model catalog, which a Cloud chat's machine only has when it runs; leave options out for cloud"
+        );
+        let (model, model_options) = if args.cloud {
+            (args.model.clone(), Default::default())
+        } else {
+            let raw = self.zeron.models_on(harness, Some(&device_id)).await?;
+            let models = fold_long_context(raw.clone());
+            if let Some(model) = args.model.as_deref() {
+                anyhow::ensure!(
+                    models.iter().chain(&raw).any(|m| m.id == model),
+                    "model {model:?} is not offered by {harness:?} on device {device_id}; available: {}",
+                    models
+                        .iter()
+                        .map(|m| m.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            resolve_model_options(&models, args.model.as_deref(), &asked_options)
+                .map_err(|error| anyhow::anyhow!("{error} (harness {harness:?}, device {device_id})"))?
+        };
         let reasoning: Option<ReasoningLevel> = match args.reasoning.as_deref() {
             Some(raw) => Some(parse_enum("reasoning level", raw).map_err(anyhow::Error::msg)?),
             None => None,
@@ -1374,9 +1511,9 @@ impl Tools {
         }
         let config = ChatConfig {
             harness,
-            model: args.model.clone(),
+            model: model.clone(),
             reasoning,
-            model_options: Default::default(),
+            model_options: model_options.clone(),
             sandbox,
             access,
             plan: args.plan,
@@ -1471,7 +1608,8 @@ impl Tools {
             "deviceId": device_id,
             "project": space.as_ref().map(|s| json!({ "id": s.id, "name": s.display_name(), "path": s.path })),
             "harness": harness,
-            "model": args.model,
+            "model": model,
+            "options": model_options,
             "reasoning": reasoning,
             "title": args.title,
             "parentChatId": parent_chat_id,
@@ -2275,6 +2413,8 @@ mod tests {
         reads: Mutex<Vec<(String, Value)>>,
         /// `DeviceStats` reply; absent = an engine without the method.
         stats: Option<Value>,
+        /// The local `ListModels` reply, in place of the plain opus/sonnet.
+        models: Option<Value>,
     }
 
     /// Whether the newest write was this `Mutate` op.
@@ -2390,9 +2530,9 @@ mod tests {
                 methods::LIST_MODELS if remote => RpcReply::Value(json!([
                     {"id":"remote-model", "label":"Remote model"}
                 ])),
-                methods::LIST_MODELS => RpcReply::Value(json!([
+                methods::LIST_MODELS => RpcReply::Value(self.models.clone().unwrap_or_else(|| json!([
                     { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
-                ])),
+                ]))),
                 methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [
                     { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
                       "parts": [{ "kind": "text", "id": "t", "text": "hi" }] },
@@ -3516,6 +3656,103 @@ mod tests {
             );
             assert!(broken.writes.lock().unwrap().is_empty());
         }
+    }
+
+    fn option_world() -> Arc<World> {
+        let toggle = |id: &str| json!({"id": id, "label": id, "defaultChoice": "off",
+            "choices": [{"id":"off","label":"Off"},{"id":"on","label":"On"}]});
+        let window = json!({"id":"contextWindow","label":"Context Window","defaultChoice":"200k",
+            "choices":[{"id":"200k","label":"200K"},{"id":"1m","label":"1M"}]});
+        Arc::new(World {
+            models: Some(json!([
+                { "id": "claude-opus-5-5", "label": "Opus 5.5", "default": true,
+                  "options": [window, toggle("fastMode")] },
+                // The CLI's own row for the long-context window: raw id as its label.
+                { "id": "claude-opus-5-5[1m]", "label": "claude-opus-5-5[1m]" },
+                { "id": "claude-sonnet-5-5", "label": "Sonnet 5.5" },
+                { "id": "claude-fable-5-2[1m]", "label": "claude-fable-5-2[1m]" }
+            ])),
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn list_models_shows_options_and_folds_long_context_rows() {
+        let tools = tools(option_world(), Origin::default());
+        let listed = tools.call("list_models", json!({"harness":"claude-code"})).await.unwrap();
+        let models = listed["models"].as_array().unwrap();
+        let ids: Vec<_> = models.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        // No `[1m]` twin of opus; fable, listed only as `[1m]`, reads as itself.
+        assert_eq!(ids, ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-2"]);
+        let opus = &models[0];
+        assert_eq!(opus["default"], true);
+        assert_eq!(opus["options"][0]["id"], "contextWindow");
+        assert_eq!(opus["options"][0]["choices"][1]["id"], "1m");
+        assert_eq!(opus["options"][0]["defaultChoice"], "200k");
+        assert_eq!(opus["options"][1]["id"], "fastMode");
+        // Sonnet has no 1M row: no Context Window option invented for it.
+        assert_eq!(models[1]["options"], json!([]));
+        assert_eq!(models[2]["label"], "claude-fable-5-2");
+        assert_eq!(models[2]["options"][0]["id"], "contextWindow");
+    }
+
+    #[tokio::test]
+    async fn create_chat_options_are_validated_and_stored_as_the_pickers_do() {
+        let world = option_world();
+        let tools = tools(world.clone(), Origin::default());
+        let created = tools
+            .call(
+                "create_chat",
+                json!({"model":"claude-opus-5-5", "options": {"contextWindow":"1M", "fastMode": true}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["options"], json!({"contextWindow":"1m", "fastMode":"on"}));
+        {
+            let writes = world.writes.lock().unwrap();
+            assert_eq!(writes[0].1["config"]["model"], "claude-opus-5-5");
+            assert_eq!(
+                writes[0].1["config"]["modelOptions"],
+                json!({"contextWindow":"1m", "fastMode":"on"})
+            );
+        }
+        world.writes.lock().unwrap().clear();
+
+        // Without a model, options check against the default model.
+        let created = tools.call("create_chat", json!({"options": {"contextWindow":"200k"}})).await.unwrap();
+        assert_eq!(created["options"], json!({"contextWindow":"200k"}));
+        // A leftover `[1m]` id is the base model at 1M.
+        let created = tools.call("create_chat", json!({"model":"claude-opus-5-5[1m]"})).await.unwrap();
+        assert_eq!(created["model"], "claude-opus-5-5");
+        assert_eq!(created["options"], json!({"contextWindow":"1m"}));
+        world.writes.lock().unwrap().clear();
+
+        for (args, wants) in [
+            (json!({"model":"claude-sonnet-5-5", "options":{"contextWindow":"1m"}}), "has no option \"contextWindow\"; it has no options"),
+            (json!({"model":"claude-opus-5-5", "options":{"contextWindow":"2m"}}), "has no choice \"2m\"; choices: 200k, 1m"),
+            (json!({"model":"claude-opus-5-5", "options":{"zoom":"1m"}}), "its options: contextWindow, fastMode"),
+            (json!({"model":"claude-opus-5-5", "options":{"fastMode": 3}}), "takes a choice id"),
+            (json!({"model":"claude-opus-5-5[1m]", "options":{"contextWindow":"200k"}}), "means contextWindow 1m"),
+            (json!({"cloud": true, "options":{"contextWindow":"1m"}}), "leave options out for cloud"),
+        ] {
+            let error = tools.call("create_chat", args).await.unwrap_err();
+            assert!(error.contains(wants), "{error}");
+        }
+        assert!(world.writes.lock().unwrap().is_empty(), "a refused request writes nothing");
+
+        // create_chats takes the same options, each request checked on its own.
+        let batch = tools
+            .call(
+                "create_chats",
+                json!({"requests":[
+                    {"model":"claude-opus-5-5", "options":{"contextWindow":"1m"}},
+                    {"model":"claude-opus-5-5", "options":{"contextWindow":"9m"}}
+                ]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(batch["results"][0]["result"]["options"], json!({"contextWindow":"1m"}));
+        assert!(batch["results"][1]["error"].as_str().unwrap().contains("no choice"), "{batch}");
     }
 
     #[tokio::test]
