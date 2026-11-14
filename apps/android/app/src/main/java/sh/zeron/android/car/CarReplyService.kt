@@ -62,7 +62,7 @@ class CarReplyService : Service() {
                 model.car.follow(result.chatId)
                 notifications.cancel(result.chatId)
             }
-            is CarMessaging.Result.Failed -> if (chatId != null) notifications.failed(chatId, result.message)
+            is CarMessaging.Result.Failed -> if (chatId != null) notifications.failed(chatId, model.row(chatId)?.title ?: "Zeron", result.message)
             CarMessaging.Result.Nothing -> Unit
         }
     }

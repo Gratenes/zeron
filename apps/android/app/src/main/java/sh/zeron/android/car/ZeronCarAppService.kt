@@ -305,9 +305,9 @@ class CarSession : Session() {
         if (model.voice.live) return
         if (!onScreen) {
             // Off Zeron's screen: a notification to come back to (and no microphone opening over Maps).
-            // Posted, Assistant reads it aloud: don't say it twice.
-            val posted = follows(report) && notifications.post(report)
-            if (!posted) voice.speak(report.spoken)
+            // The card offers Play aloud and a spoken Reply (Assistant); the report is announced anyway.
+            if (follows(report)) notifications.post(report)
+            voice.speak(report.spoken)
             return
         }
         if (!report.orchestrator) alert(report)
