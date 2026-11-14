@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.ParcelFileDescriptor
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -116,9 +117,14 @@ class CarVoice(
         val language = engine.setLanguage(Locale.getDefault())
         if (language < TextToSpeech.LANG_AVAILABLE) Log.w(TAG, "text-to-speech has no ${Locale.getDefault()} voice ($language)")
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) = Unit
+            override fun onStart(utteranceId: String?) {
+                progressAt = SystemClock.elapsedRealtime()
+            }
+
             override fun onDone(utteranceId: String?) {
-                speaking?.complete(Unit)
+                progressAt = SystemClock.elapsedRealtime()
+                // Earlier pieces ending is no end: focus stays held until the last.
+                if (utteranceId == lastPiece) speaking?.complete(Unit)
             }
 
             @Deprecated("Deprecated in Java")
@@ -140,9 +146,37 @@ class CarVoice(
         return engine
     }
 
+    /** One focus for the whole readback: see [SpeechFocus]. */
+    private val speechFocus: SpeechFocus<AudioFocusRequest> = SpeechFocus(
+        acquire = { pause ->
+            focus(
+                if (pause) AudioManager.AUDIOFOCUS_GAIN_TRANSIENT else AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
+                if (pause) loud else attributes,
+            ) {
+                tts?.stop()
+                speaking?.complete(Unit)
+                speechFocus.drop()
+            }
+        },
+        abandon = { audio.abandonAudioFocusRequest(it) },
+        later = { delayMs, block ->
+            val run = Runnable(block)
+            main.postDelayed(run, delayMs)
+            val cancel: () -> Unit = { main.removeCallbacks(run) }
+            cancel
+        },
+    )
+
+    /** The last piece being said: its end is the reply's end. */
+    @Volatile private var lastPiece: String? = null
+    /** When the engine last reported progress (a piece started or ended). */
+    @Volatile private var progressAt = 0L
+
     /**
      * Say [text] over ducked media; returns once it was said (or stopped):
-     * true, or false when the phone's text-to-speech couldn't say it.
+     * true, or false when the phone's text-to-speech couldn't say it. The
+     * text goes to the engine in pieces and audio focus is held from the
+     * first to the last, however long the engine takes between pieces.
      */
     suspend fun speak(text: String): Boolean {
         if (text.isBlank()) return true
@@ -157,22 +191,35 @@ class CarVoice(
             speaking = done
             val pause = pausesMusic()
             engine.setAudioAttributes(if (pause) loud else attributes)
-            val gain = if (pause) AudioManager.AUDIOFOCUS_GAIN_TRANSIENT else AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
-            val focus = focus(gain, if (pause) loud else attributes) { engine.stop(); done.complete(Unit) }
-            if (focus == null) Log.w(TAG, "speaking without audio focus")
+            speechFocus.hold(pause)
+            if (!speechFocus.isHeld) Log.w(TAG, "speaking without audio focus")
             try {
-                // An engine that refuses the text never calls back: don't wait on it.
-                val queued = engine.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), UUID.randomUUID().toString())
-                if (queued != TextToSpeech.SUCCESS) {
-                    Log.w(TAG, "text-to-speech refused ${text.length} chars ($queued)")
-                    return@withLock false
+                val ids = speechPieces(text).map { UUID.randomUUID().toString() to it }
+                lastPiece = ids.last().first
+                progressAt = SystemClock.elapsedRealtime()
+                for ((i, piece) in ids.withIndex()) {
+                    // An engine that refuses the text never calls back: don't wait on it.
+                    val queued = engine.speak(piece.second, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, Bundle(), piece.first)
+                    if (queued != TextToSpeech.SUCCESS) {
+                        Log.w(TAG, "text-to-speech refused ${piece.second.length} chars ($queued)")
+                        return@withLock false
+                    }
                 }
-                // Long replies are cut by the caller; this only guards a stuck engine.
-                withTimeoutOrNull(60_000) { done.await() } != null && !failed
+                // Only a silent engine ends the wait early: a slow gap between pieces
+                // (a network voice on mobile data) keeps focus and keeps waiting.
+                while (!done.isCompleted) {
+                    withTimeoutOrNull(1_000) { done.await() }
+                    if (SystemClock.elapsedRealtime() - progressAt > STALL_MS) {
+                        Log.w(TAG, "text-to-speech stalled")
+                        return@withLock false
+                    }
+                }
+                !failed
             } finally {
                 engine.stop()
                 speaking = null
-                focus?.let(audio::abandonAudioFocusRequest)
+                lastPiece = null
+                speechFocus.settle()
             }
         }
     }
@@ -180,6 +227,7 @@ class CarVoice(
     fun stopSpeaking() {
         tts?.stop()
         speaking?.complete(Unit)
+        speechFocus.drop()
     }
 
     // ── listening ───────────────────────────────────────────────────────────
@@ -192,6 +240,7 @@ class CarVoice(
     suspend fun listen(microphone: (() -> AudioStream?)?, hints: List<String> = emptyList(), onPartial: (String) -> Unit = {}): Heard = turn.withLock {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) return@withLock Heard.NoRecognizer
         var lost = false
+        speechFocus.drop()
         val focus = focus(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE) { lost = true; cancel() }
         try {
             chime(startSound)
@@ -221,8 +270,8 @@ class CarVoice(
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1_500L)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1_200L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2_500L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2_000L)
         // Words the driver is likely to say ("Zeron", agent titles) that a general model mishears.
         if (hints.isNotEmpty() && Build.VERSION.SDK_INT >= 33) {
             putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, ArrayList(hints.take(MAX_HINTS)))
@@ -308,7 +357,7 @@ class CarVoice(
 
                         override fun onResults(results: Bundle?) {
                             // Some recognizers deliver the final text as the last partial and an empty bundle here.
-                            finish((best(results) ?: lastPartial)?.let { Heard.Words(it) } ?: Heard.Silence)
+                            finish(heardText(best(results), lastPartial)?.let { Heard.Words(it) } ?: Heard.Silence)
                         }
 
                         override fun onError(error: Int) {
@@ -322,7 +371,8 @@ class CarVoice(
                                 error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
                                 error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ||
                                 error == SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT
-                            finish(if (onDevice && unsupported && !heardAnything) null else Heard.Silence)
+                            // Words already recognized aren't thrown away by a late error (a timeout after a pause).
+                            finish(if (onDevice && unsupported && !heardAnything) null else lastPartial?.let { Heard.Words(it) } ?: Heard.Silence)
                         }
                     })
                     recognizer.startListening(recognizerIntent(pipe?.get(0), hints))
@@ -353,10 +403,26 @@ class CarVoice(
     companion object {
         private const val TAG = "ZeronCar"
         private const val BUFFER = 512
-        private const val LISTEN_LIMIT = 20_000L
-        private const val RESULT_GRACE = 2_500L
+        /** Only a guard: the end of speech, not this, ends a normal reply (a long one takes a minute). */
+        private const val LISTEN_LIMIT = 90_000L
+        /** The final text can take a few seconds after a long utterance; the last partial is cut short. */
+        private const val RESULT_GRACE = 8_000L
+        /** No word from the engine for this long: it is stuck, not slow. */
+        private const val STALL_MS = 30_000L
         private const val MAX_HINTS = 50
     }
+}
+
+/**
+ * The text of one recognition: the final result, unless the last partial says
+ * more (a final cut short), else the partial; null when neither has words.
+ */
+internal fun heardText(final: String?, lastPartial: String?): String? {
+    val f = final?.trim()?.takeIf { it.isNotEmpty() }
+    val p = lastPartial?.trim()?.takeIf { it.isNotEmpty() }
+    if (f == null) return p
+    if (p != null && p.length > f.length && p.startsWith(f, ignoreCase = true)) return p
+    return f
 }
 
 /**
@@ -364,7 +430,7 @@ class CarVoice(
  * after speech, or [waitMs] without any. Speech is well above the noise floor
  * (tracked while quiet), so road noise doesn't hold the microphone open.
  */
-class Endpointer(private val silenceMs: Int = 1_200, private val waitMs: Int = 7_000) {
+class Endpointer(private val silenceMs: Int = SILENCE_MS, private val waitMs: Int = WAIT_MS) {
     private var floor = -1.0
     private var elapsedMs = 0.0
     private var quietMs = 0.0
@@ -395,7 +461,10 @@ class Endpointer(private val silenceMs: Int = 1_200, private val waitMs: Int = 7
         return if (spoke) quietMs >= silenceMs else elapsedMs >= waitMs
     }
 
-    private companion object {
-        const val MIN_SPEECH = 500.0
+    companion object {
+        /** A driver pauses to think mid-sentence: only a long quiet ends the reply. */
+        const val SILENCE_MS = 2_200
+        const val WAIT_MS = 8_000
+        private const val MIN_SPEECH = 500.0
     }
 }

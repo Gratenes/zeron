@@ -42,6 +42,8 @@ data class CarAgent(
     val lastActivityMs: Long,
     /** When the running turn started (Working or waiting for an answer). */
     val workingSinceMs: Long?,
+    /** Its place among the pinned chats (the desktop and phone sidebar's "Pinned"), or null when not pinned. */
+    val pinRank: Int? = null,
 )
 
 /** A project (or a computer's home) the car groups chats under, like the drawer's project picker. */
@@ -125,10 +127,12 @@ class CarAgents(app: Application, private val model: AppModel) {
         val orchestrator = orchestratorId
         // Checkouts of one repository on several computers share a name: those folders say where.
         val clashing = rows.mapNotNull { it.project }.distinctBy { it.id }.groupBy { it.name }.filterValues { it.size > 1 }.keys
+        // The sidebar's pin order, so favorites read the same as there.
+        val pinRanks = ws.front.pinned.withIndex().associate { (i, row) -> row.id to i }
         _agents.value = rows.filter { it.id != orchestrator }
             // Newest activity first, like the drawer.
             .sortedByDescending { it.lastActivityMs }
-            .map { agent(it, clashing) }
+            .map { agent(it, clashing, pinRanks[it.id]) }
         // An offline host's chat reads Idle once stale: that isn't finishing.
         val reports = states.update(rows.filter { it.deviceOnline }.associate { it.id to it.indicator.agentState() })
         for ((id, kind) in reports) {
@@ -137,7 +141,7 @@ class CarAgents(app: Application, private val model: AppModel) {
         }
     }
 
-    private fun agent(row: SessionRow, clashing: Set<String>): CarAgent {
+    private fun agent(row: SessionRow, clashing: Set<String>, pinRank: Int?): CarAgent {
         val state = row.indicator.agentState()
         val preview = row.preview?.let { Spoken.summary(it, 80) }.orEmpty()
         val ago = if (row.timeLabel == "now") "just now" else "${row.timeLabel} ago"
@@ -156,7 +160,7 @@ class CarAgents(app: Application, private val model: AppModel) {
             Folder("project:${project.id}", project.name + (row.deviceName?.takeIf { project.name in clashing }?.let { " · $it" } ?: ""))
         }
         else Folder("home:${row.deviceId}", "No project" + (row.deviceName?.let { " · $it" } ?: ""))
-        return CarAgent(row.id, row.title, state, status, detail, row.unseen, folder, row.lastActivityMs, row.workingSinceMs)
+        return CarAgent(row.id, row.title, state, status, detail, row.unseen, folder, row.lastActivityMs, row.workingSinceMs, pinRank)
     }
 
 

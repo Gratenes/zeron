@@ -10,6 +10,7 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import androidx.car.app.CarContext
 import androidx.car.app.CarToast
+import androidx.car.app.constraints.ConstraintManager
 import androidx.car.app.Screen
 import androidx.car.app.model.Action
 import androidx.car.app.model.ActionStrip
@@ -125,6 +126,17 @@ class HomeScreen(context: CarContext, private val session: CarSession) : Screen(
             .setActionStrip(strip.build())
         if (agents == null) return builder.setLoading(true).build()
         val list = ItemList.Builder().setNoItemsMessage("No chats yet. Tap Talk and say what to work on.")
+        val favorites = favorites(agents)
+        // Always first, even empty: it says where pinned chats show up.
+        list.addItem(
+            Row.Builder()
+                .setTitle("Favorites")
+                .addText(favoritesSummary(favorites))
+                .setImage(carContext.icon(R.drawable.ic_car_favorite))
+                .setBrowsable(true)
+                .setOnClickListener { screenManager.push(FavoritesScreen(carContext, session)) }
+                .build(),
+        )
         val folders = agents.map { it.folder }.distinct()
         if (folders.isNotEmpty()) {
             list.addItem(
@@ -137,7 +149,9 @@ class HomeScreen(context: CarContext, private val session: CarSession) : Screen(
                     .build(),
             )
         }
-        for (agent in agents) list.addItem(agentRow(this, session, agent))
+        // The folders above take their rows out of the car's limit; chats fill what is left.
+        val room = (listLimit(carContext) - (if (folders.isNotEmpty()) 2 else 1)).coerceAtLeast(0)
+        for (agent in agents.take(room)) list.addItem(agentRow(this, session, agent))
         return builder.setSingleList(list.build()).build()
     }
 }
@@ -154,6 +168,51 @@ internal fun glance(agents: List<CarAgent>): String? {
     ).joinToString(" · ").ifEmpty { null }
 }
 
+/** The pinned chats in the sidebar's pin order: what the desktop and phone show under "Pinned". */
+internal fun favorites(agents: List<CarAgent>): List<CarAgent> =
+    agents.filter { it.pinRank != null }.sortedBy { it.pinRank }
+
+internal fun favoritesSummary(favorites: List<CarAgent>): String {
+    if (favorites.isEmpty()) return "None pinned yet"
+    val waiting = favorites.count { it.state == AgentState.NeedsInput }
+    return listOfNotNull(
+        if (favorites.size == 1) favorites[0].title else "${favorites.size} chats",
+        if (waiting > 0) "$waiting waiting" else null,
+    ).joinToString(" · ")
+}
+
+/** What the car allows right now (it is far less while driving); [fallback] when the host can't say. */
+private fun limit(context: CarContext, type: Int, fallback: Int): Int =
+    runCatching { context.getCarService(ConstraintManager::class.java).getContentLimit(type) }.getOrDefault(fallback).coerceAtLeast(1)
+
+/** The rows a list may hold right now. */
+internal fun listLimit(context: CarContext): Int = limit(context, ConstraintManager.CONTENT_LIMIT_TYPE_LIST, DEFAULT_LIST_LIMIT)
+
+/** The rows a pane may hold right now (two while driving). */
+internal fun paneLimit(context: CarContext): Int = limit(context, ConstraintManager.CONTENT_LIMIT_TYPE_PANE, DEFAULT_PANE_LIMIT)
+
+internal const val DEFAULT_LIST_LIMIT = 6
+internal const val DEFAULT_PANE_LIMIT = 2
+
+/** Pinned chats, rows like a project's chats; a list is cut to what the car allows. */
+class FavoritesScreen(context: CarContext, private val session: CarSession) : Screen(context) {
+    private var agents: List<CarAgent> = session.agentList.value
+
+    init {
+        watchAgents(session) { agents = it }
+    }
+
+    override fun onGetTemplate(): Template {
+        val list = ItemList.Builder().setNoItemsMessage("No favorites yet. Pin a chat on your phone or computer and it shows up here.")
+        for (agent in favorites(agents).take(listLimit(carContext))) list.addItem(agentRow(this, session, agent))
+        return ListTemplate.Builder()
+            .setTitle("Favorites")
+            .setHeaderAction(Action.BACK)
+            .setSingleList(list.build())
+            .build()
+    }
+}
+
 /** Projects (and computers' homes), the most recently active first. */
 class FoldersScreen(context: CarContext, private val session: CarSession) : Screen(context) {
     private var agents: List<CarAgent> = session.agentList.value
@@ -165,7 +224,7 @@ class FoldersScreen(context: CarContext, private val session: CarSession) : Scre
     override fun onGetTemplate(): Template {
         val list = ItemList.Builder().setNoItemsMessage("No projects yet.")
         // The chat list is newest first, so each folder's first chat is its latest.
-        for ((folder, chats) in agents.groupBy { it.folder }) {
+        for ((folder, chats) in agents.groupBy { it.folder }.entries.take(listLimit(carContext))) {
             val waiting = chats.count { it.state == AgentState.NeedsInput }
             val summary = listOfNotNull(
                 if (chats.size == 1) "1 chat" else "${chats.size} chats",
@@ -200,7 +259,7 @@ class FolderScreen(context: CarContext, private val session: CarSession, private
 
     override fun onGetTemplate(): Template {
         val list = ItemList.Builder().setNoItemsMessage("No chats in ${folder.name}.")
-        for (agent in agents.filter { it.folder == folder }) list.addItem(agentRow(this, session, agent, showFolder = false))
+        for (agent in agents.filter { it.folder == folder }.take(listLimit(carContext))) list.addItem(agentRow(this, session, agent, showFolder = false))
         return ListTemplate.Builder()
             .setTitle(folder.name)
             .setHeaderAction(Action.BACK)
@@ -291,21 +350,22 @@ class AgentScreen(context: CarContext, private val session: CarSession, private 
             pane.addAction(Action.Builder().setTitle("Read aloud").setOnClickListener { session.readAloud(chatId) }.build())
         } else {
             pane.addRow(Row.Builder().setTitle(agent?.status ?: "").build())
+            // A pane holds few rows while driving (two): what needs doing comes first.
+            val room = (paneLimit(carContext) - 1).coerceAtLeast(1)
             val asked = question?.questions.orEmpty()
+            val body = ArrayList<String>()
             if (asked.size == 1) {
                 // The question, not the reply around it: that's what needs an answer.
-                pane.addRow(Row.Builder().setTitle(Spoken.summary(asked[0].question, 200)).build())
-                if (asked[0].options.isNotEmpty()) pane.addRow(Row.Builder().setTitle(asked[0].options.joinToString(" · ")).build())
+                body += Spoken.summary(asked[0].question, 200)
+                if (asked[0].options.isNotEmpty()) body += asked[0].options.joinToString(" · ")
             } else if (asked.isNotEmpty()) {
-                // A pane takes four rows: the status and up to three questions.
-                asked.take(3).forEachIndexed { i, q ->
-                    pane.addRow(Row.Builder().setTitle("${i + 1} of ${asked.size} · " + Spoken.summary(q.question, 120)).build())
-                }
+                asked.take(room).forEachIndexed { i, q -> body += "${i + 1} of ${asked.size} · " + Spoken.summary(q.question, 120) }
             } else {
                 val sentences = Spoken.summary(reply, 600, wholeText = true).ifEmpty { "No reply yet." }
                 // Short rows: the host shows only a couple of lines of each.
-                for (chunk in chunks(sentences, 3)) pane.addRow(Row.Builder().setTitle(chunk).build())
+                body += chunks(sentences, minOf(3, room))
             }
+            for (line in body.take(room)) pane.addRow(Row.Builder().setTitle(line).build())
             pane.addAction(
                 Action.Builder()
                     .setTitle(if (question != null) "Answer" else "Reply")
@@ -390,14 +450,14 @@ class ChoicesScreen(
                 Row.Builder().setTitle("Say your answer").setImage(carContext.icon(R.drawable.ic_car_mic))
                     .setOnClickListener { session.hear(chatId, flow, ::next) }.build(),
             )
-            q.multiSelect -> for (option in q.options) {
+            q.multiSelect -> for (option in q.options.take(listLimit(carContext))) {
                 list.addItem(
                     Row.Builder().setTitle(option).setToggle(
                         Toggle.Builder { on -> if (on) picked += option else picked -= option }.setChecked(option in picked).build(),
                     ).build(),
                 )
             }
-            else -> for (option in q.options) {
+            else -> for (option in q.options.take(listLimit(carContext))) {
                 list.addItem(Row.Builder().setTitle(option).setOnClickListener { next(flow.answer(listOf(option))) }.build())
             }
         }
