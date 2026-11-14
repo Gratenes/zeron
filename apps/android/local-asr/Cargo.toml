@@ -1,0 +1,33 @@
+# On-device speech recognition for the Android Auto app: NVIDIA Parakeet
+# Unified (EN, INT8) through parakeet-rs, behind a small JNI surface.
+#
+# A workspace of its own, like apps/zgx: ONNX Runtime is *loaded* here from the
+# libonnxruntime.so the app's AAR dependency ships (`load-dynamic`), while the
+# root workspace's desktop dictation links its own copy. Feature unification
+# must not mix the two.
+
+[workspace]
+
+[package]
+name = "zeron-local-asr"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+name = "zeron_local_asr"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+parakeet-rs = { version = "=0.3.8", default-features = false, features = ["cpu", "load-dynamic", "api-28"] }
+ort = { version = "=2.0.0-rc.13", default-features = false }
+jni = "0.21"
+
+[dev-dependencies]
+hound = "3.5"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

@@ -14,6 +14,7 @@ import kotlinx.coroutines.CompletableDeferred
 import sh.zeron.android.BuildConfig
 import sh.zeron.android.design.Appearance
 import sh.zeron.android.design.ThemeMode
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
@@ -161,6 +162,39 @@ class AppModel(private val app: Application) {
     fun setCarPausesMusic(on: Boolean) {
         _carPausesMusic.value = on
         settings.edit().putBoolean("car.pausesMusic", on).apply()
+    }
+
+    /** Android Auto dictation: on-device Parakeet (downloaded once) or the phone's Android recognizer. */
+    val localDictation: sh.zeron.android.car.LocalAsr by lazy {
+        sh.zeron.android.car.LocalAsr(app, sh.zeron.android.car.LocalModel(java.io.File(app.filesDir, "models/parakeet-unified-en-int8")))
+    }
+    private val _carDictationEngine = MutableStateFlow(
+        runCatching { sh.zeron.android.car.DictationEngine.valueOf(settings.getString("car.dictation", null)!!) }
+            .getOrDefault(sh.zeron.android.car.DictationEngine.Android),
+    )
+    val carDictationEngine: StateFlow<sh.zeron.android.car.DictationEngine> = _carDictationEngine.asStateFlow()
+    private var modelDownload: Job? = null
+
+    /** Choosing Local starts the model download if it isn't on the phone (the Android recognizer answers until it is). */
+    fun setCarDictationEngine(engine: sh.zeron.android.car.DictationEngine) {
+        _carDictationEngine.value = engine
+        settings.edit().putString("car.dictation", engine.name).apply()
+        if (engine == sh.zeron.android.car.DictationEngine.Local) downloadDictationModel() else localDictation.release()
+    }
+
+    fun downloadDictationModel() {
+        if (modelDownload?.isActive == true) return
+        val model = localDictation.model
+        model.reset()
+        if (model.isReady()) return
+        modelDownload = scope.launch { runCatching { model.download() } }
+    }
+
+    fun removeDictationModel() {
+        modelDownload?.cancel()
+        localDictation.release()
+        localDictation.model.remove()
+        if (_carDictationEngine.value == sh.zeron.android.car.DictationEngine.Local) setCarDictationEngine(sh.zeron.android.car.DictationEngine.Android)
     }
 
     /** Sessions grouped by project in place of the flat Recent list. */

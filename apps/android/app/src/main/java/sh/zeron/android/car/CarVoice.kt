@@ -20,7 +20,9 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -58,6 +60,9 @@ class CarVoice(
     context: Context,
     /** Pause the music while speaking, on the media stream (cars whose navigation-voice volume is low). */
     private val pausesMusic: () -> Boolean = { false },
+    /** On-device dictation, and which engine the driver chose; Android's recognizer is the fallback. */
+    private val local: LocalAsr? = null,
+    private val dictationEngine: () -> DictationEngine = { DictationEngine.Android },
 ) {
     private val context = context.applicationContext
     private val audio = this.context.getSystemService(AudioManager::class.java)
@@ -238,20 +243,69 @@ class CarVoice(
      * phone's own microphone without one or before Android 13.
      */
     suspend fun listen(microphone: (() -> AudioStream?)?, hints: List<String> = emptyList(), onPartial: (String) -> Unit = {}): Heard = turn.withLock {
-        if (!SpeechRecognizer.isRecognitionAvailable(context)) return@withLock Heard.NoRecognizer
+        val useLocal = local != null &&
+            engineFor(dictationEngine(), local.model.isReady(), local.usable) == DictationEngine.Local
+        if (!useLocal && !SpeechRecognizer.isRecognitionAvailable(context)) return@withLock Heard.NoRecognizer
         var lost = false
         speechFocus.drop()
         val focus = focus(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE) { lost = true; cancel() }
         try {
             chime(startSound)
-            val stream = if (Build.VERSION.SDK_INT >= 33) microphone?.invoke() else null
-            var heard = recognize(stream, onDevice = true, hints, onPartial)
-            // Some on-device recognizers refuse an app-supplied stream or the language.
-            if (heard == null && !lost) heard = recognize(if (Build.VERSION.SDK_INT >= 33) microphone?.invoke() else null, onDevice = false, hints, onPartial)
+            var heard: Heard? = null
+            var triedLocal = false
+            if (useLocal) {
+                // The car's microphone, or the phone's own without one.
+                val stream = (if (Build.VERSION.SDK_INT >= 33) microphone?.invoke() else null) ?: PhoneMicrophone.open(context)
+                triedLocal = true
+                heard = recognizeLocal(stream, onPartial)
+                if (heard == null) Log.w(TAG, "on-device dictation failed: falling back to the Android recognizer")
+            }
+            if (heard == null) {
+                if (triedLocal && !SpeechRecognizer.isRecognitionAvailable(context)) return@withLock Heard.NoRecognizer
+                val stream = if (Build.VERSION.SDK_INT >= 33) microphone?.invoke() else null
+                heard = recognize(stream, onDevice = true, hints, onPartial)
+                // Some on-device recognizers refuse an app-supplied stream or the language.
+                if (heard == null && !lost) heard = recognize(if (Build.VERSION.SDK_INT >= 33) microphone?.invoke() else null, onDevice = false, hints, onPartial)
+            }
             heard ?: Heard.Silence
         } finally {
             focus?.let(audio::abandonAudioFocusRequest)
             if (!lost) sounds.play(endSound, 0.6f, 0.6f, 1, 0, 1f)
+        }
+    }
+
+    /**
+     * One utterance on the phone itself: streaming partials while the driver talks, the
+     * whole utterance decoded again at its end. Null when it can't (no microphone, the
+     * model won't load, an error before any words): the caller falls back.
+     */
+    private suspend fun recognizeLocal(stream: AudioStream?, onPartial: (String) -> Unit): Heard? {
+        val asr = local ?: return null
+        if (stream == null) return null
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val session = try {
+            withContext(Dispatchers.Default) { asr.session() }
+        } catch (e: Throwable) {
+            Log.w(TAG, "on-device dictation can't start", e)
+            stream.stop()
+            return null
+        }
+        cancelListening = { cancelled.set(true) }
+        return try {
+            val result = withContext(Dispatchers.IO) {
+                LocalListening(session).run(stream, { text -> main.post { onPartial(text) } }, { cancelled.get() })
+            }
+            when (result) {
+                is LocalResult.Text -> result.text.takeIf { it.isNotBlank() }?.let { Heard.Words(it) } ?: Heard.Silence
+                LocalResult.Cancelled -> Heard.Silence
+                is LocalResult.Failed -> {
+                    Log.w(TAG, "on-device dictation failed", result.error)
+                    result.partial?.takeIf { it.isNotBlank() }?.let { Heard.Words(it) }
+                }
+            }
+        } finally {
+            cancelListening = null
+            session.close()
         }
     }
 

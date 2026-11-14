@@ -68,7 +68,12 @@ class CarSession : Session() {
     val agentList: StateFlow<List<CarAgent>> get() = agents.agents
 
     override fun onCreateScreen(intent: Intent): Screen {
-        voice = CarVoice(carContext) { model.carPausesMusic.value }
+        voice = CarVoice(
+            carContext,
+            pausesMusic = { model.carPausesMusic.value },
+            local = model.localDictation,
+            dictationEngine = { model.carDictationEngine.value },
+        )
         notifications = CarNotifications(carContext)
         lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onCreate(owner: LifecycleOwner) {
@@ -76,6 +81,7 @@ class CarSession : Session() {
                 if (model.client.value == null) model.boot(LaunchOptions())
                 CarLink.connected = true
                 model.onCarConnected(true)
+                if (model.carDictationEngine.value == DictationEngine.Local) model.localDictation.warm()
                 agents.start()
             }
 

@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ButtonGroupDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +46,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import sh.zeron.android.car.ModelState
 import sh.zeron.android.core.AppModel
 import sh.zeron.android.design.ThemeMode
 import sh.zeron.android.design.ZIcon
@@ -203,6 +205,7 @@ fun SettingsScreen(
                 ) { Text("Pause music while Zeron talks") }
             }
         }
+        item { CarDictationSettings(model) }
         item {
             // Voice: once any registered host can run it (iOS More → Voice).
             if (sh.zeron.android.voice.rememberVoiceVisible(model.voice)) {
@@ -385,6 +388,63 @@ private fun WallpaperSettings(model: AppModel) {
                 colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
                 leadingContent = { IconTile(ZIcons.Delete, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer) },
             ) { Text("Remove wallpaper", color = MaterialTheme.colorScheme.error) }
+        }
+    }
+}
+
+
+/** Android Auto dictation: the engine, and the on-device model's download. */
+@Composable
+private fun CarDictationSettings(model: AppModel) {
+    val engine by model.carDictationEngine.collectAsState()
+    val state by model.localDictation.model.state.collectAsState()
+    val megabytes = { bytes: Long -> "${bytes / 1_000_000} MB" }
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+        SegmentedListItem(
+            onClick = { model.setCarDictationEngine(sh.zeron.android.car.DictationEngine.Local) },
+            shapes = segmentedShapes(0, 2),
+            colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+            leadingContent = { IconTile(sh.zeron.android.R.drawable.zi_microphone) },
+            supportingContent = {
+                Column {
+                    Text(
+                        when (val s = state) {
+                            ModelState.Ready -> "On this phone: live text as you talk, keeps ums and hmms. Works offline."
+                            is ModelState.Downloading -> "Downloading ${megabytes(s.done)} of ${megabytes(s.total)}… Android's recognizer answers meanwhile."
+                            is ModelState.Failed -> "Download failed: ${s.message}. Tap to retry."
+                            ModelState.Missing -> "Downloads a ${megabytes(model.localDictation.model.totalBytes)} model once."
+                        },
+                    )
+                    (state as? ModelState.Downloading)?.let {
+                        LinearProgressIndicator(
+                            progress = { it.done.toFloat() / it.total.coerceAtLeast(1) },
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        )
+                    }
+                }
+            },
+            trailingContent = {
+                androidx.compose.material3.RadioButton(
+                    selected = engine == sh.zeron.android.car.DictationEngine.Local,
+                    onClick = { model.setCarDictationEngine(sh.zeron.android.car.DictationEngine.Local) },
+                )
+            },
+        ) { Text("Dictation: Local Parakeet") }
+        SegmentedListItem(
+            onClick = { model.setCarDictationEngine(sh.zeron.android.car.DictationEngine.Android) },
+            shapes = segmentedShapes(1, 2),
+            colors = ListItemDefaults.segmentedColors(containerColor = cardColor()),
+            leadingContent = { IconTile(sh.zeron.android.R.drawable.zi_microphone) },
+            supportingContent = { Text("The phone's speech recognizer. Also the fallback for the local one.") },
+            trailingContent = {
+                androidx.compose.material3.RadioButton(
+                    selected = engine == sh.zeron.android.car.DictationEngine.Android,
+                    onClick = { model.setCarDictationEngine(sh.zeron.android.car.DictationEngine.Android) },
+                )
+            },
+        ) { Text("Dictation: Android") }
+        if (state == ModelState.Ready) {
+            androidx.compose.material3.TextButton(onClick = { model.removeDictationModel() }) { Text("Remove downloaded model") }
         }
     }
 }

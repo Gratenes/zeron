@@ -35,6 +35,20 @@ val buildCore by tasks.registering(Exec::class) {
     onlyIf { !skip || libs.walkTopDown().none { it.name == "libzeron_mobile.so" } }
 }
 
+// On-device dictation (apps/android/local-asr): Parakeet Unified behind JNI. Built beside the
+// core, into the same jniLibs; `-PzeronSkipCore` reuses the last build of it too.
+val buildLocalAsr by tasks.registering(Exec::class) {
+    description = "Builds apps/android/local-asr (on-device dictation) for Android."
+    val ndk = System.getenv("ANDROID_NDK_HOME")
+        ?: androidComponents.sdkComponents.sdkDirectory.get().dir("ndk/$NDK_VERSION").asFile.path
+    val libs = coreOut.resolve("jniLibs")
+    val skip = skipCore
+    workingDir = repoRoot
+    commandLine("bash", "scripts/android/build-local-asr.sh", coreOut.path)
+    environment("ANDROID_NDK_HOME", ndk)
+    onlyIf { !skip || libs.walkTopDown().none { it.name == "libzeron_local_asr.so" } }
+}
+
 // Tool and file icons: the iOS asset catalog's SVGs, rasterized.
 val genIcons by tasks.registering(Exec::class) {
     description = "Rasterizes the shared transcript icons."
@@ -64,6 +78,7 @@ android {
         // `-PzeronEdgeUrl=https://…` points the app at a dev edge.
         val edgeUrl = providers.gradleProperty("zeronEdgeUrl").orNull ?: ""
         buildConfigField("String", "EDGE_URL_OVERRIDE", "\"$edgeUrl\"")
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -117,7 +132,7 @@ android {
     }
 }
 
-tasks.named("preBuild") { dependsOn(buildCore, genIcons) }
+tasks.named("preBuild") { dependsOn(buildCore, buildLocalAsr, genIcons) }
 
 dependencies {
     implementation(libs.androidx.core.ktx)
@@ -138,10 +153,14 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation("${libs.jna.get()}@aar")
     implementation(libs.webrtc)
+    // The ONNX Runtime library local-asr loads (its libonnxruntime.so); the Java API is unused.
+    implementation(libs.onnxruntime.android)
     implementation(libs.androidx.car.app)
     implementation(libs.androidx.car.app.projected)
     debugImplementation(libs.compose.ui.tooling)
     testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }
 
 kotlin {

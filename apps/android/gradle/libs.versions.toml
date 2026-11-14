@@ -14,8 +14,12 @@ coreSplashscreen = "1.2.0"
 # Android Auto (Car App Library, projected).
 carApp = "1.7.0"
 junit = "4.13.2"
+androidxTestRunner = "1.7.0"
+androidxTestExt = "1.3.0"
 # Google WebRTC M150 (same milestone as the iOS stasel/WebRTC 150 pin), audio only.
 webrtc = "150.7871.01"
+# ONNX Runtime for on-device dictation; local-asr loads its libonnxruntime.so (ort 2.0.0-rc.13, api-28).
+onnxruntime = "1.32.0"
 
 [libraries]
 androidx-documentfile = { group = "androidx.documentfile", name = "documentfile", version = "1.0.1" }
@@ -38,7 +42,10 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 androidx-car-app = { group = "androidx.car.app", name = "app", version.ref = "carApp" }
 androidx-car-app-projected = { group = "androidx.car.app", name = "app-projected", version.ref = "carApp" }
+androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTestRunner" }
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExt" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
 webrtc = { group = "io.github.webrtc-sdk", name = "android", version.ref = "webrtc" }
 
 [plugins]
