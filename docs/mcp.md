@@ -317,6 +317,18 @@ including model lookup failures, are returned with the device id; there is no
 fallback to the local catalog. A successful remote query checks reachability;
 `lastSeenAt` alone does not establish that an engine is online.
 
+Model options (Context Window 200K/1M, Fast Mode, …) are part of the catalog:
+`list_models` returns each model's `options` with their choice ids and
+`defaultChoice`, and marks the harness's `default` model. `create_chat` and
+each `create_chats` request take `options: {"<option id>": "<choice id>"}`
+(`true`/`false` for on/off options), e.g. `{"contextWindow": "1m"}`. They are
+checked against the chosen model's catalog row (the default model when `model`
+is omitted), a bad option or choice is an error naming the valid ones, and the
+chat stores them the way the pickers do. Options left out keep the model's
+default; they are not accepted with `cloud`. A Claude `<model>[1m]` catalog row
+is listed as its base model's Context Window option, and a `[1m]` model id still
+works as that model with `contextWindow: "1m"`.
+
 Discover and launch a standalone session:
 
 ```text
