@@ -999,6 +999,17 @@ ui.command {
 	end,
 }
 ui.command {
+	id = "finish_docs",
+	title = "Write the docs finishes",
+	run = function()
+		local c = find("a2")
+		c.status = "done"
+		c.waiting = nil
+		c.updated = os.time()
+		publish()
+	end,
+}
+ui.command {
 	id = "rename_elsewhere",
 	title = "Tidy the tests renamed on another device",
 	run = function()
