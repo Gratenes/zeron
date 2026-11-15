@@ -1,8 +1,9 @@
 -- The Activity sidebar: one list of what needs you, the one back last at the
 -- top, no groups or sections; Working, Asleep and Archived folded at the
 -- list's foot, each opened by its title and kept so. A chat under way
--- (running, or waiting on background work that will wake it) is in
--- Working, and back at the top once it's done; Stop waiting releases a
+-- (running, or waiting on background work that will wake it) stays in the
+-- list; with Working turned on it is in Working, and back at the top once
+-- it's done; Stop waiting releases a
 -- wait. One put to sleep waits in Asleep, its corner counting down, and
 -- shows the alarm once it wakes. (When it wakes, and that it syncs, are the
 -- engine's: its tests.) The view menu turns it on and off, opens its
@@ -13,11 +14,22 @@ local SIDE = "#shell-sidebar"
 local ON = "screens/shell/activity.luau::shell_sidebar_activity"
 local FOLDED = "screens/shell/sidebar.luau::shell_sidebar_folded"
 
-local function open(): any
+local WORKING_SHELF = "screens/shell/activity.luau::activity_working_shelf"
+
+-- The view as it opens: a chat under way stays in the list.
+local function open_plain(): any
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 900)
 	app:frames(30)
 	app:set_state(ON, true)
+	app:frames(40)
+	return app
+end
+
+-- With "Fold working chats into Working" on.
+local function open(): any
+	local app = open_plain()
+	app:set_state(WORKING_SHELF, true)
 	app:frames(40)
 	return app
 end
@@ -209,4 +221,37 @@ test("Activity: idle chats are archived after the days set, never one waiting on
 	expect(shows(app, "Archived 2")).to_be(true)
 	expect(shows(app, "Write the docs")).to_be(true)
 	expect(shows(app, "Ship the release")).to_be(true)
+end)
+
+test("Activity: a chat stays in the list while it works, waits on its tests, and when it is done", function()
+	local app = open_plain()
+	-- A chat already under way (Fix the build) is in the list, not folded
+	-- away at its foot.
+	expect(shows(app, "Fix the build")).to_be(true)
+	expect(shows(app, "Working")).to_be(false)
+	-- Idle, then working, then waiting on background work, then done: its
+	-- row is there throughout, and moves up as it comes back.
+	expect(shows(app, "Write the docs")).to_be(true)
+	app:command("work")
+	settle(app)
+	expect(shows(app, "Write the docs")).to_be(true)
+	expect(shows(app, "Working")).to_be(false)
+	app:command("wait_on_tests")
+	settle(app)
+	expect(shows(app, "Write the docs")).to_be(true)
+	expect(shows(app, "Working")).to_be(false)
+	app:command("finish_docs")
+	settle(app)
+	expect(shows(app, "Write the docs")).to_be(true)
+	expect(top(app, "Write the docs") < top(app, "Tidy the tests")).to_be(true)
+end)
+
+test("Activity: Fold working chats into Working is a choice: on, they go to the shelf, off they are back", function()
+	local app = open()
+	expect(shows(app, "Working 1")).to_be(true)
+	expect(shows(app, "Fix the build")).to_be(false)
+	app:set_state(WORKING_SHELF, false)
+	settle(app)
+	expect(shows(app, "Working")).to_be(false)
+	expect(shows(app, "Fix the build")).to_be(true)
 end)
