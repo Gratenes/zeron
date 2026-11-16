@@ -302,26 +302,68 @@ fn command(arg: Value, device: Option<String>) -> Result<Value, String> {
     Ok(Value::from(line.as_str()))
 }
 
-/// The line zgx's terminal runs for the bridge's `line`. The Windows beta is
-/// a GUI program (main.rs `windows_subsystem`), and Windows attaches none to
-/// the pseudoconsole it's started on: the bridge would have no console, its
+/// The line zgx's terminal runs for the bridge's `line`. A GUI program (the
+/// Windows beta, or a dev build double-clicked: main.rs `windows_subsystem`)
+/// is attached to no console, not even the pseudoconsole it is started on:
+/// the bridge would have none, read EOF from its stdin and end at once, its
 /// shell opened and nothing shown. So cmd.exe, a console program, is started
 /// on it, waits for the bridge, and the bridge attaches to its console
 /// (`attach_console`). Each word is in quotes with none inside (the open
 /// parameters are base64), so cmd takes nothing in them for its own syntax.
-#[cfg(all(windows, feature = "beta"))]
+///
+/// Whether this exe is a GUI program is read from the exe itself
+/// (`gui_subsystem`), not from the build's flags: every build that is one
+/// needs the wrapper, whatever made it one.
 fn runnable(line: String) -> String {
-    let cmd = std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
-    format!("{} /d /s /c \"{line}\"", quote(&cmd))
-}
-#[cfg(not(all(windows, feature = "beta")))]
-fn runnable(line: String) -> String {
+    #[cfg(windows)]
+    if gui_subsystem() {
+        let cmd = std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+        return wrap_in_cmd(&line, &quote(&cmd));
+    }
     line
 }
 
+/// `line` run by the (already quoted) `cmd`, which exits with it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wrap_in_cmd(line: &str, cmd: &str) -> String {
+    format!("{cmd} /d /s /c \"{line}\"")
+}
+
+/// The PE image's Subsystem field (2: Windows GUI, 3: console), from the
+/// start of the file. It sits 68 bytes into the optional header, after the
+/// 4-byte signature and 20-byte COFF header, in both PE32 and PE32+.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pe_subsystem(image: &[u8]) -> Option<u16> {
+    if image.get(..2)? != b"MZ" {
+        return None;
+    }
+    let pe = u32::from_le_bytes(image.get(0x3c..0x40)?.try_into().ok()?) as usize;
+    if image.get(pe..pe.checked_add(4)?)? != b"PE\0\0" {
+        return None;
+    }
+    let at = pe.checked_add(4 + 20 + 68)?;
+    Some(u16::from_le_bytes(image.get(at..at.checked_add(2)?)?.try_into().ok()?))
+}
+
+/// Whether this process's exe is a Windows GUI program: one with no console
+/// of its own.
+#[cfg(windows)]
+fn gui_subsystem() -> bool {
+    use std::io::Read;
+    const IMAGE_SUBSYSTEM_WINDOWS_GUI: u16 = 2;
+    let head = std::env::current_exe().ok().and_then(|exe| {
+        let mut head = vec![0u8; 4096];
+        let read = std::fs::File::open(exe).ok()?.read(&mut head).ok()?;
+        head.truncate(read);
+        Some(head)
+    });
+    head.and_then(|head| pe_subsystem(&head)) == Some(IMAGE_SUBSYSTEM_WINDOWS_GUI)
+}
+
 /// The console of the cmd.exe that started this bridge (`runnable`), when
-/// it has none of its own (a GUI program's).
-#[cfg(all(windows, feature = "beta"))]
+/// it has none of its own (a GUI program's). Nothing when its stdin is a
+/// console already, or a pipe.
+#[cfg(windows)]
 fn attach_console() {
     use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE};
     // SAFETY: the process's own standard handle, and a mode for it to fill.
@@ -665,7 +707,7 @@ fn resizes() -> Option<std::os::fd::OwnedFd> {
 
 /// Runs the bridge; returns the process's exit code.
 pub fn bridge(args: &[String]) -> i32 {
-    #[cfg(all(windows, feature = "beta"))]
+    #[cfg(windows)]
     attach_console();
     let args = match parse(args) {
         Ok(args) => args,
@@ -880,9 +922,53 @@ pub fn bridge(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, quote, quote_posix, quote_windows, said};
+    use super::{parse, pe_subsystem, quote, quote_posix, quote_windows, said, wrap_in_cmd};
     #[cfg(windows)]
     use std::path::PathBuf;
+
+    /// The start of a PE file: "MZ", e_lfanew at 0x3c, "PE\0\0", a COFF
+    /// header, and an optional header whose Subsystem is `subsystem`.
+    fn pe_image(subsystem: u16, pe_at: usize) -> Vec<u8> {
+        let mut image = vec![0u8; pe_at + 4 + 20 + 70];
+        image[..2].copy_from_slice(b"MZ");
+        image[0x3c..0x40].copy_from_slice(&(pe_at as u32).to_le_bytes());
+        image[pe_at..pe_at + 4].copy_from_slice(b"PE\0\0");
+        let at = pe_at + 4 + 20 + 68;
+        image[at..at + 2].copy_from_slice(&subsystem.to_le_bytes());
+        image
+    }
+
+    #[test]
+    fn an_exe_says_in_its_header_whether_it_is_a_gui_program() {
+        // (A GUI exe has no console, so a terminal's bridge needs cmd.exe's.)
+        assert_eq!(pe_subsystem(&pe_image(2, 0x80)), Some(2));
+        assert_eq!(pe_subsystem(&pe_image(3, 0x118)), Some(3));
+    }
+
+    #[test]
+    fn what_is_not_a_pe_file_says_nothing() {
+        assert_eq!(pe_subsystem(&[]), None);
+        assert_eq!(pe_subsystem(b"#!/bin/sh\n"), None);
+        let mut no_signature = pe_image(2, 0x80);
+        no_signature[0x80] = b'X';
+        assert_eq!(pe_subsystem(&no_signature), None);
+        // A header pointing past what was read, or cut short, or at the end of usize.
+        let image = pe_image(2, 0x80);
+        assert_eq!(pe_subsystem(&image[..image.len() - 2]), None);
+        assert_eq!(pe_subsystem(&image[..0x50]), None);
+        let mut far = pe_image(2, 0x80);
+        far[0x3c..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(pe_subsystem(&far), None);
+    }
+
+    #[test]
+    fn a_gui_exes_bridge_runs_under_cmd_with_each_word_quoted() {
+        let line = r#""C:\Z\zeron-zgx.exe" terminal-bridge --port 1 --data "C:\d" --open "e30=" --claim "C:\c""#;
+        assert_eq!(
+            wrap_in_cmd(line, r#""C:\Windows\System32\cmd.exe""#),
+            format!(r#""C:\Windows\System32\cmd.exe" /d /s /c "{line}""#)
+        );
+    }
 
     #[test]
     fn a_claim_changes_hands_once_and_a_late_one_is_never_left_with_no_one() {
