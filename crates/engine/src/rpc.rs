@@ -538,6 +538,17 @@ struct AgentAccountParams {
     account_id: String,
 }
 
+/// `PinChatAccount` / `GetChatAccountPin`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatAccountPinParams {
+    chat_id: String,
+    harness: HarnessId,
+    /// `PinChatAccount` only: none is automatic.
+    #[serde(default)]
+    account_id: Option<String>,
+}
+
 /// `AddAgentApiKey`. The key is never logged: this type has no `Debug`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2817,6 +2828,8 @@ fn forwardable(method: &str) -> bool {
             // retargets which device's logins are shown).
             | methods::LIST_AGENT_ACCOUNTS
             | methods::ACTIVATE_AGENT_ACCOUNT
+            | methods::PIN_CHAT_ACCOUNT
+            | methods::GET_CHAT_ACCOUNT_PIN
             | methods::FORGET_AGENT_ACCOUNT
             | methods::SET_AGENT_ACCOUNT_ROTATION
             | methods::RENAME_AGENT_ACCOUNT
@@ -5815,6 +5828,19 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 RpcReply::value(&snapshot)
             }
+            methods::PIN_CHAT_ACCOUNT => {
+                let p: ChatAccountPinParams = parse_params(params)?;
+                let pin = self
+                    .agent_accounts
+                    .pin_chat_account(p.harness, &p.chat_id, p.account_id.as_deref().filter(|a| !a.is_empty()))
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&pin)
+            }
+            methods::GET_CHAT_ACCOUNT_PIN => {
+                let p: ChatAccountPinParams = parse_params(params)?;
+                RpcReply::value(&self.agent_accounts.chat_account_pin(p.harness, &p.chat_id))
+            }
             methods::FORGET_AGENT_ACCOUNT => {
                 self.voice.retire();
                 let p: AgentAccountParams = parse_params(params)?;
@@ -6820,6 +6846,10 @@ mod tests {
         // Per-provider account actions do travel, provider and all.
         assert!(forwardable(methods::START_AGENT_LOGIN));
         assert!(forwardable(methods::ACTIVATE_AGENT_ACCOUNT));
+        assert!(forwardable(methods::PIN_CHAT_ACCOUNT));
+        assert!(forwardable(methods::GET_CHAT_ACCOUNT_PIN));
+        // A chat's account is the person's to pick, never an agent's.
+        assert!(!zeron_rpc::agent_allowed(methods::PIN_CHAT_ACCOUNT));
         // A key's name is no secret: renamed wherever the key lives.
         assert!(forwardable(methods::RENAME_AGENT_ACCOUNT));
         assert!(!zeron_rpc::local_only(methods::RENAME_AGENT_ACCOUNT));

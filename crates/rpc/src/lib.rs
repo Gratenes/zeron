@@ -338,6 +338,13 @@ pub mod methods {
     // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).
     pub const LIST_AGENT_ACCOUNTS: &str = "ListAgentAccounts";
     pub const ACTIVATE_AGENT_ACCOUNT: &str = "ActivateAgentAccount";
+    /// `{chatId, harness, accountId?}` → `ChatAccountPin`: run one chat on a
+    /// saved account of its own (the person's choice, which plugins don't
+    /// override), or with no `accountId` back to automatic. A login that
+    /// needs signing in again is refused. Per device, like the accounts.
+    pub const PIN_CHAT_ACCOUNT: &str = "PinChatAccount";
+    /// `{chatId, harness}` → `ChatAccountPin`: the account a chat is pinned to.
+    pub const GET_CHAT_ACCOUNT_PIN: &str = "GetChatAccountPin";
     pub const FORGET_AGENT_ACCOUNT: &str = "ForgetAgentAccount";
     /// `{harness, enabled}`: turn account rotation (new chats spread across
     /// the harness's saved accounts) on or off for this device. Answers the

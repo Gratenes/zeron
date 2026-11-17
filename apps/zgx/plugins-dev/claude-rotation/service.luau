@@ -17,7 +17,8 @@
 -- window) wins; accounts within 5 points of each other, or whose usage Zeron
 -- hasn't read yet, are told apart by how many chats are pinned to them, so a
 -- burst of new chats still takes turns. `zeron.pins()` is read each
--- time, not remembered, so the service can stop between chats.
+-- time, not remembered, so the service can stop between chats. A chat whose
+-- account the person chose in its picker is left alone.
 --
 -- The window half (init.luau) tells this whether the setting is on; with no
 -- window ever having said, it is on.
@@ -126,7 +127,14 @@ local function move(chat: string, away: string?)
 	if best == nil then
 		return
 	end
-	zeron.pin_account({ provider = PROVIDER, chat = chat, account = best.account }):await()
+	-- Refused for a chat whose account the person chose in its picker: that
+	-- stays until they change it.
+	local ok = pcall(function()
+		zeron.pin_account({ provider = PROVIDER, chat = chat, account = best.account }):await()
+	end)
+	if not ok then
+		return
+	end
 	zeron.emit("moved", { chat = chat, to = best.email or best.account })
 end
 
