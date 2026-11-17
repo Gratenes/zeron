@@ -3273,6 +3273,8 @@ mod tests;
 #[cfg(test)]
 mod identity_tests;
 #[cfg(test)]
+mod consent_matrix_tests;
+#[cfg(test)]
 mod service_tests;
 #[cfg(test)]
 mod agents_service_tests;

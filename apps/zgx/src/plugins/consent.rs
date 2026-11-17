@@ -327,27 +327,36 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
             }
         });
     });
-    // A tampered plugin's answers (this device's alone, the one shown, as
-    // it is): removed, or installed again from where it came from, which
-    // asks again from its sheet.
+    // A tampered plugin's answers (on the device the sheet shows, as it is):
+    // removed, or installed again from where it came from, which asks again
+    // from its sheet. Another device's goes to that device's engine, as its
+    // sheet's Allow does: nothing here needs this device's key.
     let (weak, window, out, ons, ids) = (Rc::downgrade(bridge), cx.window.clone(), shared.clone(), on.clone(), id.clone());
     host.action("plugins.remove_tampered", move |arg| {
         let Some(b) = weak.upgrade() else { return };
-        let Some(id) = tampered_shown(&b, &arg, &ons.borrow(), &ids.borrow()) else { return };
-        eprintln!("zeron-zgx: plugins: {id} removed (changed since it was allowed)");
-        out.set(shown(&b, &id, &None, true, None));
+        let on = ons.borrow().clone();
+        let Some(id) = tampered_shown(&b, &arg, &on, &ids.borrow()) else { return };
+        eprintln!(
+            "zeron-zgx: plugins: {id} removed (changed since it was allowed){}",
+            on.as_ref().map(|(d, _)| format!(" on {d}")).unwrap_or_default()
+        );
+        out.set(shown(&b, &id, &on, true, None));
         let (weak, window, out) = (Rc::downgrade(&b), window.clone(), out.clone());
         engine::get().spawn(async move {
-            let result = engine::get().call("RemovePlugin", json!({ "id": id })).await;
+            let device = on.as_ref().map(|(d, _)| d.as_str());
+            let result = engine::get().call("RemovePlugin", remote::addressed(device, json!({ "id": id }))).await;
             let Some(b) = weak.upgrade() else { return };
             match result {
                 Ok(_) => {
-                    // Its settings go with it, as Settings → Plugins' Remove.
-                    b.settings.borrow_mut().forget(&id);
+                    // Its settings go with it, as Settings → Plugins' Remove
+                    // (this device's own are the only ones kept here).
+                    if on.is_none() {
+                        b.settings.borrow_mut().forget(&id);
+                    }
                     window.close();
                 }
                 Err(error) => {
-                    out.set(shown(&b, &id, &None, false, Some(&said(&error, &None))));
+                    out.set(shown(&b, &id, &on, false, Some(&said(&error, &on))));
                 }
             }
         });
@@ -355,17 +364,22 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
     let (weak, out, ons, ids) = (Rc::downgrade(bridge), shared.clone(), on.clone(), id.clone());
     host.action("plugins.reinstall", move |arg| {
         let Some(b) = weak.upgrade() else { return };
-        let Some(id) = tampered_shown(&b, &arg, &ons.borrow(), &ids.borrow()) else { return };
-        eprintln!("zeron-zgx: plugins: {id} installed again (changed since it was allowed)");
-        out.set(shown(&b, &id, &None, true, None));
+        let on = ons.borrow().clone();
+        let Some(id) = tampered_shown(&b, &arg, &on, &ids.borrow()) else { return };
+        eprintln!(
+            "zeron-zgx: plugins: {id} installed again (changed since it was allowed){}",
+            on.as_ref().map(|(d, _)| format!(" on {d}")).unwrap_or_default()
+        );
+        out.set(shown(&b, &id, &on, true, None));
         let (weak, out) = (Rc::downgrade(&b), out.clone());
         engine::get().spawn(async move {
-            let result = engine::get().call("InstallPlugin", json!({ "reinstall": id })).await;
+            let device = on.as_ref().map(|(d, _)| d.as_str());
+            let result = engine::get().call("InstallPlugin", remote::addressed(device, json!({ "reinstall": id }))).await;
             let Some(b) = weak.upgrade() else { return };
             // The sheet follows it: installed again, it waits for you as
             // it is now (`follow`).
-            let error = result.err().map(|error| said(&error, &None));
-            out.set(shown(&b, &id, &None, false, error.as_deref()));
+            let error = result.err().map(|error| said(&error, &on));
+            out.set(shown(&b, &id, &on, false, error.as_deref()));
         });
     });
     // "It's mine": signed as yours, after which it asks only for what it
@@ -407,14 +421,11 @@ fn host(cx: &mut WindowContext, bridge: &Rc<Bridge>, id: Rc<RefCell<String>>, on
 }
 
 /// The tampered plugin `arg` names, if it's the one shown, as shown, on
-/// this device.
+/// the device (`on`: another's, or none: this one) whose sheet it is.
 fn tampered_shown(bridge: &Bridge, arg: &Value, on: &On, shown_id: &str) -> Option<String> {
-    if on.is_some() {
-        return None;
-    }
     let id = arg.field("id").map(text).unwrap_or_default();
     let hash = arg.field("hash").map(text).unwrap_or_default();
-    showable(bridge, &id, &None)
+    showable(bridge, &id, on)
         .filter(|item| shown_id == id && item.hash() == hash && item.status() == "tampered")
         .map(|_| id)
 }

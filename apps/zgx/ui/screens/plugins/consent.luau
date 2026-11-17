@@ -16,7 +16,9 @@
 -- `plugins.decide { id, allow, hash }` (the hash it was shown: a plugin
 -- that changed while you looked asks again) and `plugins.sign { id }`
 -- ("It's mine": signs it as yours; this device's key, so not offered for
--- another device's).
+-- another device's). A changed plugin is answered with
+-- `plugins.remove_tampered` / `plugins.reinstall { id, hash }`, on the device
+-- it's on.
 --
 -- Allow is armed a moment after a sheet shows (`ARM_MS`; the host holds a
 -- shorter wait of its own): a window that opens under a click mid-way
@@ -210,9 +212,10 @@ local Sheet = ui.component(function(props: { it: any, elsewhere: string? }): Nod
 	end
 
 	-- Changed since you allowed it: never allowed as it is now. Removed, or
-	-- installed again from where it came from (when that's known), on
-	-- this device; another device's is only turned down from here.
-	local tampered = it.status == "tampered" and not elsewhere
+	-- installed again from where it came from (when that's known), on the
+	-- device it's on: another device's too, by its own engine (the words
+	-- above send you to these two, so they are always here to take).
+	local tampered = it.status == "tampered"
 	local answers = if tampered
 		then ui.row {
 			w_full = true,

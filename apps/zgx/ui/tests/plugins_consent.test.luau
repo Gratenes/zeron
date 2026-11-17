@@ -184,6 +184,25 @@ test("another device's plugin is allowed from here, on that device alone, never 
 	expect(app:state("calls")).to_contain("decide:sync:true:sync-1")
 end)
 
+test("another device's changed plugin is removed or installed again from here, never allowed or claimed", function()
+	local app = open()
+	app:command("tamper_devbox")
+	app:frames(ARMED)
+	local tree = app:tree("#consent")
+	expect(tree).to_contain("On Devbox")
+	expect(tree).to_contain("Changed since you allowed it")
+	-- The words send you to Remove and Reinstall, so both are here; the
+	-- device's key signs nothing from this one, and Allow isn't offered.
+	expect(app:has("#consent-remove")).to_be(true)
+	expect(app:has("#consent-reinstall")).to_be(true)
+	expect(app:has("#consent-mine")).to_be(false)
+	expect(app:has("#consent-allow")).to_be(false)
+	app:click("#consent-reinstall")
+	app:frames(20)
+	expect(app:state("calls")).to_contain("reinstall:ping:ping-2")
+	expect(app:state("calls")).never.to_contain("decide:ping")
+end)
+
 test("another device's plugin can be turned down from here", function()
 	local app = open()
 	app:command("sync_devbox")
