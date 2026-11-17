@@ -385,6 +385,7 @@ fn demo_accounts() -> AgentAccountsSnapshot {
         codex_reset_credits: None,
         usage_fetched_at: None,
         usage_error: None,
+        needs_signin: false,
         display_name: None,
         organization: None,
         auth_kind: Some(AgentAuthKind::Oauth),

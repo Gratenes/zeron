@@ -224,7 +224,12 @@ impl AgentAccounts {
                         // Another refresh of this slot is in flight: its
                         // result is on disk by the next run.
                         Ok(None) => {}
-                        Err(_) => return Err(signed_out()),
+                        Err(error) => {
+                            if matches!(error, super::ProbeError::Unauthorized { .. }) {
+                                self.note_signin_failure(harness, &slot, error);
+                            }
+                            return Err(signed_out());
+                        }
                     }
                 }
                 Ok(Some(PinRun {
