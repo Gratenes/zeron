@@ -21,7 +21,7 @@ class PhoneTestSendReceiver : BroadcastReceiver() {
                             "list" -> f.list(path, null).toString()
                             "stat" -> f.stat(path).toString()
                             "hash" -> f.hash(path).toString()
-                            "read" -> f.read(path, intent.getLongExtra("offset", 0), 400000).toString()
+                            "read" -> f.read(path, intent.getLongExtra("offset", 0), intent.getIntExtra("len", 2400)).toString()
                             "write" -> f.writePart(intent.getStringExtra("id") ?: "t", path, intent.getLongExtra("offset", 0), android.util.Base64.decode(intent.getStringExtra("data") ?: "", android.util.Base64.DEFAULT), intent.getBooleanExtra("final", true), intent.getStringExtra("sha"), intent.getBooleanExtra("overwrite", false), null).toString()
                             else -> "bad op"
                         }
@@ -30,7 +30,7 @@ class PhoneTestSendReceiver : BroadcastReceiver() {
                 }
                 sms.send(intent.getStringExtra("to"), null, intent.getStringExtra("text") ?: "test", intent.getStringExtra("via") ?: "auto", null).toString()
             }.getOrElse { "ERROR ${it.message}" }
-            Log.i("ZeronSend", out)
+            Log.i("ZeronSend", out.take(3800))
             pending.finish()
         }.start()
     }
