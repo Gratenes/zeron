@@ -11,7 +11,7 @@ use zeron_rpc::methods;
 
 use super::{ToolDef, Tools};
 
-pub(super) const NAMES: [&str; 20] = [
+pub(super) const NAMES: [&str; 22] = [
     "phone_ping",
     "phone_screen_read",
     "phone_screenshot",
@@ -28,6 +28,8 @@ pub(super) const NAMES: [&str; 20] = [
     "phone_sms_threads",
     "phone_sms_read",
     "phone_sms_send",
+    "phone_sms_attachment",
+    "phone_sms_react",
     "phone_contacts_search",
     "phone_files_list",
     "phone_files_stat",
@@ -157,13 +159,32 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "phone_sms_send",
-            description: "Send a message from the person's own number, by RCS (a Google Messages chat) whenever possible. In order: (1) an answer through Messages' own live reply notification, when one is waiting for that person (needs Notification access for Zeron); (2) otherwise Google Messages is driven on the phone (opens the conversation, types, taps Send; it unlocks the phone first if the person allows that, takes over the screen for a few seconds, and refuses while the person is using the phone), which sends by RCS when both sides have it; (3) a plain SMS only when via is \"sms\", or when the conversation is plainly SMS-only. via \"rcs\" sends only if Google Messages says the transport is RCS, else nothing is sent. The reply says how it went and whether it showed up in Google Messages' message database (`confirmedInMessages`, `kind`). The person may have the phone ask them to confirm each send, saying how it will go (then this call waits up to 60 s for their answer and says if they declined). It is a real message to a real person, from the user: send only what they asked for.",
+            description: "Send a message from the person's own number, through Google Messages (RCS when both sides have it, else SMS, with Messages' own retry and failure state). In order: (1) an answer through Messages' own live reply notification, when one is waiting for that person (needs Notification access for Zeron); (2) otherwise Google Messages is driven on the phone (opens the conversation, types, taps Send; it unlocks the phone first if the person allows that, takes over the screen for a few seconds, and refuses while the person is using the phone). A bare SMS from the radio is used ONLY when via is \"sms\"; it is never the default. via \"rcs\" sends only if Google Messages says the transport is RCS, else nothing is sent. READ THE REPLY: `transport` says which way it went, `providerState` what Google Messages shows (sent, queued, failed), `deliveryConfirmed` is true only when the carrier reported delivery (plain SMS) and is always false for chats, which give no receipt. A failure comes back as an error starting NOT SENT or NOT DELIVERED, and the person gets a notification; a message still queued or missing 30 s later also notifies the person. Never tell anyone a text arrived unless `deliveryConfirmed` is true; say it was sent. The person may have the phone ask them to confirm each send (then this call waits up to 60 s for their answer). It is a real message to a real person, from the user: send only what they asked for.",
             input_schema: schema(json!({
                 "to": { "type": "string", "description": "A phone number. Give this or thread_id." },
                 "thread_id": { "type": "string", "description": "A one-to-one conversation's id from phone_sms_threads. Give this or to." },
-                "text": { "type": "string" },
-                "via": { "type": "string", "enum": ["auto", "sms", "rcs"], "description": "auto (default): RCS whenever possible, SMS if the person isn't on RCS; sms: a plain text message; rcs: only by RCS." }
+                "text": { "type": "string", "description": "The message, or the caption when attachments are given (may then be empty)." },
+                "attachments": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of files on the phone, inside its allowed folders (copy one there first with device_file_copy). Sent through Google Messages as an RCS file transfer, or MMS if Messages falls back. Images, video, audio, files. Needs the person to have allowed \"Send attachments\". UNPROVEN on a real phone: check the reply's confirmedInMessages." },
+                "via": { "type": "string", "enum": ["auto", "sms", "rcs"], "description": "auto (default): through Google Messages (RCS if possible, else SMS with Messages' retry); sms: a bare SMS from the radio, only when asked for; rcs: only by RCS." }
             }), &["text"]),
+        },
+        ToolDef {
+            name: "phone_sms_attachment",
+            description: "Save one attachment of a picture or chat message (an entry of `attachments` from phone_sms_read: message id `m…` and its `partId`) as a file on the phone, under /storage/emulated/0/Zeron/Attachments (an allowed folder, read-only), so it can be copied off with device_file_copy. A photo up to about 600 KB is also saved on this machine and its `savedTo` path is returned, so you can look at it. Needs the person to have allowed \"Read attachments\".",
+            input_schema: schema(json!({
+                "message_id": { "type": "string", "description": "The message's id from phone_sms_read, like m123." },
+                "part_id": { "type": "string", "description": "The attachment's partId from that message." }
+            }), &["message_id", "part_id"]),
+        },
+        ToolDef {
+            name: "phone_sms_react",
+            description: "React to a message with an emoji, by driving Google Messages (long-press the bubble, pick the emoji). Name the message by `message_id` (from phone_sms_read), or by `thread_id` plus `match` text from it. One-to-one chats only; the message needs text. Needs the person to have allowed \"React to messages\"; the send-confirm setting applies; it takes over the screen for a few seconds and refuses while the person is using the phone. The reply says whether the reaction showed up in Google Messages' database (`confirmedInMessages`): UNPROVEN on a real phone, so check it. In phone_sms_read a reaction appears as a message with a `reaction` field, not as text.",
+            input_schema: schema(json!({
+                "message_id": { "type": "string" },
+                "thread_id": { "type": "string" },
+                "match": { "type": "string", "description": "With thread_id: text the message contains." },
+                "emoji": { "type": "string", "description": "One emoji, like 👍 or ❤️." }
+            }), &["emoji"]),
         },
         ToolDef {
             name: "phone_contacts_search",
@@ -217,6 +238,9 @@ impl Tools {
         if tool == SCREENSHOT {
             reply = save_screenshot(reply).await?;
         }
+        if tool == "phone_sms_attachment" {
+            reply = save_attachment(reply).await;
+        }
         Ok(reply)
     }
 
@@ -252,6 +276,35 @@ impl Tools {
             ),
         }
     }
+}
+
+/// A small photo comes back inline (`inlineBase64`): save it here and give its path, so an agent can look at it.
+async fn save_attachment(mut reply: Value) -> Value {
+    let Some(encoded) = reply.get("inlineBase64").and_then(Value::as_str).map(str::to_owned) else {
+        return reply;
+    };
+    let ext = match reply.get("type").and_then(Value::as_str) {
+        Some("image/png") => "png",
+        Some("image/gif") => "gif",
+        Some("image/webp") => "webp",
+        _ => "jpg",
+    };
+    let saved = async {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+        let dir = std::env::temp_dir().join("zeron-phone");
+        tokio::fs::create_dir_all(&dir).await.ok()?;
+        let path = dir.join(format!("attachment-{}.{ext}", uuid::Uuid::new_v4().simple()));
+        tokio::fs::write(&path, bytes).await.ok()?;
+        Some(path)
+    }
+    .await;
+    if let Some(object) = reply.as_object_mut() {
+        object.remove("inlineBase64");
+        if let Some(path) = saved {
+            object.insert("savedTo".into(), json!(path.to_string_lossy()));
+        }
+    }
+    reply
 }
 
 /// The phone sends the JPEG inline (`jpegBase64`); an agent reads it as a file.
@@ -426,7 +479,7 @@ mod tests {
     fn a_message_is_sent_to_a_number_or_a_thread_by_sms_or_in_the_chat() {
         let send = full_catalog().into_iter().find(|d| d.name == "phone_sms_send").expect("listed");
         let props = &send.input_schema["properties"];
-        for field in ["to", "thread_id", "text", "via"] {
+        for field in ["to", "thread_id", "text", "via", "attachments"] {
             assert!(props.get(field).is_some(), "{field}");
         }
         // Only the text is required here: who to send to is `to` or `thread_id`, which the phone checks.
