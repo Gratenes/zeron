@@ -264,12 +264,12 @@ fn pinned_to(accounts: &AgentAccounts, chat: &str) -> Option<String> {
 async fn a_chat_pinned_to_a_spent_login_moves_to_the_account_the_plugins_name() {
     let (_tmp, accounts, asked) = spent_pin_device(Some("acct-c")).await;
     let request = prepared(&PinRunEnvironment(accounts.clone()), "c1").await.unwrap();
-    assert_eq!(request.env[TOKEN_ENV], "at-c");
+    assert_eq!(run_token(&request).as_deref(), Some("at-c"));
     assert_eq!(pinned_to(&accounts, "c1"), Some(slot_id_for(HarnessId::ClaudeCode, "acct-c")));
     assert_eq!(asked.load(Ordering::SeqCst), 1);
     // The next run just runs there: nothing is asked again.
     let again = prepared(&PinRunEnvironment(accounts), "c1").await.unwrap();
-    assert_eq!(again.env[TOKEN_ENV], "at-c");
+    assert_eq!(run_token(&again).as_deref(), Some("at-c"));
     assert_eq!(asked.load(Ordering::SeqCst), 1);
 }
 
@@ -317,6 +317,46 @@ async fn a_login_already_flagged_as_needing_sign_in_is_not_refreshed_again() {
     let after_first = hits.load(Ordering::SeqCst);
     assert!(accounts.pin_run(HarnessId::ClaudeCode, &spent.id).await.is_err());
     assert_eq!(hits.load(Ordering::SeqCst), after_first, "a refused login was asked to refresh again");
+}
+
+#[tokio::test]
+async fn a_run_refused_its_login_flags_the_account_and_its_chat_falls_back_without_asking_the_network() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A refresh endpoint that would say yes: only the flag can stop the start.
+    let (token_url, hits) = fixed_server("200 OK", r#"{"access_token":"at-new","refresh_token":"rt-new","expires_in":28800}"#).await;
+    let endpoints = ProbeEndpoints { claude_token: token_url, ..Default::default() };
+    let accounts = AgentAccounts::with_endpoints(config(tmp.path()), endpoints, Default::default());
+    write_live_claude(tmp.path(), "acct-a", "a@example.com");
+    let saved = claude_slot("acct-b", "b@example.com", "at-b", now_ms() + 3_600_000);
+    accounts.write_slot(&saved).unwrap();
+    accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&saved.id));
+    let env = PinRunEnvironment(accounts.clone());
+    let credential = env.credential(HarnessId::ClaudeCode, Some("c1")).await.unwrap();
+    assert!(!accounts.slot_needs_signin(HarnessId::ClaudeCode, &saved.id));
+    // The CLI on that login is refused (`authentication_failed`).
+    env.run_refused(HarnessId::ClaudeCode, &credential).await;
+    let asked = hits.load(Ordering::SeqCst);
+    if cfg!(target_os = "macos") {
+        // An env token isn't a login the CLI can lose: nothing to flag here.
+        return;
+    }
+    assert!(accounts.slot_needs_signin(HarnessId::ClaudeCode, &saved.id));
+    // The next start moves off it, and never asks the network.
+    assert!(prepared(&env, "c1").await.unwrap().env.is_empty());
+    assert_eq!(pinned_to(&accounts, "c1"), None);
+    assert_eq!(hits.load(Ordering::SeqCst), asked);
+}
+
+#[tokio::test]
+async fn only_a_run_on_a_saved_accounts_login_flags_anything() {
+    let d = device();
+    let env = PinRunEnvironment(d.accounts.clone());
+    for credential in ["live", "rotation:acct-b:live", "login:no-such-slot", "claude:abcdef", "something"] {
+        env.run_refused(HarnessId::ClaudeCode, credential).await;
+    }
+    env.run_refused(HarnessId::Codex, &format!("login:{}", d.saved)).await;
+    assert!(!d.accounts.slot_needs_signin(HarnessId::ClaudeCode, &d.saved));
+    assert!(!d.accounts.slot_needs_signin(HarnessId::ClaudeCode, &d.live));
 }
 
 #[tokio::test]
@@ -471,7 +511,10 @@ async fn an_outage_during_a_refresh_does_not_flag_the_login() {
     let slot = claude_slot("acct-b", "b@example.com", "at-b", now_ms() - 60_000);
     accounts.write_slot(&slot).unwrap();
     accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&slot.id));
-    prepared(&PinRunEnvironment(accounts.clone()), "c1").await.unwrap_err();
+    // Where the CLI refreshes for itself (a login folder) the run starts
+    // and the CLI tries; where the token is the chat's own it can't start.
+    let started = prepared(&PinRunEnvironment(accounts.clone()), "c1").await;
+    assert_eq!(started.is_ok(), !cfg!(target_os = "macos"));
     assert!(!accounts.slot_needs_signin(HarnessId::ClaudeCode, &slot.id));
     // An outage says nothing of the login: the pin stays for the next try.
     assert_eq!(pinned_to(&accounts, "c1"), Some(slot.id.clone()));

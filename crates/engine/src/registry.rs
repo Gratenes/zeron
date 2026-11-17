@@ -176,6 +176,11 @@ pub trait RunEnvironment: Send + Sync {
         None
     }
 
+    /// A run of `harness` that started with `credential` was refused its
+    /// login (`authentication_failed`): the account it ran on records that, so
+    /// the next run of a chat pinned there doesn't start on it.
+    async fn run_refused(&self, _harness: HarnessId, _credential: &str) {}
+
     /// A run of `harness` that started with `credential` reported the
     /// subscription's usage (see [`zeron_proto::AgentEvent::PlanUsage`]).
     async fn record_usage(
@@ -389,6 +394,14 @@ impl HarnessRegistry {
             }
         }
         None
+    }
+
+    /// Tell every provider a run that started with `credential` was refused
+    /// its login (the account it belongs to records it).
+    pub async fn run_refused(&self, harness: HarnessId, credential: &str) {
+        for environment in self.environments() {
+            environment.run_refused(harness, credential).await;
+        }
     }
 
     /// Hand a run's reported subscription usage to every provider (the

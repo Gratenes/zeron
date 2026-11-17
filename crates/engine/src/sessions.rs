@@ -5561,6 +5561,11 @@ async fn drive_run(
             }
             tracing::warn!(chat = %chat_id, credential = ?started_with,
                 "the run's Claude login was refused; relaunching it once on the current login");
+            // The account it ran on records the refusal first, so a pin to a
+            // dead login falls back instead of starting on it again.
+            if let Some(credential) = started_with.as_deref() {
+                inner.registry.run_refused(harness_id, credential).await;
+            }
             inner.remove_run(&chat_id, &run_id);
             let engine = SessionsEngine { inner: inner.clone() };
             let chat = chat_id.clone();

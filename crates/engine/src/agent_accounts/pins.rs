@@ -265,11 +265,23 @@ impl AgentAccounts {
                 let who = slot.profile.email.clone();
                 let signed_out = || format!("{who} needs signing in again (Settings → Accounts), or pin this chat to another account");
                 if login_dir_usable() {
+                    // Refused before (a probe or a refresh, or a run on this
+                    // login) and the login is unchanged since: starting a CLI
+                    // on it only fails again. The flag clears itself when the
+                    // login changes (a sign-in again, or the CLI's refresh).
+                    if self.slot_needs_signin(harness, account) {
+                        return Err(signed_out());
+                    }
                     // The account's own folder: the CLI keeps and refreshes
                     // its login (see `logins`). `None`: the live login.
                     return match self.claude_login_run(&slot).await {
                         Ok(run) => Ok(run.map(|run| PinRun { env: run.env, credential: run.credential })),
-                        Err(_) => Err(signed_out()),
+                        Err(error) => {
+                            if matches!(error, super::ProbeError::Unauthorized { .. }) {
+                                self.note_signin_failure(harness, &slot, error);
+                            }
+                            Err(signed_out())
+                        }
                     };
                 }
                 // The live login runs as it always did, and is never
@@ -375,6 +387,10 @@ impl crate::registry::RunEnvironment for PinRunEnvironment {
             }
         }
         AccountsRunEnvironment(self.0.clone()).credential(harness, chat_id).await
+    }
+
+    async fn run_refused(&self, harness: HarnessId, credential: &str) {
+        self.0.note_run_refused(harness, credential);
     }
 
     async fn record_usage(
