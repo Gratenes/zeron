@@ -131,7 +131,7 @@ class PhoneSms(private val context: Context) {
     /**
      * Saves one attachment (a part of a picture message or RCS chat) as a file and says where, so an agent can look at
      * a photo or copy a file off the phone. Under `/storage/emulated/0/Zeron/Attachments` when Zeron has All files
-     * access (that folder is added to the allowed ones, read-only, so file copy can reach it); small images also come
+     * access (reachable by file copy when Full access to files is on); small images also come
      * back inline.
      */
     fun attachment(messageId: String, partId: String): JSONObject {
@@ -165,7 +165,7 @@ class PhoneSms(private val context: Context) {
         } }
         val result = JSONObject().put("messageId", messageId).put("partId", partId).put("type", type).put("size", size)
             .put("sha256", digest.digest().joinToString("") { "%02x".format(it) })
-        if (shared) result.put("path", file.path).put("note", "Saved on the phone at that path, inside an allowed folder (read-only): copy it with device_file_copy.")
+        if (shared) result.put("path", file.path).put("note", "Saved on the phone at that path: copy it off with device_file_copy (needs the person to have turned on Full access to files).")
         else result.put("path", JSONObject.NULL).put("note", "Saved in Zeron's own storage, which agents can't reach (Zeron needs All files access for that).")
         if (type.startsWith("image/") && size <= MAX_INLINE) result.put("inlineBase64", android.util.Base64.encodeToString(file.readBytes(), android.util.Base64.NO_WRAP))
         return result
@@ -174,10 +174,7 @@ class PhoneSms(private val context: Context) {
     private fun attachmentDir(): Pair<File, Boolean> {
         if (android.os.Build.VERSION.SDK_INT >= 30 && android.os.Environment.isExternalStorageManager()) {
             val dir = File("/storage/emulated/0/Zeron/Attachments")
-            if (dir.isDirectory || dir.mkdirs()) {
-                if (PhoneFolders.all(context).none { it.path == dir.path }) runCatching { PhoneFolders.add(context, dir.path) }
-                return dir to true
-            }
+            if (dir.isDirectory || dir.mkdirs()) return dir to true
         }
         val own = context.getExternalFilesDir("attachments") ?: File(context.cacheDir, "attachments")
         own.mkdirs()
@@ -393,7 +390,7 @@ class PhoneSms(private val context: Context) {
 
     /**
      * Sends files (and a caption) in a Google Messages conversation, so they go as an RCS file transfer when both
-     * sides have RCS (Messages itself falls back to MMS). Files come from allowed folders. The screen is only tapped
+     * sides have RCS (Messages itself falls back to MMS). Files come from shared storage (Full access to files not needed, All files access is). The screen is only tapped
      * Send once Messages' compose screen shows the files attached, so the caption is never sent alone.
      */
     private fun sendWithAttachments(number: String, text: String, paths: List<String>, via: String, confirm: ((String) -> Boolean)?): JSONObject {

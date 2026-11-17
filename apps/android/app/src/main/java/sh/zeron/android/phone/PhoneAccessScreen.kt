@@ -92,21 +92,9 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
     var unlockFailed by remember(refresh) { mutableStateOf(settings.unlockFailed) }
     var pinStored by remember(refresh) { mutableStateOf(PhonePinVault.has(context)) }
     var enteringPin by remember { mutableStateOf(false) }
-    var typingPath by remember { mutableStateOf(false) }
     var filesOn by remember(refresh) { mutableStateOf(settings.groupOn(PhoneSettings.Group.FILES)) }
-    var folders by remember(refresh) { mutableStateOf(PhoneFolders.all(context)) }
     var confirmWrites by remember(refresh) { mutableStateOf(settings.confirmFileWrites) }
     val allFiles = remember(refresh) { Build.VERSION.SDK_INT >= 30 && android.os.Environment.isExternalStorageManager() }
-    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
-        if (tree != null) {
-            runCatching { context.contentResolver.takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
-            PhoneFolders.pathOfTree(tree)?.let { path ->
-                PhoneFolders.add(context, path, tree.toString(), write = false)
-                PhoneActionLog.add(context, "files_setup", "the person allowed the folder $path (read only)", true, null)
-                folders = PhoneFolders.all(context)
-            }
-        }
-    }
     val deviceSecure = remember(refresh) { context.getSystemService(android.app.KeyguardManager::class.java).isDeviceSecure }
     val sms = remember { PhoneSms(context) }
     val accessibilityOn = remember(refresh) { PhoneAccessibilityService.instance != null }
@@ -188,20 +176,16 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
                 SettingRow(4, 6, R.drawable.zi_chats, "Notification access", if (listenerOn) "On: Zeron can answer a Google Messages chat" else "Optional: tap to turn on “Zeron”, so agents can reply in Google Messages chats (RCS)") {
                     context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                 }
-                SettingRow(5, 6, R.drawable.zi_folder, "All files access", if (allFiles) "On: allowed folders are read and written as plain files, any file type" else "Off: tap, then switch “Allow access to manage all files” on for Zeron. Needed for the Files section below (without it only folders picked with the picker work).") {
-                    val pkg = Uri.parse("package:${context.packageName}")
-                    try {
-                        context.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                    } catch (_: android.content.ActivityNotFoundException) {
-                        // The per-app screen isn't there: the list of apps is, find Zeron in it.
-                        context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                    }
+                SettingRow(5, 6, R.drawable.zi_folder, "All files access", if (allFiles) "On: needed for full access to this phone's files" else "Off: tap, then switch “Allow access to manage all files” on for Zeron. Needed for full access to files (below).") {
+                    openAllFilesAccess(context)
+                }
+            }
                 }
             }
 
             section("What agents may do")
             group {
-                val groups = PhoneSettings.Group.entries
+                val groups = PhoneSettings.Group.entries.filter { it != PhoneSettings.Group.FILES }
                 groups.forEachIndexed { i, g ->
                     var on by remember(refresh) { mutableStateOf(settings.groupOn(g)) }
                     SettingRow(i, groups.size, R.drawable.zi_check, g.label, g.about, trailing = {
@@ -242,32 +226,17 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
 
             section("Files")
             group {
-                SettingRow(0, if (allFiles) 4 else 3, R.drawable.zi_check, "Use files in allowed folders", if (filesOn) "On: agents and your other devices can list and read the folders below" else "Off. Nothing below works until this is on.", trailing = {
-                    Switch(filesOn, { filesOn = it; settings.setGroup(PhoneSettings.Group.FILES, it) })
-                }) {}
-                SettingRow(1, if (allFiles) 4 else 3, R.drawable.zi_folder_with_files, "Add a folder", "Pick it with Android's folder picker (the folder itself, not a file). Added read-only; allow writing per folder.") {
-                    pickFolder.launch(null)
-                }
-                if (allFiles) SettingRow(2, 4, R.drawable.zi_pen, "Add a folder by path", "Type a path such as /storage/emulated/0/Shiz: no picker, any folder in shared storage.") {
-                    typingPath = true
-                }
-                SettingRow(if (allFiles) 3 else 2, if (allFiles) 4 else 3, R.drawable.zi_check, "Ask me before a file is written", if (confirmWrites) "A notification asks once per transfer" else "Allowed folders accept writes without asking: only turn this off if you trust them", trailing = {
+                SettingRow(0, 2, R.drawable.zi_folder_with_files, "Full access to this phone's files", if (filesOn) (if (allFiles) "On: agents and your other devices can list, read and write any file in shared storage, SD cards included. Android's own Android/data and obb folders and Zeron's private data stay closed." else "On, but Android's “All files access” is still off: tap here to allow it, or nothing works.") else "Off. Turn it on to let agents and your other devices copy files to and from this phone.", trailing = {
+                    Switch(filesOn, {
+                        filesOn = it
+                        settings.setGroup(PhoneSettings.Group.FILES, it)
+                        PhoneActionLog.add(context, "files_setup", "the person turned full file access ${if (it) "on" else "off"}", true, null)
+                        if (it && !allFiles) openAllFilesAccess(context)
+                    })
+                }) { if (!allFiles) openAllFilesAccess(context) }
+                SettingRow(1, 2, R.drawable.zi_check, "Ask me before a file is written (advanced)", if (confirmWrites) "A notification asks once per transfer" else "Off: agents write files without asking. Every file's path and size is in the log below.", trailing = {
                     Switch(confirmWrites, { confirmWrites = it; settings.confirmFileWrites = it })
                 }) {}
-            }
-            if (folders.isNotEmpty()) group {
-                folders.forEachIndexed { i, f ->
-                    SettingRow(i, folders.size, R.drawable.zi_folder, f.path, if (f.write) "Read and write. Tap to remove this folder." else "Read only. Tap to remove this folder.", trailing = {
-                        Switch(f.write, { on ->
-                            PhoneFolders.setWrite(context, f.path, on)
-                            folders = PhoneFolders.all(context)
-                            PhoneActionLog.add(context, "files_setup", "the person ${if (on) "allowed writing in" else "made read-only"} ${f.path}", true, null)
-                        })
-                    }) {
-                        PhoneFolders.remove(context, f.path)
-                        folders = PhoneFolders.all(context)
-                    }
-                }
             }
 
             section("Text messages")
@@ -335,35 +304,6 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
                 item { TextButton({ PhoneActionLog.clear() }, Modifier.padding(horizontal = 16.dp)) { Text("Clear the log") } }
             }
         }
-    }
-
-    if (typingPath) {
-        var typed by remember { mutableStateOf("/storage/emulated/0/") }
-        var problem by remember { mutableStateOf<String?>(null) }
-        AlertDialog(
-            onDismissRequest = { typingPath = false },
-            title = { Text("Add a folder by path") },
-            text = {
-                Column {
-                    OutlinedTextField(
-                        value = typed, onValueChange = { typed = it; problem = null }, label = { Text("Folder path") }, singleLine = true,
-                        isError = problem != null, supportingText = { Text(problem ?: "It is added read-only.") }, modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    runCatching { PhoneFolders.addByPath(context, typed) }
-                        .onSuccess {
-                            folders = PhoneFolders.all(context)
-                            PhoneActionLog.add(context, "files_setup", "the person allowed the folder ${typed.trim()} (read only)", true, null)
-                            typingPath = false
-                        }
-                        .onFailure { problem = it.message }
-                }) { Text("Add") }
-            },
-            dismissButton = { TextButton({ typingPath = false }) { Text("Cancel") } },
-        )
     }
 
     if (enteringPin) {
@@ -466,4 +406,14 @@ private fun SettingRow(
         supportingContent = { Text(support) },
         trailingContent = trailing,
     ) { Text(title) }
+}
+
+/** Android's All files access screen for Zeron (its own page if there is one, else the list of apps). */
+private fun openAllFilesAccess(context: android.content.Context) {
+    val pkg = Uri.parse("package:${context.packageName}")
+    try {
+        context.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkg).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    } catch (_: android.content.ActivityNotFoundException) {
+        context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
 }

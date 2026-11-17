@@ -207,7 +207,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
         "sms_attachment" -> "saved attachment ${a.optString("part_id")} of ${a.optString("message_id")}"
         "sms_react" -> "reacted ${a.optString("emoji")} to a message"
         "contacts_search" -> "searched contacts"
-        "files_list" -> "listed files in ${a.optString("path").ifEmpty { "the allowed folders" }}"
+        "files_list" -> "listed files in ${a.optString("path").ifEmpty { "the storage volumes" }}"
         "files_stat" -> "looked at ${a.optString("path")}"
         "files_hash" -> "checksummed ${a.optString("path")}"
         "files_read" -> "read ${a.optString("path")} from byte ${a.optLong("offset")}"

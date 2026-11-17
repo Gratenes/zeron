@@ -14,6 +14,18 @@ class PhoneTestSendReceiver : BroadcastReceiver() {
                 val sms = PhoneSms(context)
                 when (intent.getStringExtra("tool")) {
                     "attachment" -> return@runCatching sms.attachment(intent.getStringExtra("message_id") ?: "", intent.getStringExtra("part_id") ?: "").toString().take(600)
+                    "files" -> {
+                        val f = PhoneFiles(context)
+                        val path = intent.getStringExtra("path") ?: ""
+                        return@runCatching when (intent.getStringExtra("op")) {
+                            "list" -> f.list(path, null).toString()
+                            "stat" -> f.stat(path).toString()
+                            "hash" -> f.hash(path).toString()
+                            "read" -> f.read(path, intent.getLongExtra("offset", 0), 400000).toString()
+                            "write" -> f.writePart(intent.getStringExtra("id") ?: "t", path, intent.getLongExtra("offset", 0), android.util.Base64.decode(intent.getStringExtra("data") ?: "", android.util.Base64.DEFAULT), intent.getBooleanExtra("final", true), intent.getStringExtra("sha"), intent.getBooleanExtra("overwrite", false), null).toString()
+                            else -> "bad op"
+                        }
+                    }
                     "read" -> return@runCatching sms.read(intent.getStringExtra("thread_id"), null, 10, null).toString()
                 }
                 sms.send(intent.getStringExtra("to"), null, intent.getStringExtra("text") ?: "test", intent.getStringExtra("via") ?: "auto", null).toString()

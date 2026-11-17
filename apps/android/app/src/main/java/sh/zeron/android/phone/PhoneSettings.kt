@@ -10,6 +10,15 @@ import android.content.Context
 class PhoneSettings(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("phone-access", Context.MODE_PRIVATE)
 
+    init {
+        // Files used to be a per-folder allow list with write flags; now it is one switch (same key, so a switch that
+        // was on stays on). The old list and the old "ask before writing" default are dropped, once.
+        if (!prefs.getBoolean("files-simple", false)) {
+            context.applicationContext.getSharedPreferences("phone-folders", Context.MODE_PRIVATE).edit().clear().apply()
+            prefs.edit().remove("confirm-file-writes").putBoolean("files-simple", true).apply()
+        }
+    }
+
     var enabled: Boolean
         get() = prefs.getBoolean("enabled", false)
         set(value) = prefs.edit().putBoolean("enabled", value).apply()
@@ -40,7 +49,7 @@ class PhoneSettings(context: Context) {
 
     /** Ask the person before a file is written to the phone (once per transfer). */
     var confirmFileWrites: Boolean
-        get() = prefs.getBoolean("confirm-file-writes", true)
+        get() = prefs.getBoolean("confirm-file-writes", false)
         set(value) = prefs.edit().putBoolean("confirm-file-writes", value).apply()
 
     /** Agents may unlock the phone with the PIN the person stored (off by default). */
@@ -81,6 +90,6 @@ class PhoneSettings(context: Context) {
         ATTACH_READ("attachments-read", "Read attachments", "Save photos, videos and files from messages so agents can look at them", true),
         ATTACH_SEND("attachments-send", "Send attachments", "Photos, videos and files in a message (through Google Messages)", false),
         REACTIONS("reactions", "React to messages", "Send an emoji reaction to a message", false),
-        FILES("files", "Use files in allowed folders", "List, read and (where you allow it) write files; set the folders below", false),
+        FILES("files", "Full access to this phone's files", "List, read and write any file in shared storage", false),
     }
 }

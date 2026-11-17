@@ -1,12 +1,9 @@
 package sh.zeron.android.phone
 
 import android.content.Context
-import android.net.Uri
 import android.os.Environment
 import android.os.UserManager
-import android.provider.DocumentsContract
 import android.util.Base64
-import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.io.InputStream
 import java.io.RandomAccessFile
@@ -16,11 +13,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Files, for the person's allowed folders only ([PhoneFolders]): list, stat, hash, read in chunks, and write in
- * chunks (to a `<name>.zeron-part` next to the target, renamed when the size and checksum match). Paths are absolute
- * strings. With "All files access" the folders are read as plain files; without it, through the tree the person
- * picked (the same path strings come back). Errors name their code first: files.no_grant, files.denied,
- * files.not_found, files.exists, files.too_large, files.bad_offset, files.unavailable.
+ * Files in shared storage, behind one switch ("Full access to this phone's files") and Android's All files access:
+ * list, stat, hash, read in chunks, and write in chunks (to a `<name>.zeron-part` next to the target, renamed when the
+ * size and checksum match; missing folders are created). The floor ([FilesPolicy]): only shared storage (internal
+ * and SD cards), never Android/data or obb, never Zeron's own private data. Errors name their code first:
+ * files.no_grant, files.denied, files.not_found, files.exists, files.too_large, files.bad_offset, files.unavailable.
  */
 class PhoneFiles(private val context: Context) {
     private val settings = PhoneSettings(context)
@@ -30,124 +27,77 @@ class PhoneFiles(private val context: Context) {
     /** An entry or a root: one file or directory. */
     private class Entry(val name: String, val path: String, val dir: Boolean, val size: Long, val mtime: Long)
 
-    // ── resolving a path inside a granted folder ────────────────────────────
-
-    /** A granted folder and the way it is read: plain files, or through its picked tree. */
-    private class Root(val folder: PhoneFolders.Folder, val tree: DocumentFile?)
-
     private fun allFilesAccess(): Boolean = android.os.Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager()
 
-    private fun roots(): List<Root> {
-        if (!context.getSystemService(UserManager::class.java).isUserUnlocked) fail("files.unavailable", "the phone's storage isn't unlocked yet: the person has to unlock it once after a restart")
-        val folders = PhoneFolders.all(context)
-        if (folders.isEmpty()) fail("files.no_grant", "no folder is allowed yet: the person adds folders in Zeron → Settings → Agent phone access → Files")
-        return folders.map { f ->
-            val tree = if (!allFilesAccess() && f.uri != null) DocumentFile.fromTreeUri(context, Uri.parse(f.uri)) else null
-            Root(f, tree)
+    /** Internal storage and every other volume (SD cards) that is mounted. */
+    private fun storageRoots(): List<String> {
+        val out = ArrayList<String>()
+        out += "/storage/emulated/0"
+        File("/storage").listFiles()?.forEach { v ->
+            if (v.isDirectory && v.name != "emulated" && v.name != "self" && v.canRead()) out += v.path
         }
+        return out
     }
 
-    private fun grantedList(): String = PhoneFolders.all(context).joinToString(", ") { it.path }
+    private fun privateDirs(): List<String> = listOfNotNull(
+        runCatching { context.dataDir.canonicalPath }.getOrNull(),
+        runCatching { context.filesDir.canonicalPath }.getOrNull(),
+        runCatching { context.cacheDir.canonicalPath }.getOrNull(),
+        runCatching { context.createDeviceProtectedStorageContext().dataDir.canonicalPath }.getOrNull(),
+    )
 
-    /** The root a path is inside (longest match, after making it canonical), and the path's segments below it. */
-    private fun locate(path: String): Pair<Root, List<String>> {
+    /** The canonical, allowed [File] for [path]; throws files.* otherwise. */
+    private fun locate(path: String): File {
         if (!path.startsWith("/")) fail("files.denied", "paths are absolute (start with /)")
-        val roots = roots()
-        val canonical = canonicalize(path)
-        val hit = roots.filter { canonical == it.folder.path || canonical.startsWith(it.folder.path + "/") }.maxByOrNull { it.folder.path.length }
-            ?: fail("files.no_grant", "$path is not inside an allowed folder (allowed: ${grantedList()})")
-        val below = canonical.removePrefix(hit.folder.path).split('/').filter { it.isNotEmpty() }
-        return hit to below
+        if (!context.getSystemService(UserManager::class.java).isUserUnlocked) fail("files.unavailable", "the phone's storage isn't unlocked yet: the person has to unlock it once after a restart")
+        if (!allFilesAccess()) fail("files.no_grant", "full file access needs Android's All files access for Zeron: the person turns it on in Zeron → Settings → Agent phone access")
+        val lexical = FilesPolicy.clean(path)
+        val canonical = runCatching { File(lexical).canonicalPath }.getOrDefault(lexical)
+        val roots = storageRoots().map { runCatching { File(it).canonicalPath }.getOrDefault(it) } + storageRoots()
+        FilesPolicy.refusal(lexical, roots, privateDirs())?.let { fail("files.denied", "$path is $it") }
+        FilesPolicy.refusal(canonical, roots, privateDirs())?.let { fail("files.denied", "$path is $it") }
+        return File(canonical)
     }
 
-    /** A real file inside an allowed folder, for handing to another app: needs All files access (a picked tree can't give a path). */
+    /** A real file, for handing to another app (attachments). */
     fun readableFile(path: String): File {
-        val (root, below) = locate(path)
-        if (!allFilesAccess()) fail("files.unavailable", "sending attachments from storage needs All files access for Zeron")
-        val f = fileOf(root, below)
+        val f = locate(path)
         if (!f.isFile) fail("files.not_found", "$path is not a file")
         return f
     }
 
-    /** `..`, `.` and repeated slashes resolved; for real files also symlinks (so a link can't leave the folder). */
-    private fun canonicalize(path: String): String {
-        val parts = ArrayList<String>()
-        for (p in path.split('/')) when (p) {
-            "", "." -> Unit
-            ".." -> if (parts.isNotEmpty()) parts.removeAt(parts.lastIndex)
-            else -> parts += p
-        }
-        val lexical = "/" + parts.joinToString("/")
-        return if (allFilesAccess()) runCatching { File(lexical).canonicalPath }.getOrDefault(lexical) else lexical
+    private fun entryOf(f: File): Entry {
+        if (!f.exists()) fail("files.not_found", f.path)
+        return Entry(f.name, f.path, f.isDirectory, if (f.isFile) f.length() else 0, f.lastModified())
     }
 
-    private fun requireWrite(root: Root) {
-        if (!root.folder.write) fail("files.denied", "${root.folder.path} is read-only: the person has to allow writing there in Zeron → Settings → Agent phone access → Files")
+    private fun children(f: File): List<Entry> {
+        if (!f.exists()) fail("files.not_found", f.path)
+        if (!f.isDirectory) fail("files.denied", "${f.path} is not a folder")
+        val list = f.listFiles() ?: fail("files.denied", "${f.path} can't be listed")
+        return list.filter { FilesPolicy.refusal(it.path, storageRoots(), privateDirs()) == null }
+            .map { Entry(it.name, it.path, it.isDirectory, if (it.isFile) it.length() else 0, it.lastModified()) }
     }
 
-    // ── the backends (files, or a picked tree) ──────────────────────────────
-
-    private fun fileOf(root: Root, below: List<String>) = File(root.folder.path + below.joinToString("") { "/$it" })
-
-    private fun docOf(root: Root, below: List<String>): DocumentFile? {
-        var d = root.tree ?: return null
-        for (seg in below) d = d.findFile(seg) ?: return null
-        return d
-    }
-
-    private fun entryOf(root: Root, below: List<String>): Entry {
-        val path = root.folder.path + below.joinToString("") { "/$it" }
-        if (root.tree == null) {
-            val f = fileOf(root, below)
-            if (!f.exists()) fail("files.not_found", path)
-            return Entry(f.name, path, f.isDirectory, if (f.isFile) f.length() else 0, f.lastModified())
-        }
-        val d = docOf(root, below) ?: fail("files.not_found", path)
-        return Entry(d.name ?: below.lastOrNull() ?: root.folder.path.substringAfterLast('/'), path, d.isDirectory, if (d.isFile) d.length() else 0, d.lastModified())
-    }
-
-    private fun children(root: Root, below: List<String>): List<Entry> {
-        val base = root.folder.path + below.joinToString("") { "/$it" }
-        if (root.tree == null) {
-            val f = fileOf(root, below)
-            if (!f.exists()) fail("files.not_found", base)
-            if (!f.isDirectory) fail("files.denied", "$base is not a folder")
-            return (f.listFiles() ?: fail("files.denied", "$base can't be listed")).map { Entry(it.name, "$base/${it.name}", it.isDirectory, if (it.isFile) it.length() else 0, it.lastModified()) }
-        }
-        val d = docOf(root, below) ?: fail("files.not_found", base)
-        if (!d.isDirectory) fail("files.denied", "$base is not a folder")
-        return d.listFiles().map { Entry(it.name ?: "?", "$base/${it.name}", it.isDirectory, if (it.isFile) it.length() else 0, it.lastModified()) }
-    }
-
-    private fun openRead(root: Root, below: List<String>, offset: Long): InputStream {
-        val path = root.folder.path + below.joinToString("") { "/$it" }
-        if (root.tree == null) {
-            val f = fileOf(root, below)
-            if (!f.isFile) fail("files.not_found", path)
-            return RandomAccessFile(f, "r").also { it.seek(offset) }.let { raf -> object : InputStream() {
-                override fun read(): Int = raf.read()
-                override fun read(b: ByteArray, off: Int, len: Int): Int = raf.read(b, off, len)
-                override fun close() = raf.close()
-            } }
-        }
-        val d = docOf(root, below)?.takeIf { it.isFile } ?: fail("files.not_found", path)
-        val input = context.contentResolver.openInputStream(d.uri) ?: fail("files.denied", "$path can't be opened")
-        var skipped = 0L
-        while (skipped < offset) { val s = input.skip(offset - skipped); if (s <= 0) break; skipped += s }
-        return input
+    private fun openRead(f: File, offset: Long): InputStream {
+        if (!f.isFile) fail("files.not_found", f.path)
+        return RandomAccessFile(f, "r").also { it.seek(offset) }.let { raf -> object : InputStream() {
+            override fun read(): Int = raf.read()
+            override fun read(b: ByteArray, off: Int, len: Int): Int = raf.read(b, off, len)
+            override fun close() = raf.close()
+        } }
     }
 
     // ── the tools ───────────────────────────────────────────────────────────
 
     fun list(path: String, cursor: String?): JSONObject {
         if (path.isEmpty() || path == "/") {
-            val roots = roots()
+            if (!allFilesAccess()) fail("files.no_grant", "full file access needs Android's All files access for Zeron: the person turns it on in Zeron → Settings → Agent phone access")
             val out = JSONArray()
-            roots.forEach { r -> out.put(JSONObject().put("name", r.folder.path.substringAfterLast('/').ifEmpty { "/" }).put("path", r.folder.path).put("kind", "dir").put("writable", r.folder.write)) }
-            return JSONObject().put("entries", out).put("allFilesAccess", allFilesAccess())
+            storageRoots().forEach { r -> out.put(JSONObject().put("name", if (r == "/storage/emulated/0") "Internal storage" else r.substringAfterLast('/')).put("path", r).put("kind", "dir").put("writable", true)) }
+            return JSONObject().put("entries", out).put("allFilesAccess", true)
         }
-        val (root, below) = locate(path)
-        val all = children(root, below).sortedBy { it.name }
+        val all = children(locate(path)).sortedBy { it.name }
         val page = all.filter { cursor == null || it.name > cursor }.take(PAGE)
         val out = JSONArray()
         page.forEach { out.put(entryJson(it)) }
@@ -155,18 +105,15 @@ class PhoneFiles(private val context: Context) {
         return JSONObject().put("entries", out).apply { if (more) put("cursor", page.last().name) }
     }
 
-    fun stat(path: String): JSONObject {
-        val (root, below) = locate(path)
-        return entryJson(entryOf(root, below))
-    }
+    fun stat(path: String): JSONObject = entryJson(entryOf(locate(path)))
 
     fun hash(path: String): JSONObject {
-        val (root, below) = locate(path)
-        val e = entryOf(root, below)
+        val f = locate(path)
+        val e = entryOf(f)
         if (e.dir) fail("files.denied", "${e.path} is a folder")
         val digest = MessageDigest.getInstance("SHA-256")
         var n = 0L
-        openRead(root, below, 0).use { input ->
+        openRead(f, 0).use { input ->
             val buffer = ByteArray(64 * 1024)
             while (true) {
                 val r = input.read(buffer)
@@ -181,12 +128,12 @@ class PhoneFiles(private val context: Context) {
     fun read(path: String, offset: Long, len: Int): JSONObject {
         if (len < 1 || len > CHUNK) fail("files.too_large", "len is 1 to $CHUNK bytes")
         if (offset < 0) fail("files.bad_offset", "offset is negative")
-        val (root, below) = locate(path)
-        val e = entryOf(root, below)
+        val f = locate(path)
+        val e = entryOf(f)
         if (e.dir) fail("files.denied", "${e.path} is a folder")
         val buffer = ByteArray(len)
         var got = 0
-        openRead(root, below, offset).use { input ->
+        openRead(f, offset).use { input ->
             while (got < len) {
                 val r = input.read(buffer, got, len - got)
                 if (r < 0) break
@@ -198,98 +145,57 @@ class PhoneFiles(private val context: Context) {
             .put("nextOffset", next).put("done", next >= e.size)
     }
 
-    // Writes in progress: transfer id → the part file's path, so a transfer can't be pointed at two targets.
+    // Writes in progress: transfer id → the target's path, so a transfer can't be pointed at two targets.
     private val transfers = ConcurrentHashMap<String, String>()
 
     /**
      * One chunk of a file written to [path]: the first (offset 0) starts `<path>.zeron-part` (refused if the target
-     * exists, unless [overwrite]); each next one must start where the held bytes end (else files.bad_offset names how
-     * many are held, so the sender can resume); the final one checks the size and [sha256] and renames.
+     * exists, unless [overwrite]; the folder is created if it is missing); each next one must start where the held
+     * bytes end (else files.bad_offset names how many are held, so the sender can resume); the final one checks the
+     * size and [sha256] and renames. Every finished file is logged with its path and size.
      */
     fun writePart(transferId: String, path: String, offset: Long, data: ByteArray, final: Boolean, sha256: String?, overwrite: Boolean, confirm: (() -> Boolean)?): JSONObject {
         if (data.size > CHUNK) fail("files.too_large", "a chunk is at most $CHUNK bytes")
         if (transferId.isBlank()) fail("files.denied", "transferId is empty")
-        val (root, below) = locate(path)
-        requireWrite(root)
-        if (below.isEmpty()) fail("files.denied", "that is the folder itself")
-        val name = below.last()
-        val parent = below.dropLast(1)
-        val partName = "$name.zeron-part"
-        val target = entryOrNull(root, below)
-        if (target?.dir == true) fail("files.denied", "${target.path} is a folder")
+        val target = locate(path)
+        if (target.path == "/storage/emulated/0" || storageRoots().contains(target.path)) fail("files.denied", "that is the storage root itself")
+        if (target.name.endsWith(".zeron-part")) fail("files.denied", "names ending .zeron-part are the transfer's own temporary files")
+        val part = File(target.parentFile, "${target.name}.zeron-part")
+        if (target.isDirectory) fail("files.denied", "${target.path} is a folder")
         val existing = transfers[transferId]
         if (existing != null && existing != path) fail("files.denied", "transfer $transferId is already writing $existing")
         if (offset == 0L && existing == null) {
-            if (target != null && !overwrite) fail("files.exists", target.path)
+            if (target.exists() && !overwrite) fail("files.exists", target.path)
             if (confirm != null && !confirm()) fail("files.denied", "the person declined to let a file be written to $path")
             transfers[transferId] = path
         }
-        val held = partSize(root, parent, partName)
+        val held = if (part.isFile) part.length() else 0L
         if (offset != held) fail("files.bad_offset", "the phone holds $held bytes of $path (send from offset $held)")
-        appendPart(root, parent, partName, data, create = offset == 0L)
+        val dir = target.parentFile ?: fail("files.denied", "no folder for $path")
+        if (!dir.isDirectory && !dir.mkdirs()) fail("files.denied", "couldn't create the folder ${dir.path}")
+        if (offset == 0L && part.exists()) part.delete()
+        java.io.FileOutputStream(part, true).use { it.write(data) }
         val received = held + data.size
         if (!final) return JSONObject().put("received", received)
         if (sha256 != null) {
-            val actual = sha256Of(root, parent, partName)
+            val digest = MessageDigest.getInstance("SHA-256")
+            openRead(part, 0).use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) { val r = input.read(buffer); if (r < 0) break; digest.update(buffer, 0, r) }
+            }
+            val actual = digest.digest().joinToString("") { "%02x".format(it) }
             if (!actual.equals(sha256, ignoreCase = true)) {
                 transfers.remove(transferId)
-                deletePart(root, parent, partName)
+                part.delete()
                 fail("files.denied", "the checksum of what arrived ($actual) is not the one given: the partial file was discarded")
             }
         }
-        finishPart(root, parent, partName, name, overwrite)
+        if (target.exists() && overwrite) target.delete()
+        else if (target.exists()) { transfers.remove(transferId); part.delete(); fail("files.exists", target.path) }
+        if (!part.renameTo(target)) fail("files.denied", "couldn't move the finished file into place")
         transfers.remove(transferId)
+        PhoneActionLog.add(context, "files_write", "wrote ${target.path} (${received} bytes)", true, null)
         return JSONObject().put("received", received).put("final", true).put("path", path)
-    }
-
-    private fun entryOrNull(root: Root, below: List<String>): Entry? = try { entryOf(root, below) } catch (_: PhoneToolException) { null }
-
-    private fun partSize(root: Root, parent: List<String>, partName: String): Long {
-        if (root.tree == null) return fileOf(root, parent + partName).takeIf { it.isFile }?.length() ?: 0
-        return docOf(root, parent + partName)?.takeIf { it.isFile }?.length() ?: 0
-    }
-
-    private fun appendPart(root: Root, parent: List<String>, partName: String, data: ByteArray, create: Boolean) {
-        if (root.tree == null) {
-            val dir = fileOf(root, parent)
-            if (!dir.isDirectory) fail("files.not_found", dir.path)
-            val part = File(dir, partName)
-            if (create && part.exists()) part.delete()
-            java.io.FileOutputStream(part, true).use { it.write(data) }
-            return
-        }
-        val dir = docOf(root, parent)?.takeIf { it.isDirectory } ?: fail("files.not_found", root.folder.path + parent.joinToString("") { "/$it" })
-        var part = dir.findFile(partName)
-        if (create && part != null) { part.delete(); part = null }
-        if (part == null) part = dir.createFile("application/octet-stream", partName) ?: fail("files.denied", "couldn't create $partName")
-        context.contentResolver.openOutputStream(part.uri, "wa")?.use { it.write(data) } ?: fail("files.denied", "couldn't write $partName")
-    }
-
-    private fun sha256Of(root: Root, parent: List<String>, partName: String): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        openRead(root, parent + partName, 0).use { input ->
-            val buffer = ByteArray(64 * 1024)
-            while (true) { val r = input.read(buffer); if (r < 0) break; digest.update(buffer, 0, r) }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
-
-    private fun deletePart(root: Root, parent: List<String>, partName: String) {
-        if (root.tree == null) File(fileOf(root, parent), partName).delete() else docOf(root, parent + partName)?.delete()
-    }
-
-    private fun finishPart(root: Root, parent: List<String>, partName: String, name: String, overwrite: Boolean) {
-        if (root.tree == null) {
-            val dir = fileOf(root, parent)
-            val target = File(dir, name)
-            if (target.exists() && overwrite) target.delete()
-            if (!File(dir, partName).renameTo(target)) fail("files.denied", "couldn't move the finished file into place")
-            return
-        }
-        val dir = docOf(root, parent) ?: fail("files.not_found", root.folder.path)
-        dir.findFile(name)?.let { if (overwrite) it.delete() else fail("files.exists", name) }
-        val part = dir.findFile(partName) ?: fail("files.not_found", partName)
-        if (!part.renameTo(name)) fail("files.denied", "couldn't move the finished file into place")
     }
 
     private fun entryJson(e: Entry): JSONObject =

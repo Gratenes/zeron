@@ -26,9 +26,6 @@
         <receiver android:name="sh.zeron.android.phone.PhoneTestPinReceiver" android:exported="true">
             <intent-filter><action android:name="sh.zeron.android.TEST_PIN" /></intent-filter>
         </receiver>
-        <receiver android:name="sh.zeron.android.phone.PhoneTestFolderReceiver" android:exported="true">
-            <intent-filter><action android:name="sh.zeron.android.TEST_FOLDER" /></intent-filter>
-        </receiver>
         <receiver android:name="sh.zeron.android.car.CarTestReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="sh.zeron.android.TEST_CAR_REPORT" />
