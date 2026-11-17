@@ -8,11 +8,15 @@
 --  * A chat whose turn a limit stopped (`limit.hit`), or whose account signed
 --    out, is pinned to another account, so its next turn moves.
 --
--- An account is skipped while it is signed out or its limit hasn't reset
--- (`limited_until`). Among the rest the one with the lowest usage (its
--- fullest window) wins; accounts within 5 points of each other, or whose usage
--- Zeron hasn't read yet, are told apart by how many chats are pinned to them,
--- so a burst of new chats still takes turns. `zeron.pins()` is read each
+-- An account is skipped while it is signed out (its refresh was refused, or its
+-- last check said so: `signed_out`) or its limit hasn't reset
+-- (`limited_until`). One whose last usage check failed has no fresh reading
+-- and ranks behind every account whose check worked, so a login that is
+-- erroring is chosen only when nothing else is left, never because few chats
+-- are pinned to it. Among the rest the one with the lowest usage (its fullest
+-- window) wins; accounts within 5 points of each other, or whose usage Zeron
+-- hasn't read yet, are told apart by how many chats are pinned to them, so a
+-- burst of new chats still takes turns. `zeron.pins()` is read each
 -- time, not remembered, so the service can stop between chats.
 --
 -- The window half (init.luau) tells this whether the setting is on; with no
@@ -61,13 +65,24 @@ local function candidates(away: string?): { any }
 	for _, a in accounts do
 		local row = usage[a.account]
 		if a.pinnable and not a.signed_out and a.account ~= away and not (row ~= nil and row.limited_until ~= nil) then
-			table.insert(out, { account = a.account, email = a.email, used = used(row), chats = chats[a.account] or 0 })
+			table.insert(out, {
+				account = a.account,
+				email = a.email,
+				used = used(row),
+				chats = chats[a.account] or 0,
+				failing = row ~= nil and row.error ~= nil,
+			})
 		end
 	end
 	return out
 end
 
 local function better(a: any, b: any): boolean
+	-- A check that failed says nothing about what is left, and the account may
+	-- be dead: behind every account whose check worked.
+	if a.failing ~= b.failing then
+		return not a.failing
+	end
 	if a.used ~= nil and b.used ~= nil and math.abs(a.used - b.used) >= LEVEL then
 		return a.used < b.used
 	end
