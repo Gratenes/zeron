@@ -12238,8 +12238,13 @@ impl Render for Composer {
                         .map(|chat| chat.device_id.clone())
                         .filter(|device| state.local_device_id.as_ref() != Some(device))
                 };
+                let chat = self
+                    .state
+                    .read(cx)
+                    .selected_chat_row()
+                    .map(|chat| chat.id.clone());
                 self.account_usage
-                    .update(cx, |usage, cx| usage.track(harness, model, target, cx));
+                    .update(cx, |usage, cx| usage.track(harness, model, target, chat, cx));
             }
             container.child(
                 div()

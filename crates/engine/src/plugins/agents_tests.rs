@@ -192,7 +192,7 @@ impl AgentHost for Host {
         let mut pins = lock(&self.pinned);
         pins.retain(|p| !(p.harness == harness && p.chat == chat));
         if let Some(account) = account {
-            pins.push(Pin { chat: chat.into(), harness, account: account.into(), since: 7 });
+            pins.push(Pin { chat: chat.into(), harness, account: account.into(), since: 7, by_user: false });
         }
         Ok(())
     }
@@ -1062,6 +1062,19 @@ async fn account_rows_say_whether_they_can_be_pinned_and_whether_they_are_usable
     assert_eq!(usage[0]["limited_until"], 4_000_000_000_000_i64);
     assert!(usage[1].get("limited_until").is_none());
     assert!(rows[0].get("limited_until").is_none(), "limits are usage");
+}
+
+#[tokio::test]
+async fn a_chat_the_person_gave_an_account_is_not_moved_by_a_plugin() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    f.agents.observe_accounts(&f.snapshot());
+    lock(&f.host.pinned).push(Pin { chat: "c1".into(), harness: HarnessId::ClaudeCode, account: "a1".into(), since: 7, by_user: true });
+    let moved = f.op("p", pin("c1", "a2")).await;
+    assert_eq!(moved.expect_err("refused").reason, reason::CHOSEN);
+    let cleared = f.op("p", json!({ "op": "pin_account", "provider": "claude-code", "chat": "c1" })).await;
+    assert_eq!(cleared.expect_err("refused").reason, reason::CHOSEN);
+    assert_eq!(lock(&f.host.pinned)[0].account, "a1");
 }
 
 #[tokio::test]

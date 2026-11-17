@@ -130,7 +130,7 @@ impl AgentHost for EngineAgentHost {
         self.accounts
             .pins()
             .into_iter()
-            .map(|p| Pin { chat: p.chat, harness: p.harness, account: p.account, since: p.since })
+            .map(|p| Pin { chat: p.chat, harness: p.harness, account: p.account, since: p.since, by_user: p.by_user })
             .collect()
     }
 

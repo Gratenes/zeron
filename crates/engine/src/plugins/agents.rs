@@ -158,6 +158,8 @@ pub mod reason {
     pub const BAD_CALL: &str = "bad_call";
     /// Zeron tried and it failed (the words say why).
     pub const FAILED: &str = "failed";
+    /// The person chose that chat's account: it stays until they change it.
+    pub const CHOSEN: &str = "chosen";
 }
 
 /// The engine, as plugins' agent ops reach it (lib.rs implements it).
@@ -229,6 +231,9 @@ pub struct Pin {
     pub account: String,
     /// Epoch millis it was pinned.
     pub since: i64,
+    /// The person chose it in the chat's account picker: a plugin's pin
+    /// doesn't replace or take it back.
+    pub by_user: bool,
 }
 
 /// How a plugin's message goes, as the composer would send it.
@@ -876,6 +881,9 @@ impl Agents {
         let account = args.get("account").and_then(Json::as_str).filter(|a| !a.is_empty());
         let host = self.host()?;
         let current = host.pins().into_iter().find(|p| p.harness == harness && p.chat == chat);
+        if current.as_ref().is_some_and(|p| p.by_user) {
+            return Err(Refused::new(reason::CHOSEN, "The person chose that chat's account; it stays until they change it"));
+        }
         let Some(account) = account else {
             let current = current.ok_or_else(|| Refused::new(reason::ALREADY, "That chat isn't pinned to an account"))?;
             self.loop_guard(by)?;
