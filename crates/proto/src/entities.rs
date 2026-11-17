@@ -1722,6 +1722,21 @@ pub enum AgentAuthKind {
     ApiKey,
 }
 
+/// The account one chat runs on, when it has a pin of its own
+/// (`PinChatAccount` / `GetChatAccountPin`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAccountPin {
+    /// The saved account the chat is pinned to; `None`: automatic (the
+    /// plugins that pin, built-in rotation, or the live login place it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// The person chose it (in the chat's account picker): plugins don't move
+    /// the chat off it. Otherwise a plugin placed it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub by_user: bool,
+}
+
 /// Everything the Accounts settings page renders, rebuilt after every mutation.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

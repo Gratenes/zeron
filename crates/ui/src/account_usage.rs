@@ -10,7 +10,7 @@ use gpui::{
     Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, Task, Window,
     div, prelude::*, px,
 };
-use zeron_proto::{AgentAccount, AgentAccountsSnapshot, HarnessId};
+use zeron_proto::{AgentAccount, AgentAccountsSnapshot, AgentAuthKind, ChatAccountPin, HarnessId};
 use zeron_rpc::methods;
 
 use crate::account_rotation;
@@ -97,6 +97,39 @@ pub fn active_account(
         .find(|account| account.harness == harness && account.active)
 }
 
+/// Agents whose chats can each run on a saved account of their own (the
+/// engine's pins), so the picker chooses for the chat, not for the device.
+pub fn chat_pinnable(harness: HarnessId) -> bool {
+    matches!(harness, HarnessId::ClaudeCode | HarnessId::Muse)
+}
+
+/// Whether a chat can be given `account`: a login that needs signing in
+/// again is not a choice (its row signs it in), and neither is an API key
+/// (spreading over it saves nothing). Pure.
+pub fn chat_pickable(account: &AgentAccount) -> bool {
+    !account.needs_signin && account.auth_kind != Some(AgentAuthKind::ApiKey)
+}
+
+/// "Automatic", or the account's email. Pure.
+fn account_name(account: &AgentAccount) -> String {
+    account
+        .email
+        .clone()
+        .or_else(|| account.display_name.clone())
+        .unwrap_or_else(|| "Unknown account".into())
+}
+
+/// The heading of a chat's account choice: "This chat: …". Pure.
+pub fn chat_heading(accounts: &[AgentAccount], pin: &ChatAccountPin) -> String {
+    let name = pin
+        .account
+        .as_deref()
+        .and_then(|id| accounts.iter().find(|a| a.id == id))
+        .map(account_name)
+        .unwrap_or_else(|| "Automatic".into());
+    format!("This chat: {name}")
+}
+
 /// Loads (and switches) the accounts of the composer's target device.
 pub struct AccountUsage {
     state: Entity<AppState>,
@@ -107,6 +140,9 @@ pub struct AccountUsage {
     chat: Option<String>,
     /// Its turn is running: a start or an end may move it to an account.
     running: bool,
+    /// The account the chat is pinned to (once the engine said): the picker
+    /// chooses for this chat.
+    chat_pin: Option<(String, ChatAccountPin)>,
     /// The composer's selected model: Cursor's ring follows its pool.
     model: Option<String>,
     /// Once any list has been asked for the current target.
@@ -118,6 +154,7 @@ pub struct AccountUsage {
     refresh_task: Option<Task<()>>,
     action_task: Option<Task<()>>,
     rotation_task: Option<Task<()>>,
+    pin_task: Option<Task<()>>,
     popup: popover::Popup<FooterCard>,
     _poll: Task<()>,
     _cache: Subscription,
@@ -160,6 +197,7 @@ impl AccountUsage {
             harness: None,
             chat: None,
             running: false,
+            chat_pin: None,
             model: None,
             loaded: false,
             last_forced: None,
@@ -168,6 +206,7 @@ impl AccountUsage {
             refresh_task: None,
             action_task: None,
             rotation_task: None,
+            pin_task: None,
             popup: popover::Popup::default(),
             _poll: poll,
             // Settings → Accounts writes the same cache.
@@ -191,6 +230,7 @@ impl AccountUsage {
         cx: &mut Context<Self>,
     ) {
         let harness = harness.filter(|h| signs_in(*h) && reports_usage(*h));
+        let harness_changed = self.harness != harness;
         self.harness = harness;
         self.model = model;
         if self.target != target {
@@ -200,6 +240,7 @@ impl AccountUsage {
             self.error = None;
         }
         let rechatted = self.chat != chat;
+        let pin_asked_for = harness_changed || rechatted;
         let turn_moved = self.running != running;
         self.chat = chat;
         self.running = running;
@@ -215,6 +256,100 @@ impl AccountUsage {
         } else if rechatted || (turn_moved && self.rotation_active(harness, cx)) {
             self.refresh(cx);
         }
+        if pin_asked_for {
+            self.load_chat_pin(cx);
+        }
+    }
+
+    /// Whether the picker chooses for the chat: its agent has pins and the
+    /// engine answered for this chat.
+    fn chat_mode(&self) -> Option<&ChatAccountPin> {
+        self.harness.filter(|h| chat_pinnable(*h))?;
+        let chat = self.chat.as_deref()?;
+        self.chat_pin
+            .as_ref()
+            .filter(|(pinned_chat, _)| pinned_chat == chat)
+            .map(|(_, pin)| pin)
+    }
+
+    /// Ask the engine which account the chat is pinned to. An engine that
+    /// doesn't know the question (older) leaves the picker as it was.
+    fn load_chat_pin(&mut self, cx: &mut Context<Self>) {
+        let (Some(harness), Some(chat)) = (
+            self.harness.filter(|h| chat_pinnable(*h)),
+            self.chat.clone(),
+        ) else {
+            self.chat_pin = None;
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let params = self.params(serde_json::json!({ "chatId": chat, "harness": harness }));
+        self.pin_task = Some(cx.spawn(async move |this, cx| {
+            let pin = engine
+                .client()
+                .call(methods::GET_CHAT_ACCOUNT_PIN, params)
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<ChatAccountPin>(value).ok());
+            this.update(cx, |usage, cx| {
+                // Only for the chat still shown.
+                if usage.chat.as_deref() == Some(chat.as_str()) {
+                    usage.chat_pin = pin.map(|pin| (chat, pin));
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// The person's choice for this chat: `Some(account)` pins it there,
+    /// `None` is Automatic. The row flips at once and the engine's reply
+    /// replaces it; a refusal restores it and says why.
+    fn pin_chat(&mut self, choice: Option<&AgentAccount>, cx: &mut Context<Self>) {
+        let (Some(harness), Some(chat)) = (
+            self.harness.filter(|h| chat_pinnable(*h)),
+            self.chat.clone(),
+        ) else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let previous = self.chat_pin.clone();
+        self.chat_pin = Some((
+            chat.clone(),
+            ChatAccountPin {
+                account: choice.map(|a| a.id.clone()),
+                by_user: choice.is_some(),
+            },
+        ));
+        self.error = None;
+        let params = self.params(serde_json::json!({
+            "chatId": chat,
+            "harness": harness,
+            "accountId": choice.map(|a| a.id.clone()),
+        }));
+        self.pin_task = Some(cx.spawn(async move |this, cx| {
+            let result = engine
+                .client()
+                .call(methods::PIN_CHAT_ACCOUNT, params)
+                .await;
+            this.update(cx, |usage, cx| {
+                match result.map(serde_json::from_value::<ChatAccountPin>) {
+                    Ok(Ok(pin)) => usage.chat_pin = Some((chat, pin)),
+                    Ok(Err(_)) => usage.load_chat_pin(cx),
+                    Err(err) => {
+                        usage.chat_pin = previous;
+                        usage.error = Some(err.to_string().into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     fn rotation_active(&self, harness: HarnessId, cx: &gpui::App) -> bool {
@@ -477,8 +612,14 @@ impl AccountUsage {
     /// most-used one when the harness doesn't split by model).
     fn fraction(&self, cx: &gpui::App) -> Option<f32> {
         let harness = self.harness?;
+        let snapshot = self.snapshot(cx)?;
+        // A chat on an account of its own shows that account's window.
+        let own = self
+            .chat_mode()
+            .and_then(|pin| pin.account.as_deref())
+            .and_then(|id| snapshot.accounts.iter().find(|a| a.harness == harness && a.id == id));
         ring_fraction(
-            chat_account(self.snapshot(cx)?, harness, self.chat.as_deref())?,
+            own.or_else(|| chat_account(snapshot, harness, self.chat.as_deref()))?,
             harness,
             self.model.as_deref(),
         )
@@ -495,6 +636,7 @@ impl AccountUsage {
         if card == FooterCard::Accounts {
             // Opening the card is the moment someone cares: re-probe.
             self.load(true, cx);
+            self.load_chat_pin(cx);
         }
         self.popup.open(card);
         cx.notify();
@@ -581,15 +723,51 @@ impl AccountUsage {
                     .is_some();
                 Some((id, moved))
             });
-        let title = format!(
-            "{} accounts",
-            harness.map_or("Agent", accounts::provider_name)
-        );
+        // A chat of an agent with pins chooses its own account here; the
+        // login in use on the device is switched in Settings → Accounts.
+        let chat_pin = self.chat_mode().cloned();
+        let this_chat = match chat_pin.as_ref().and_then(|pin| pin.account.clone()) {
+            Some(id) => Some((id, false)),
+            None => this_chat,
+        };
+        let title = match &chat_pin {
+            Some(pin) => chat_heading(&rows, pin),
+            None => format!(
+                "{} accounts",
+                harness.map_or("Agent", accounts::provider_name)
+            ),
+        };
+        let automatic_row = chat_pin.as_ref().map(|pin| {
+            popover::menu_row(theme, pin.account.is_none(), "account-usage-automatic")
+                .id("account-usage-automatic")
+                .on_click(cx.listener(|usage, _, _, cx| usage.pin_chat(None, cx)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(12.5))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(SharedString::from("Automatic")),
+                        )
+                        .child(crate::settings::widgets::meta_line(
+                            theme,
+                            vec![
+                                div()
+                                    .child(SharedString::from("Spread over your accounts"))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+        });
         popover::popover_card(theme)
             .w(px(400.0))
             .flex()
             .flex_col()
             .child(popover::menu_heading(theme, &title))
+            .when_some(automatic_row, |card, row| card.child(row))
             .children(rows.iter().enumerate().map(|(ix, account)| {
                 let email: SharedString = account
                     .email
@@ -598,7 +776,15 @@ impl AccountUsage {
                     .unwrap_or_else(|| "Unknown account".into())
                     .into();
                 let needs_signin = account.needs_signin;
-                let can_switch = accounts::can_switch_to(account);
+                // In a chat's choice a row pins the chat; elsewhere it
+                // switches the login in use.
+                let choosing = chat_pin.is_some();
+                let can_pick = choosing && chat_pickable(account);
+                let can_switch = !choosing && accounts::can_switch_to(account);
+                let selected = match &chat_pin {
+                    Some(pin) => pin.account.as_deref() == Some(account.id.as_str()),
+                    None => account.active,
+                };
                 let mut meta: Vec<gpui::AnyElement> = account
                     .plan_label
                     .iter()
@@ -653,13 +839,19 @@ impl AccountUsage {
                     meta.push(div().child(SharedString::from(note)).into_any_element());
                 }
                 let switch_to = account.clone();
+                let pick = account.clone();
                 let sign_in_harness = account.harness;
-                popover::menu_row(theme, account.active, format!("account-usage-row-{ix}"))
+                popover::menu_row(theme, selected, format!("account-usage-row-{ix}"))
                     .id(("account-usage-row", ix))
-                    .when(!can_switch && !needs_signin, |row| row.cursor_default())
+                    .when(!can_switch && !can_pick && !needs_signin, |row| row.cursor_default())
                     .when(can_switch, |row| {
                         row.on_click(cx.listener(move |usage, _, _, cx| {
                             usage.switch(&switch_to, cx);
+                        }))
+                    })
+                    .when(can_pick, |row| {
+                        row.on_click(cx.listener(move |usage, _, _, cx| {
+                            usage.pin_chat(Some(&pick), cx);
                         }))
                     })
                     .when(needs_signin, |row| {
@@ -705,6 +897,18 @@ impl AccountUsage {
                             ),
                     )
             }))
+            .when(chat_pin.is_some(), |card| {
+                card.child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .text_size(px(11.5))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from(
+                            "The login in use on this device is switched in Settings → Accounts.",
+                        )),
+                )
+            })
             .when_some(rotation_row, |card, row| {
                 card.child(popover::menu_separator()).child(row)
             })
@@ -807,6 +1011,47 @@ mod tests {
                 .collect::<Vec<_>>(),
         }))
         .unwrap()
+    }
+
+    fn saved(id: &str, email: &str, needs_signin: bool, api_key: bool) -> AgentAccount {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "harness": "claude-code",
+            "email": email,
+            "planLabel": null,
+            "active": false,
+            "switchable": true,
+            "needsSignin": needs_signin,
+            "authKind": if api_key { "api-key" } else { "oauth" },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_chat_can_be_given_a_login_that_works_not_a_dead_one_or_an_api_key() {
+        assert!(chat_pickable(&saved("a", "a@example.com", false, false)));
+        // A dead login's row signs it in again; it is no choice.
+        assert!(!chat_pickable(&saved("dead", "dead@example.com", true, false)));
+        assert!(!chat_pickable(&saved("key", "key@example.com", false, true)));
+    }
+
+    #[test]
+    fn the_heading_says_which_account_this_chat_runs_on() {
+        let accounts = [saved("a", "a@example.com", false, false)];
+        assert_eq!(chat_heading(&accounts, &ChatAccountPin::default()), "This chat: Automatic");
+        let pinned = ChatAccountPin { account: Some("a".into()), by_user: true };
+        assert_eq!(chat_heading(&accounts, &pinned), "This chat: a@example.com");
+        // An account that is gone reads as Automatic, as the engine runs it.
+        let gone = ChatAccountPin { account: Some("zz".into()), by_user: true };
+        assert_eq!(chat_heading(&accounts, &gone), "This chat: Automatic");
+    }
+
+    #[test]
+    fn only_agents_with_pins_choose_an_account_per_chat() {
+        assert!(chat_pinnable(HarnessId::ClaudeCode));
+        assert!(chat_pinnable(HarnessId::Muse));
+        assert!(!chat_pinnable(HarnessId::Codex));
+        assert!(!chat_pinnable(HarnessId::Cursor));
     }
 
     #[test]

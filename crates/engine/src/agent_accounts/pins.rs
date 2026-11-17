@@ -63,6 +63,9 @@ pub struct ChatPin {
     pub account: String,
     /// Epoch millis it was pinned.
     pub since: i64,
+    /// The person chose it in the chat's account picker (see
+    /// [`AgentAccounts::pin_chat_account`]); plugins leave it be.
+    pub by_user: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -71,6 +74,9 @@ struct PinEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account: Option<String>,
     since: i64,
+    /// The person chose this account for the chat.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    by_user: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -156,6 +162,7 @@ impl AgentAccounts {
                         harness: *harness,
                         account: entry.account.clone()?,
                         since: entry.since,
+                        by_user: entry.by_user,
                     })
                 })
             })
@@ -173,12 +180,12 @@ impl AgentAccounts {
         let by_harness = state.chats.entry(chat.to_owned()).or_default();
         match account {
             Some(account) => {
-                by_harness.insert(harness, PinEntry { account: Some(account.to_owned()), since: now });
+                by_harness.insert(harness, PinEntry { account: Some(account.to_owned()), since: now, by_user: false });
             }
             None => {
                 // Remembered, so a session parked on the account moves back.
                 if by_harness.get(&harness).is_some_and(|e| e.account.is_some()) {
-                    by_harness.insert(harness, PinEntry { account: None, since: now });
+                    by_harness.insert(harness, PinEntry { account: None, since: now, by_user: false });
                 }
             }
         }
@@ -189,6 +196,68 @@ impl AgentAccounts {
         let snapshot = state.clone();
         drop(state);
         self.persist_pins(&snapshot);
+    }
+
+    /// The account `chat` is pinned to, and whether the person chose it.
+    pub fn chat_account_pin(&self, harness: HarnessId, chat: &str) -> zeron_proto::ChatAccountPin {
+        match lock(&self.inner.pins).entry(harness, chat) {
+            Some(entry) => zeron_proto::ChatAccountPin { account: entry.account.clone(), by_user: entry.by_user && entry.account.is_some() },
+            None => zeron_proto::ChatAccountPin::default(),
+        }
+    }
+
+    /// The person's choice of account for one chat. `Some(account)`: the chat
+    /// runs on it from its next turn, and plugins don't move it. `None`
+    /// (automatic): the pin is taken back and the plugins that pin place the
+    /// chat again, as for a new one; with none, rotation or the live login
+    /// carry it. An account that can't run a chat is refused (not saved, no
+    /// mechanism on this device, or it needs signing in again).
+    pub async fn pin_chat_account(
+        &self,
+        harness: HarnessId,
+        chat: &str,
+        account: Option<&str>,
+    ) -> Result<zeron_proto::ChatAccountPin, crate::EngineError> {
+        if !pinnable(harness) {
+            return Err(crate::EngineError::Other("A chat can't pick its own account for that agent".into()));
+        }
+        match account {
+            Some(account) => {
+                let snapshot = self.list(false).await?;
+                let row = snapshot
+                    .accounts
+                    .iter()
+                    .find(|a| a.harness == harness && a.id == account)
+                    .ok_or_else(|| crate::EngineError::Other("That saved account no longer exists — refresh and try again.".into()))?;
+                if self.pin_mechanism(row).is_none() {
+                    return Err(crate::EngineError::Other("A chat can't run on that account on this device".into()));
+                }
+                if row.needs_signin {
+                    let who = row.email.clone().unwrap_or_else(|| "That account".into());
+                    return Err(crate::EngineError::Other(format!("{who} needs signing in again (Settings → Accounts) before a chat can use it")));
+                }
+                let now = now_ms();
+                let mut state = lock(&self.inner.pins);
+                state
+                    .chats
+                    .entry(chat.to_owned())
+                    .or_default()
+                    .insert(harness, PinEntry { account: Some(account.to_owned()), since: now, by_user: true });
+                let snapshot = state.clone();
+                drop(state);
+                self.persist_pins(&snapshot);
+            }
+            None => {
+                self.set_pin(harness, chat, None);
+                // Placed as a new chat is: the plugins that pin are asked,
+                // and pin it themselves when they answer.
+                let hook = lock(&self.inner.pin_hook).clone();
+                if let Some(hook) = hook {
+                    let _ = hook(harness, chat.to_owned()).await;
+                }
+            }
+        }
+        Ok(self.chat_account_pin(harness, chat))
     }
 
     /// The chat's pin, asking the plugins' `run.preparing` hook first when

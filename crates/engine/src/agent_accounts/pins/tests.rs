@@ -360,6 +360,66 @@ async fn only_a_run_on_a_saved_accounts_login_flags_anything() {
 }
 
 #[tokio::test]
+async fn a_persons_choice_pins_the_chat_and_survives_a_restart() {
+    let d = device();
+    let pin = d.accounts.pin_chat_account(HarnessId::ClaudeCode, "c1", Some(&d.saved)).await.unwrap();
+    assert_eq!((pin.account.as_deref(), pin.by_user), (Some(d.saved.as_str()), true));
+    assert_eq!(d.accounts.chat_account_pin(HarnessId::ClaudeCode, "c1"), pin);
+    // It runs on that account from its next turn.
+    let env = PinRunEnvironment(d.accounts.clone());
+    assert_eq!(run_token(&prepared(&env, "c1").await.unwrap()).as_deref(), Some("at-b"));
+    // A pin a plugin made is not the person's.
+    d.accounts.set_pin(HarnessId::ClaudeCode, "c2", Some(&d.saved));
+    assert!(!d.accounts.chat_account_pin(HarnessId::ClaudeCode, "c2").by_user);
+    // Both are kept across a restart, with who chose them.
+    let again = AgentAccounts::new(config(d._tmp.path()));
+    assert!(again.chat_account_pin(HarnessId::ClaudeCode, "c1").by_user);
+    assert!(!again.chat_account_pin(HarnessId::ClaudeCode, "c2").by_user);
+    assert_eq!(again.pins().iter().filter(|p| p.by_user).count(), 1);
+}
+
+#[tokio::test]
+async fn a_chat_cant_be_pinned_to_a_login_that_needs_signing_in_or_that_isnt_there() {
+    let d = device();
+    let dead = claude_slot("acct-dead", "dead@example.com", "at-dead", now_ms() + 3_600_000);
+    d.accounts.write_slot(&dead).unwrap();
+    d.accounts.note_signin_failure(HarnessId::ClaudeCode, &dead, ProbeError::Unauthorized { status: 400 });
+    let err = d.accounts.pin_chat_account(HarnessId::ClaudeCode, "c1", Some(&dead.id)).await.unwrap_err().to_string();
+    assert!(err.contains("dead@example.com") && err.contains("signing in again"), "{err}");
+    let gone = d.accounts.pin_chat_account(HarnessId::ClaudeCode, "c1", Some("no-such")).await.unwrap_err().to_string();
+    assert!(gone.contains("no longer exists"), "{gone}");
+    assert_eq!(d.accounts.chat_account_pin(HarnessId::ClaudeCode, "c1"), zeron_proto::ChatAccountPin::default());
+    // An agent with no way to run a chat on another account says so.
+    assert!(d.accounts.pin_chat_account(HarnessId::Codex, "c1", Some("x")).await.is_err());
+}
+
+#[tokio::test]
+async fn automatic_takes_the_pin_back_and_the_plugins_place_the_chat_again() {
+    let d = device();
+    d.accounts.pin_chat_account(HarnessId::ClaudeCode, "c1", Some(&d.saved)).await.unwrap();
+    // A plugin that pins: it answers the live account and pins the chat there.
+    let (live, pinning) = (d.live.clone(), d.accounts.clone());
+    d.accounts.set_pin_hook(Arc::new(move |harness, chat| {
+        pinning.set_pin(harness, &chat, Some(&live));
+        let live = live.clone();
+        Box::pin(async move { Some(live) })
+    }));
+    let pin = d.accounts.pin_chat_account(HarnessId::ClaudeCode, "c1", None).await.unwrap();
+    assert_eq!((pin.account.as_deref(), pin.by_user), (Some(d.live.as_str()), false));
+    // With nothing to place it the chat is on rotation or the live login.
+    let bare = device();
+    let pin = bare.accounts.pin_chat_account(HarnessId::ClaudeCode, "c1", Some(&bare.saved)).await.unwrap();
+    assert!(pin.by_user);
+    let pin = bare.accounts.pin_chat_account(HarnessId::ClaudeCode, "c1", None).await.unwrap();
+    assert_eq!(pin, zeron_proto::ChatAccountPin::default());
+    assert_eq!(
+        PinRunEnvironment(bare.accounts.clone()).credential(HarnessId::ClaudeCode, Some("c1")).await.as_deref(),
+        Some("live"),
+        "a taken-back pin moves a parked session to the live login"
+    );
+}
+
+#[tokio::test]
 async fn switching_the_account_in_use_takes_back_pins_to_logins_that_need_signing_in() {
     let d = device();
     let dead = slot_id_for(HarnessId::ClaudeCode, "acct-dead");
