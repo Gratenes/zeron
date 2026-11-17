@@ -5730,6 +5730,12 @@ pub enum ComposerEvent {
         chat_id: String,
         message_id: String,
     },
+    /// The account picker's "Sign in again" on a dead login: open that
+    /// provider's sign-in on `target` (`None`: this device).
+    SignIn {
+        harness: zeron_proto::HarnessId,
+        target: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6493,6 +6499,7 @@ pub struct Composer {
     /// A side chat's composer: its footer keeps only the context ring.
     side_chat: bool,
     _picker_focus: Subscription,
+    _account_usage_events: Subscription,
     _input_events: Subscription,
     _dictation_events: Subscription,
     dictation_activation: Option<Subscription>,
@@ -6588,6 +6595,17 @@ impl Composer {
             |this: &mut Self, _, _: &crate::pickers::ReturnComposerFocus, cx| {
                 this.focus_pending = true;
                 cx.notify();
+            },
+        );
+        let account_usage_events = cx.subscribe(
+            &account_usage,
+            |_: &mut Self, _, event: &crate::account_usage::AccountUsageEvent, cx| match event {
+                crate::account_usage::AccountUsageEvent::SignIn { harness, target } => {
+                    cx.emit(ComposerEvent::SignIn {
+                        harness: *harness,
+                        target: target.clone(),
+                    })
+                }
             },
         );
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
@@ -6758,6 +6776,7 @@ impl Composer {
             account_usage,
             side_chat: false,
             _picker_focus: picker_focus,
+            _account_usage_events: account_usage_events,
             _input_events: input_events,
             _dictation_events: dictation_events,
             dictation_activation: None,

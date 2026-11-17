@@ -2634,6 +2634,9 @@ impl Shell {
                         t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                     });
                 }
+                ComposerEvent::SignIn { harness, target } => {
+                    this.open_provider_sign_in(target.clone(), *harness, cx)
+                }
             }
         });
         // Spawn chips open their subagent's transcript as a right-pane tab.
@@ -4628,6 +4631,18 @@ impl Shell {
             };
             (target, harness)
         };
+        self.open_provider_sign_in(target, harness, cx);
+    }
+
+    /// Settings → Providers on `target`'s device with `harness` open and its
+    /// sign-in started: a failed run's "Log in", or a dead login's
+    /// "Sign in again" from the composer's account picker.
+    fn open_provider_sign_in(
+        &mut self,
+        target: Option<String>,
+        harness: HarnessId,
+        cx: &mut Context<Self>,
+    ) {
         self.open_settings(SettingsSection::Harnesses, cx);
         let state = self.state.clone();
         let page = self

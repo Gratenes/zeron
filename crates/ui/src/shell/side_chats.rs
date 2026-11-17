@@ -349,6 +349,9 @@ impl Shell {
                         } => transcript.update(cx, |t, cx| {
                             t.on_own_queued_send(chat_id.clone(), message_id.clone(), cx)
                         }),
+                        ComposerEvent::SignIn { harness, target } => {
+                            this.open_provider_sign_in(target.clone(), *harness, cx)
+                        }
                     }
                 }
             }),
