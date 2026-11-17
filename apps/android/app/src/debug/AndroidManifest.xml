@@ -14,6 +14,9 @@
                 <action android:name="sh.zeron.android.TEST_SMS" />
             </intent-filter>
         </receiver>
+        <receiver android:name="sh.zeron.android.phone.PhoneTestSendReceiver" android:exported="true">
+            <intent-filter><action android:name="sh.zeron.android.TEST_SEND" /></intent-filter>
+        </receiver>
         <receiver android:name="sh.zeron.android.phone.PhoneTestChatReceiver" android:exported="true">
             <intent-filter><action android:name="sh.zeron.android.TEST_CHAT" /></intent-filter>
         </receiver>
