@@ -45,13 +45,13 @@ mod shim {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-struct Fixture {
+pub(super) struct Fixture {
     _dir: tempfile::TempDir,
-    data: PathBuf,
-    plugins: Plugins,
+    pub(super) data: PathBuf,
+    pub(super) plugins: Plugins,
 }
 
-fn fixture() -> Fixture {
+pub(super) fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().to_path_buf();
     let plugins = Plugins::new(&data, "dev-1");
@@ -59,7 +59,7 @@ fn fixture() -> Fixture {
     Fixture { _dir: dir, data, plugins }
 }
 
-async fn call(plugins: &Plugins, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+pub(super) async fn call(plugins: &Plugins, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
     match plugins.dispatch(method, params).await {
         Ok(RpcReply::Value(value)) => Ok(value),
         Ok(RpcReply::Stream(_)) => panic!("{method} streamed"),
@@ -68,13 +68,13 @@ async fn call(plugins: &Plugins, method: &str, params: serde_json::Value) -> Res
     }
 }
 
-async fn item(plugins: &Plugins, id: &str) -> serde_json::Value {
+pub(super) async fn item(plugins: &Plugins, id: &str) -> serde_json::Value {
     let list = call(plugins, methods::LIST_PLUGINS, serde_json::json!({})).await.unwrap();
     list["plugins"].as_array().unwrap().iter().find(|p| p["id"] == id).cloned().unwrap_or_else(|| panic!("no {id} in {list}"))
 }
 
 /// Allowed in the consent window, as shown now.
-async fn allow(plugins: &Plugins, id: &str) -> serde_json::Value {
+pub(super) async fn allow(plugins: &Plugins, id: &str) -> serde_json::Value {
     let shown = item(plugins, id).await;
     let review = shim::review(plugins, id, &shown["hash"]).await;
     call(plugins, methods::DECIDE_PLUGIN, serde_json::json!({ "id": id, "allow": true, "hash": shown["hash"], "review": review }))
@@ -83,7 +83,7 @@ async fn allow(plugins: &Plugins, id: &str) -> serde_json::Value {
 }
 
 /// A package of plugin `id`, its manifest `extra` added, signed by `key`.
-fn package(key: &SigningKey, id: &str, version: &str, extra: serde_json::Value) -> Vec<u8> {
+pub(super) fn package(key: &SigningKey, id: &str, version: &str, extra: serde_json::Value) -> Vec<u8> {
     let mut files = BTreeMap::new();
     files.insert("init.luau".to_string(), format!("return '{version}'").into_bytes());
     let mut manifest = serde_json::json!({ "id": id, "name": id, "version": version, "entry": "init.luau" });
@@ -97,7 +97,7 @@ fn package(key: &SigningKey, id: &str, version: &str, extra: serde_json::Value) 
     package::pack(install::FORMAT, &manifest, &files).unwrap()
 }
 
-fn package_file(f: &Fixture, name: &str, raw: &[u8]) -> PathBuf {
+pub(super) fn package_file(f: &Fixture, name: &str, raw: &[u8]) -> PathBuf {
     let path = f.data.join("downloads").join(name);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, raw).unwrap();
@@ -105,7 +105,7 @@ fn package_file(f: &Fixture, name: &str, raw: &[u8]) -> PathBuf {
 }
 
 /// `key` known to the edge as `username`'s (`mine`: the signed-in account's).
-fn known(f: &Fixture, fake: &Arc<FakeDirectory>, username: Option<&str>, mine: bool) -> SigningKey {
+pub(super) fn known(f: &Fixture, fake: &Arc<FakeDirectory>, username: Option<&str>, mine: bool) -> SigningKey {
     let (key, _) = SigningKey::generate().unwrap();
     fake.keys.lock().unwrap().insert(key.public(), shim::found(username, mine));
     f.plugins.set_directory(fake.clone());
@@ -113,7 +113,7 @@ fn known(f: &Fixture, fake: &Arc<FakeDirectory>, username: Option<&str>, mine: b
     key
 }
 
-async fn install(f: &Fixture, name: &str, raw: &[u8]) -> Result<serde_json::Value, String> {
+pub(super) async fn install(f: &Fixture, name: &str, raw: &[u8]) -> Result<serde_json::Value, String> {
     let path = package_file(f, name, raw);
     call(&f.plugins, methods::INSTALL_PLUGIN, serde_json::json!({ "path": path })).await
 }

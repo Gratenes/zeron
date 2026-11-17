@@ -258,6 +258,19 @@ ui.command {
 	end,
 }
 
+-- Another device's, edited after it was allowed (from GitHub): its sheet
+-- answers on that device, never offers "It's mine" or Allow.
+ui.command {
+	id = "tamper_devbox",
+	title = "Ping on Devbox, edited after it was allowed",
+	run = function()
+		PLUGINS.ping.status = "tampered"
+		PLUGINS.ping.hash = "ping-2"
+		PLUGINS.ping.source = { kind = "git", url = "https://github.com/eve/ping.git" }
+		show("ping", "Devbox")
+	end,
+}
+
 show("focus")
 
 -- Light, for pictures of it.
