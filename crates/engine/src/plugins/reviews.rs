@@ -15,7 +15,8 @@
 //! review is bound to who asked for it ([`Origin`]): one minted for this
 //! device's app is good only to this device's app, one minted for a peer
 //! only to that same peer, as the edge verified it (`fromDevice`). A dial
-//! the edge didn't verify gets none. Templates' stay this device's.
+//! the edge didn't verify gets none, unless the device's owner opted in
+//! ([`ACCEPT_UNVERIFIED_ENV`]). Templates' stay this device's.
 //!
 //! What this holds against: an agent through its MCP server (here or on
 //! another device: its token can't mint, and its engine forwards a mint
@@ -30,6 +31,11 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use zeron_rpc::RpcError;
+
+/// Set to `1` on a device whose edge names no calling device (a self-hosted
+/// edge built before it did) to let a connection the edge named none for
+/// review and allow its plugins ([`Origin::Unverified`]). Off by default.
+pub const ACCEPT_UNVERIFIED_ENV: &str = "ZERON_ACCEPT_UNVERIFIED_PLUGIN_REVIEWS";
 
 /// How long a review stays good: a decision is made while the sheet is up.
 pub const TTL: Duration = Duration::from_secs(10 * 60);
@@ -56,7 +62,7 @@ pub enum Origin {
     /// self-hosted one built before it did). Only a plugin's review and
     /// allow may be asked of it ([`Origin::of_plugin_review`]), and its
     /// review is good only to such connections alike, never to this
-    /// device's app or a verified device.
+    /// device's app or a verified device. Off unless the owner opts in.
     Unverified,
 }
 
@@ -79,10 +85,17 @@ impl Origin {
     /// the edge, and a device there may already decline) a connection the
     /// edge named no device for. Never an agent's token. Templates and
     /// signing never use this: they are this device's app's alone.
-    pub fn of_plugin_review(caller: &zeron_rpc::Caller) -> Option<Origin> {
+    ///
+    /// `accept_unverified` is the device owner's opt-in
+    /// ([`ACCEPT_UNVERIFIED_ENV`]): without it a connection the edge named
+    /// no device for holds nothing, as before. Any bearer of the account can
+    /// dial unstamped (it just omits the proof), and `InstallPlugin {url}` is
+    /// open to any peer, so an always-on `Unverified` would let a stolen
+    /// account token install and allow code here.
+    pub fn of_plugin_review(caller: &zeron_rpc::Caller, accept_unverified: bool) -> Option<Origin> {
         Origin::of(caller).or(match caller {
-            zeron_rpc::Caller::Peer { .. } => Some(Origin::Unverified),
-            zeron_rpc::Caller::Local | zeron_rpc::Caller::Agent { .. } => None,
+            zeron_rpc::Caller::Peer { .. } if accept_unverified => Some(Origin::Unverified),
+            _ => None,
         })
     }
 }
@@ -224,11 +237,12 @@ mod tests {
     fn an_unverified_device_may_hold_a_plugins_review_bound_to_unverified_ones() {
         use zeron_rpc::Caller;
         let nobody = Caller::Peer { device: None };
-        assert_eq!(Origin::of_plugin_review(&nobody), Some(Origin::Unverified));
-        assert_eq!(Origin::of_plugin_review(&Caller::Peer { device: Some(String::new()) }), Some(Origin::Unverified));
-        assert_eq!(Origin::of_plugin_review(&Caller::Peer { device: Some("laptop".into()) }), Some(Origin::Peer("laptop".into())));
-        assert_eq!(Origin::of_plugin_review(&Caller::Local), Some(Origin::Local));
-        assert_eq!(Origin::of_plugin_review(&Caller::Agent { chat: None }), None);
+        assert_eq!(Origin::of_plugin_review(&nobody, false), None, "off by default");
+        assert_eq!(Origin::of_plugin_review(&nobody, true), Some(Origin::Unverified));
+        assert_eq!(Origin::of_plugin_review(&Caller::Peer { device: Some(String::new()) }, true), Some(Origin::Unverified));
+        assert_eq!(Origin::of_plugin_review(&Caller::Peer { device: Some("laptop".into()) }, true), Some(Origin::Peer("laptop".into())));
+        assert_eq!(Origin::of_plugin_review(&Caller::Local, true), Some(Origin::Local));
+        assert_eq!(Origin::of_plugin_review(&Caller::Agent { chat: None }, true), None);
         // The strict rule (uploads, templates) still names no one for it.
         assert_eq!(Origin::of(&nobody), None);
         // Its review is good to nobody else, and theirs not to it.

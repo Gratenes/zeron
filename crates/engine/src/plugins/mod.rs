@@ -267,6 +267,9 @@ struct Inner {
     /// One-time capabilities for Zeron's consent window (`ReviewPlugin`,
     /// `ReviewTemplate`): what allowing and signing need.
     reviews: Mutex<reviews::Reviews>,
+    /// The owner's opt-in to let a connection the edge named no device for
+    /// review and allow plugins here (`reviews::ACCEPT_UNVERIFIED_ENV`).
+    accept_unverified_reviews: AtomicBool,
     /// Plugin files on their way here from another of your devices
     /// (`StagePluginPackage`).
     uploads: Mutex<uploads::Uploads>,
@@ -524,6 +527,9 @@ impl Plugins {
                 sweep_scheduled: AtomicBool::new(false),
                 written: Mutex::new(HashMap::new()),
                 reviews: Mutex::new(reviews::Reviews::default()),
+                accept_unverified_reviews: AtomicBool::new(
+                    std::env::var(reviews::ACCEPT_UNVERIFIED_ENV).is_ok_and(|v| v.trim() == "1"),
+                ),
                 uploads: Mutex::new(uploads::Uploads::default()),
                 tools: Arc::new(ToolBroker::default()),
                 channel: Arc::new(Slot::default()),
@@ -1602,7 +1608,7 @@ impl Plugins {
         // A plugin's allow may come from a device the edge named none for
         // (see `Origin::Unverified`); a template's is this device's app's.
         let origin = match kind {
-            reviews::Kind::Plugin => reviews::Origin::of_plugin_review(&caller),
+            reviews::Kind::Plugin => reviews::Origin::of_plugin_review(&caller, self.inner.accept_unverified_reviews.load(Ordering::Relaxed)),
             reviews::Kind::Template => reviews::Origin::of(&caller),
         }
         .ok_or_else(|| reviews::needed(what))?;
@@ -1669,7 +1675,7 @@ impl Plugins {
                 // review is good only to whoever asked for it.
                 let caller = zeron_rpc::caller();
                 let origin = if method == methods::REVIEW_PLUGIN {
-                    reviews::Origin::of_plugin_review(&caller)
+                    reviews::Origin::of_plugin_review(&caller, self.inner.accept_unverified_reviews.load(Ordering::Relaxed))
                 } else {
                     reviews::Origin::of(&caller).filter(|origin| *origin == reviews::Origin::Local)
                 }

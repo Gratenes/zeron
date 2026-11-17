@@ -51,6 +51,13 @@ fn fixture() -> Fixture {
     Fixture { _dir: dir, plugins }
 }
 
+/// A device whose owner opted in to unverified plugin reviews.
+fn fixture_open() -> Fixture {
+    let f = fixture();
+    f.plugins.inner.accept_unverified_reviews.store(true, std::sync::atomic::Ordering::Relaxed);
+    f
+}
+
 /// An unsigned plugin asking for `native` and `commands`: it waits for the
 /// person.
 async fn waiting(plugins: &Plugins, id: &str) -> String {
@@ -216,7 +223,7 @@ async fn agents_cannot_review_allow_or_sign() {
 #[tokio::test]
 async fn an_unsigned_plugin_on_a_headless_device_is_allowed_from_another_devices_sheet() {
     for caller in [Caller::Peer { device: None }, Caller::Peer { device: Some("desk".into()) }] {
-        let f = fixture();
+        let f = fixture_open();
         let hash = waiting(&f.plugins, "focus").await;
         assert!(!f.plugins.entry("focus").unwrap().item.own, "unsigned: nobody's");
         let review = with_caller(
@@ -261,7 +268,7 @@ async fn an_unsigned_plugin_on_a_headless_device_is_allowed_from_another_devices
 /// template. Those stay this device's app's.
 #[tokio::test]
 async fn a_connection_the_edge_named_no_device_for_cannot_sign_or_decide_templates() {
-    let f = fixture();
+    let f = fixture_open();
     let hash = waiting(&f.plugins, "focus").await;
     let unnamed = Caller::Peer { device: None };
     let review = call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash }))
@@ -483,4 +490,127 @@ fn a_dial_proof_is_the_device_key_over_the_link_message() {
     let message = zeron_rpc::caller_proof_message("dev-b", "c1", 5);
     verifier.verify(message.as_bytes(), &b64.decode(&signature).unwrap()).unwrap();
     assert!(verifier.verify(b"zeron-device-link:v1:dev-c:c1:5", &b64.decode(&signature).unwrap()).is_err());
+}
+
+// ── sweep-a-consent-review ──────────────────────────────────────────────
+
+/// Default (no opt-in): a connection the edge named no device for holds no
+/// review and cannot allow, exactly as upstream's device-bound reviews.
+#[tokio::test]
+async fn unverified_peer_gets_nothing_unless_the_owner_opted_in() {
+    let f = fixture();
+    let hash = waiting(&f.plugins, "focus").await;
+    for device in [None, Some(String::new())] {
+        let caller = Caller::Peer { device };
+        let minted = with_caller(
+            caller.clone(),
+            call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash })),
+        )
+        .await;
+        assert!(minted.is_err(), "{caller:?} minted a review without opt-in: {minted:?}");
+        let allowed = with_caller(
+            caller,
+            call(&f.plugins, methods::DECIDE_PLUGIN, json!({ "id": "focus", "allow": true, "hash": hash })),
+        )
+        .await;
+        assert!(allowed.is_err());
+    }
+    assert_eq!(status(&f.plugins, "focus").await, Status::Pending);
+}
+
+/// Opted in: an unverified review is not good to the app or a verified peer,
+/// theirs not to it, it is single-use, and an agent still gets nothing.
+#[tokio::test]
+async fn opted_in_unverified_reviews_stay_in_their_lane() {
+    let unverified = Caller::Peer { device: None };
+    let verified = Caller::Peer { device: Some("laptop".into()) };
+    for (minter, presenter) in [
+        (unverified.clone(), Caller::Local),
+        (unverified.clone(), verified.clone()),
+        (Caller::Local, unverified.clone()),
+        (verified.clone(), unverified.clone()),
+    ] {
+        let f = fixture_open();
+        let hash = waiting(&f.plugins, "focus").await;
+        let review = with_caller(
+            minter.clone(),
+            call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash })),
+        )
+        .await
+        .unwrap()["review"]
+            .clone();
+        let used = with_caller(
+            presenter.clone(),
+            call(&f.plugins, methods::DECIDE_PLUGIN, json!({ "id": "focus", "allow": true, "hash": hash, "review": review })),
+        )
+        .await;
+        assert!(used.is_err(), "{presenter:?} used {minter:?}'s review");
+        assert_eq!(status(&f.plugins, "focus").await, Status::Pending);
+    }
+    // Single use, and expired-by-hash change.
+    let f = fixture_open();
+    let hash = waiting(&f.plugins, "focus").await;
+    let mint = || with_caller(unverified.clone(), call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash })));
+    let review = mint().await.unwrap()["review"].clone();
+    let decide = |review: Value| {
+        with_caller(
+            unverified.clone(),
+            call(&f.plugins, methods::DECIDE_PLUGIN, json!({ "id": "focus", "allow": true, "hash": hash, "review": review })),
+        )
+    };
+    decide(review.clone()).await.unwrap();
+    assert!(decide(review).await.is_err(), "replayed");
+    // An agent can't mint even when opted in, nor allow without a review.
+    let agent = Caller::Agent { chat: Some("c".into()) };
+    assert!(with_caller(agent.clone(), call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash }))).await.is_err());
+    // No review at all, for allow:true.
+    let g = fixture_open();
+    let hash = waiting(&g.plugins, "focus").await;
+    let none = with_caller(
+        unverified.clone(),
+        call(&g.plugins, methods::DECIDE_PLUGIN, json!({ "id": "focus", "allow": true, "hash": hash })),
+    )
+    .await;
+    assert!(none.is_err());
+}
+
+/// Anything other than a plugin's review/allow stays closed to an
+/// unverified peer even opted in: signing, template review/allow, uploads.
+#[tokio::test]
+async fn opted_in_unverified_peer_cannot_touch_templates_signing_or_uploads() {
+    let f = fixture_open();
+    let hash = waiting(&f.plugins, "focus").await;
+    let u = Caller::Peer { device: None };
+    for (method, params) in [
+        (methods::REVIEW_TEMPLATE, json!({ "pending": "midnight", "hash": hash })),
+        (methods::DECIDE_TEMPLATE, json!({ "pending": "midnight", "allow": true, "hash": hash, "review": "x" })),
+        (methods::SIGN_PLUGIN, json!({ "id": "focus", "review": "x" })),
+        (methods::STAGE_PLUGIN_PACKAGE, json!({ "data": "AAAA" })),
+    ] {
+        let r = with_caller(u.clone(), call(&f.plugins, method, params)).await;
+        assert!(r.is_err(), "{method} reachable by an unverified peer: {r:?}");
+    }
+    // A review minted for a plugin is not a template review either.
+    let review = with_caller(u.clone(), call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash }))).await.unwrap()["review"].clone();
+    let r = with_caller(
+        u,
+        call(&f.plugins, methods::DECIDE_TEMPLATE, json!({ "pending": "focus", "allow": true, "hash": hash, "review": review })),
+    )
+    .await;
+    assert!(r.is_err());
+}
+
+/// Characterises (does not endorse): Reviews::MAX is shared, so any holder
+/// (an unverified peer included) can mint enough to evict the app's own
+/// outstanding review and make its sheet fail once.
+#[tokio::test]
+async fn unverified_peer_can_evict_the_apps_outstanding_review() {
+    let f = fixture_open();
+    let hash = waiting(&f.plugins, "focus").await;
+    let app = call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash })).await.unwrap()["review"].clone();
+    for _ in 0..40 {
+        with_caller(Caller::Peer { device: None }, call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash }))).await.unwrap();
+    }
+    let used = call(&f.plugins, methods::DECIDE_PLUGIN, json!({ "id": "focus", "allow": true, "hash": hash, "review": app })).await;
+    assert!(used.is_err(), "evicted (known limitation)");
 }
