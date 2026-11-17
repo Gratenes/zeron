@@ -54,8 +54,8 @@ class PhoneFiles(private val context: Context) {
         val lexical = FilesPolicy.clean(path)
         val canonical = runCatching { File(lexical).canonicalPath }.getOrDefault(lexical)
         val roots = storageRoots().map { runCatching { File(it).canonicalPath }.getOrDefault(it) } + storageRoots()
-        FilesPolicy.refusal(lexical, roots, privateDirs())?.let { fail("files.denied", "$path is $it") }
-        FilesPolicy.refusal(canonical, roots, privateDirs())?.let { fail("files.denied", "$path is $it") }
+        FilesPolicy.refusal(lexical, roots, privateDirs())?.let { fail("files.denied", "$path: $it") }
+        FilesPolicy.refusal(canonical, roots, privateDirs())?.let { fail("files.denied", "$path: $it") }
         return File(canonical)
     }
 
