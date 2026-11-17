@@ -7,8 +7,8 @@
 use std::time::{Duration, Instant};
 
 use gpui::{
-    Context, Entity, IntoElement, Render, SharedString, Subscription, Task, Window, div,
-    prelude::*, px,
+    Context, Entity, EventEmitter, IntoElement, Render, SharedString, Subscription, Task, Window,
+    div, prelude::*, px,
 };
 use zeron_proto::{AgentAccount, AgentAccountsSnapshot, HarnessId};
 use zeron_rpc::methods;
@@ -123,6 +123,18 @@ pub struct AccountUsage {
     _cache: Subscription,
     _state: Subscription,
 }
+
+/// What the footer's account picker asks of its host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountUsageEvent {
+    /// Sign `harness` in again, on `target` (`None`: this device).
+    SignIn {
+        harness: HarnessId,
+        target: Option<String>,
+    },
+}
+
+impl EventEmitter<AccountUsageEvent> for AccountUsage {}
 
 impl AccountUsage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
@@ -488,6 +500,16 @@ impl AccountUsage {
         cx.notify();
     }
 
+    /// A dead login's row was clicked: close the card and ask the shell to
+    /// open this device's provider sign-in for it.
+    fn request_sign_in(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
+        self.dismiss(cx);
+        cx.emit(AccountUsageEvent::SignIn {
+            harness,
+            target: self.target.clone(),
+        });
+    }
+
     fn dismiss(&mut self, cx: &mut Context<Self>) {
         if self.popup.begin_close() {
             popover::reap_popup(cx, |usage: &mut Self| &mut usage.popup);
@@ -575,7 +597,8 @@ impl AccountUsage {
                     .or_else(|| account.display_name.clone())
                     .unwrap_or_else(|| "Unknown account".into())
                     .into();
-                let can_switch = !account.active && account.switchable;
+                let needs_signin = account.needs_signin;
+                let can_switch = accounts::can_switch_to(account);
                 let mut meta: Vec<gpui::AnyElement> = account
                     .plan_label
                     .iter()
@@ -607,6 +630,14 @@ impl AccountUsage {
                             )))
                             .into_any_element(),
                     );
+                } else if needs_signin {
+                    // A dead login is not a choice: the row signs it in again.
+                    meta.push(
+                        div()
+                            .text_color(theme.danger_muted)
+                            .child(SharedString::from("Signed out — Sign in again"))
+                            .into_any_element(),
+                    );
                 } else if marks.is_empty()
                     && let Some(reason) = account
                         .usage_error
@@ -622,12 +653,18 @@ impl AccountUsage {
                     meta.push(div().child(SharedString::from(note)).into_any_element());
                 }
                 let switch_to = account.clone();
+                let sign_in_harness = account.harness;
                 popover::menu_row(theme, account.active, format!("account-usage-row-{ix}"))
                     .id(("account-usage-row", ix))
-                    .when(!can_switch, |row| row.cursor_default())
+                    .when(!can_switch && !needs_signin, |row| row.cursor_default())
                     .when(can_switch, |row| {
                         row.on_click(cx.listener(move |usage, _, _, cx| {
                             usage.switch(&switch_to, cx);
+                        }))
+                    })
+                    .when(needs_signin, |row| {
+                        row.on_click(cx.listener(move |usage, _, _, cx| {
+                            usage.request_sign_in(sign_in_harness, cx);
                         }))
                     })
                     .child(
@@ -649,6 +686,8 @@ impl AccountUsage {
                         div()
                             .id(("account-usage-meters", ix))
                             .flex_none()
+                            // The last reading from before the login died.
+                            .when(needs_signin, |meters| meters.opacity(0.45))
                             .flex()
                             .flex_col()
                             .gap(px(2.0))

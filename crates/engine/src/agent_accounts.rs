@@ -3423,7 +3423,11 @@ impl AgentAccounts {
         usage
             .entry(usage_key(harness, &slot.account_key))
             .or_default()
-            .record(Err(error), credentials_fingerprint(&slot.credentials), now_ms());
+            .record(
+                Err(error),
+                credentials_fingerprint(&slot.credentials),
+                now_ms(),
+            );
         self.persist_usage(&usage);
     }
 
@@ -6165,9 +6169,21 @@ mod probe_tests {
         let rejected = |status| ProbeError::Unauthorized { status };
         // Claude: a refused refresh (400) on a saved login. A bare 401 is the
         // CLI's to sort out, and the live login is never ours to call dead.
-        assert!(error_needs_signin(HarnessId::ClaudeCode, false, &rejected(400)));
-        assert!(!error_needs_signin(HarnessId::ClaudeCode, false, &rejected(401)));
-        assert!(!error_needs_signin(HarnessId::ClaudeCode, true, &rejected(400)));
+        assert!(error_needs_signin(
+            HarnessId::ClaudeCode,
+            false,
+            &rejected(400)
+        ));
+        assert!(!error_needs_signin(
+            HarnessId::ClaudeCode,
+            false,
+            &rejected(401)
+        ));
+        assert!(!error_needs_signin(
+            HarnessId::ClaudeCode,
+            true,
+            &rejected(400)
+        ));
         // Outages and rate limits say nothing about the login.
         assert!(!error_needs_signin(
             HarnessId::ClaudeCode,
@@ -6185,8 +6201,16 @@ mod probe_tests {
             }
         ));
         // Providers that refresh a switched-to login on its next run don't.
-        for harness in [HarnessId::Codex, HarnessId::Opencode, HarnessId::Pi, HarnessId::Hermes] {
-            assert!(!error_needs_signin(harness, false, &rejected(401)), "{harness:?}");
+        for harness in [
+            HarnessId::Codex,
+            HarnessId::Opencode,
+            HarnessId::Pi,
+            HarnessId::Hermes,
+        ] {
+            assert!(
+                !error_needs_signin(harness, false, &rejected(401)),
+                "{harness:?}"
+            );
         }
         // The rest say "Signed out — sign in again", and so does Devin's key.
         assert!(error_needs_signin(HarnessId::Cursor, false, &rejected(401)));
@@ -6793,8 +6817,7 @@ mod login_tests {
     async fn a_refused_claude_refresh_flags_the_slot_until_it_is_signed_in_again() {
         let tmp = tempfile::tempdir().unwrap();
         let (usage_url, _) = fixed_server("401 Unauthorized", "{}").await;
-        let (token_url, _) =
-            fixed_server("400 Bad Request", r#"{"error":"invalid_grant"}"#).await;
+        let (token_url, _) = fixed_server("400 Bad Request", r#"{"error":"invalid_grant"}"#).await;
         let endpoints = ProbeEndpoints {
             claude_usage: usage_url,
             claude_token: token_url,
@@ -6826,11 +6849,19 @@ mod login_tests {
 
         let listed = accounts.list(true).await.unwrap();
         let row = |snapshot: &AgentAccountsSnapshot| {
-            snapshot.accounts.iter().find(|a| a.id == dead.id).cloned().unwrap()
+            snapshot
+                .accounts
+                .iter()
+                .find(|a| a.id == dead.id)
+                .cloned()
+                .unwrap()
         };
         let row_now = row(&listed);
         assert!(row_now.needs_signin, "{row_now:?}");
-        assert_eq!(row_now.usage_error.as_deref(), Some("Signed out — sign in again"));
+        assert_eq!(
+            row_now.usage_error.as_deref(),
+            Some("Signed out — sign in again")
+        );
         assert_eq!(row_now.usage_windows.len(), 1, "the last reading is kept");
         let live = listed.accounts.iter().find(|a| a.active).unwrap();
         assert!(!live.needs_signin);

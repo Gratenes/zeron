@@ -1240,9 +1240,12 @@ impl AccountsPage {
     /// The quiet note an account shows in its meta line instead of meters.
     /// Render hook for the usage data flow: a reason the probe came back
     /// empty belongs here. A provider without usage gets no note at all.
-    fn render_usage_missing(&self, account: &AgentAccount, _theme: &Theme) -> Option<AnyElement> {
+    fn render_usage_missing(&self, account: &AgentAccount, theme: &Theme) -> Option<AnyElement> {
         if !reports_usage(account.harness) {
             return None;
+        }
+        if account.needs_signin {
+            return Some(signed_out_note(theme));
         }
         let note = if !account.switchable && switches_accounts(account.harness) {
             match account.harness {
@@ -1303,7 +1306,7 @@ impl AccountsPage {
             .or_else(|| account.display_name.clone())
             .unwrap_or_else(|| "Unknown account".into())
             .into();
-        let can_switch = !account.active && account.switchable;
+        let can_switch = can_switch_to(account);
         let switch_account = account.clone();
 
         // Personal Claude orgs are named "<email>'s Organization" — noise
@@ -1354,10 +1357,15 @@ impl AccountsPage {
                 meta.push(div().child(SharedString::from(note)).into_any_element());
             }
             let resets = usage_resets(&account.usage_windows, now);
+            if account.needs_signin {
+                meta.push(signed_out_note(theme));
+            }
             div()
                 .id(("account-usage", ix))
                 .w(px(USAGE_COLUMN_WIDTH))
                 .flex_none()
+                // The last reading from before the login died, not a live one.
+                .when(account.needs_signin, |el| el.opacity(0.45))
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
@@ -1450,11 +1458,23 @@ impl AccountsPage {
             let popup = Theme::of(cx).for_popup();
             let switch_from_menu = account.clone();
             let forget_account = account.clone();
+            let sign_in_harness = account.harness;
             let menu = popover::popover_card(&popup)
                 .w(px(208.0))
                 .flex()
                 .flex_col()
                 .on_mouse_down_out(cx.listener(|page, _, _, cx| page.close_row_menu(cx)))
+                .when(account.needs_signin, |menu| {
+                    menu.child(
+                        popover::menu_row(&popup, false, format!("account-menu-sign-in-{ix}"))
+                            .id(("account-menu-sign-in", ix))
+                            .on_click(cx.listener(move |page, _, _, cx| {
+                                page.close_row_menu(cx);
+                                page.start_first_login(sign_in_harness, cx);
+                            }))
+                            .child(SharedString::from("Sign in again")),
+                    )
+                })
                 .when(can_switch, |menu| {
                     menu.child(
                         popover::menu_row(&popup, false, format!("account-menu-switch-{ix}"))
@@ -1533,6 +1553,22 @@ impl AccountsPage {
                     }),
             )
             .child(usage)
+            .when(account.needs_signin, |row| {
+                let harness = account.harness;
+                row.child(
+                    widgets::action_button(theme, widgets::ActionTone::Filled)
+                        .id(("account-sign-in", ix))
+                        .role(gpui::Role::Button)
+                        .aria_label(format!("Sign in again to {email}"))
+                        .tab_index(0)
+                        .focus_visible(|s| s.border_2().border_color(theme.accent))
+                        .on_click(cx.listener(move |page, _, _, cx| {
+                            cx.stop_propagation();
+                            page.start_first_login(harness, cx);
+                        }))
+                        .child(SharedString::from("Sign in again")),
+                )
+            })
             .child(
                 div()
                     .w(px(28.0))
@@ -2527,6 +2563,20 @@ impl Render for AccountsPage {
     }
 }
 
+/// Whether a row offers "switch to this account": not the one in use, one we
+/// can switch, and not a login that is dead until it is signed in again.
+pub(crate) fn can_switch_to(account: &AgentAccount) -> bool {
+    !account.active && account.switchable && !account.needs_signin
+}
+
+/// The meta-line note on a login that is dead until it is signed in again.
+pub(crate) fn signed_out_note(theme: &Theme) -> AnyElement {
+    div()
+        .text_color(theme.danger_muted)
+        .child(SharedString::from("Signed out — sign in again"))
+        .into_any_element()
+}
+
 /// How old the meters are, when the last re-check failed and they are the
 /// last good reading ("Usage as of 2h ago"). `None` when there is nothing
 /// stale to flag: no failure, no meters, or a reading under a few minutes old.
@@ -2543,6 +2593,51 @@ pub(crate) fn stale_usage_note(account: &AgentAccount, now: DateTime<Utc>) -> Op
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_login_that_needs_signing_in_is_not_a_switch_target() {
+        use zeron_proto::AgentUsageWindow;
+        let now = Utc::now();
+        let mut account = AgentAccount {
+            id: "a".into(),
+            harness: HarnessId::ClaudeCode,
+            email: Some("a@example.com".into()),
+            plan_label: None,
+            active: false,
+            usage_windows: vec![AgentUsageWindow {
+                label: "Week".into(),
+                used_fraction: 0.28,
+                resets_at: None,
+            }],
+            usage_fetched_at: Some(now.timestamp_millis() - 3 * 3_600_000),
+            usage_error: Some("Signed out — sign in again".into()),
+            needs_signin: false,
+            codex_reset_credits: None,
+            display_name: None,
+            organization: None,
+            auth_kind: None,
+            switchable: true,
+            saved_at: None,
+            provider: None,
+        };
+        assert!(can_switch_to(&account));
+        account.needs_signin = true;
+        assert!(!can_switch_to(&account));
+        // Nothing to switch to even for the live row, and an unreadable one.
+        account.needs_signin = false;
+        account.active = true;
+        assert!(!can_switch_to(&account));
+        account.active = false;
+        account.switchable = false;
+        assert!(!can_switch_to(&account));
+        // Its meters are the last reading from before it died: dated.
+        account.switchable = true;
+        account.needs_signin = true;
+        assert_eq!(
+            stale_usage_note(&account, now).as_deref(),
+            Some("Usage as of 3h ago")
+        );
+    }
+
     #[test]
     fn stale_usage_note_flags_old_meters_after_a_failed_recheck() {
         use zeron_proto::AgentUsageWindow;
