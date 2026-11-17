@@ -1660,6 +1660,11 @@ pub struct AgentAccount {
     /// beside stale windows. `None` when the last probe succeeded or none ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_error: Option<String>,
+    /// The saved login is dead (its refresh was refused, or a run on it could
+    /// not refresh): no chat can use it until it is signed in again. Its
+    /// `usage_windows` are then only the last reading from before it died.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_signin: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_reset_credits: Option<CodexResetCredits>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

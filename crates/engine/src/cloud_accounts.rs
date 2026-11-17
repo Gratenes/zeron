@@ -287,6 +287,8 @@ fn to_agent_account(
         } else {
             usage_error
         },
+        // Cloud's own "reconnect" prompt, not a dead local login.
+        needs_signin: false,
         display_name: account.display_name.clone(),
         organization: account.organization.clone(),
         auth_kind: Some(if api_key {

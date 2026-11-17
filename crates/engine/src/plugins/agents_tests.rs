@@ -30,6 +30,7 @@ pub(crate) fn account(id: &str, active: bool, used: f32) -> AgentAccount {
         usage_windows: vec![window("Session", used, 1_000), window("Week", 0.2, 9_000)],
         usage_fetched_at: Some(1),
         usage_error: None,
+        needs_signin: false,
         codex_reset_credits: None,
         display_name: Some(format!("Person {id}")),
         organization: None,

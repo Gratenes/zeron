@@ -348,3 +348,33 @@ async fn a_pinned_muse_chat_runs_on_its_accounts_own_config_root() {
     // A Muse chat that isn't pinned follows the selected account, as before.
     assert_eq!(env.credential(HarnessId::Muse, Some("c2")).await.as_deref(), Some(OWN_LOGIN));
 }
+
+#[tokio::test]
+async fn a_run_that_cannot_refresh_a_pinned_login_flags_it_as_needing_sign_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (token_url, _) = fixed_server("400 Bad Request", r#"{"error":"invalid_grant"}"#).await;
+    let endpoints = ProbeEndpoints { claude_token: token_url, ..Default::default() };
+    let accounts = AgentAccounts::with_endpoints(config(tmp.path()), endpoints, Default::default());
+    write_live_claude(tmp.path(), "acct-a", "a@example.com");
+    let spent = claude_slot("acct-b", "b@example.com", "at-b", now_ms() - 60_000);
+    accounts.write_slot(&spent).unwrap();
+    assert!(!accounts.slot_needs_signin(HarnessId::ClaudeCode, &spent.id));
+    accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&spent.id));
+    prepared(&PinRunEnvironment(accounts.clone()), "c1").await.unwrap_err();
+    assert!(accounts.slot_needs_signin(HarnessId::ClaudeCode, &spent.id));
+    assert!(!accounts.slot_needs_signin(HarnessId::ClaudeCode, "no-such-slot"));
+}
+
+#[tokio::test]
+async fn an_outage_during_a_refresh_does_not_flag_the_login() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (token_url, _) = fixed_server("503 Service Unavailable", "{}").await;
+    let endpoints = ProbeEndpoints { claude_token: token_url, ..Default::default() };
+    let accounts = AgentAccounts::with_endpoints(config(tmp.path()), endpoints, Default::default());
+    write_live_claude(tmp.path(), "acct-a", "a@example.com");
+    let slot = claude_slot("acct-b", "b@example.com", "at-b", now_ms() - 60_000);
+    accounts.write_slot(&slot).unwrap();
+    accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&slot.id));
+    prepared(&PinRunEnvironment(accounts.clone()), "c1").await.unwrap_err();
+    assert!(!accounts.slot_needs_signin(HarnessId::ClaudeCode, &slot.id));
+}
