@@ -180,8 +180,6 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
                     openAllFilesAccess(context)
                 }
             }
-                }
-            }
 
             section("What agents may do")
             group {
