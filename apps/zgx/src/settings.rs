@@ -101,6 +101,9 @@ const ENGINE_METHODS: &[&str] = &[
     "SetTitleSettings",
     "GetNativeSubagents",
     "SetNativeSubagents",
+    // "Keep Zeron running after you quit" (src/quit_prompt.rs).
+    "GetBackgroundSettings",
+    "SetBackgroundSettings",
     // Whether this window has the keys: banners set to "only when in the
     // background" hold while it does.
     "SetViewportFocus",
@@ -329,18 +332,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
             forget_wallpaper(&poster_of(&path), &dir);
         }
     });
-    // The page a kept video or GIF plays in (a web view: WebView2 decodes it
-    // on the GPU), written beside the kept files: its path, "" if it can't be.
-    host.function("wallpaper.player", |_| {
-        let path = engine::data_dir().and_then(|dir| write_player(&dir.join(WALLPAPER_DIR)));
-        Value::from(path.unwrap_or_default().as_str())
-    });
-    // Whether a kept file is still there (a video has no header
-    // `ui.image_size` reads).
-    host.function("wallpaper.exists", |args| {
-        let path = args.field("path").map(text).unwrap_or_default();
-        Value::from(std::path::Path::new(&path).is_file())
-    });
+    crate::quit_prompt::install(host);
     host.async_action("settings.engine", |args| {
         let method = args.field("method").map(text).unwrap_or_default();
         let params = args.field("params").map(value_json).unwrap_or(json!({}));

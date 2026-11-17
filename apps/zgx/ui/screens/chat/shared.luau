@@ -13,11 +13,13 @@ local Quote = require("@ds/quote")
 local Annotation = require("@ds/annotation")
 local sessions = require("@account/sessions")
 local agents = require("@account/agents")
+local cloud = require("@account/cloud")
 local locale = require("@ds/locale")
 local toast = require("@ds/toast")
 local ChatLinks = require("@app/screens/chat/chat_links")
 local route = require("@app/screens/shell/route")
 
+local Draft = require("@ds/draft_text")
 local M = {}
 
 -- The draft, what it carries, the options picked in a question being
@@ -189,21 +191,55 @@ do
 		end)
 	end
 end
-ui.effect(function()
+-- Saved as it changes, at most every SAVE_EVERY ms: each save reads the
+-- whole draft (into the saved state, then its file), and a long one read
+-- at every keystroke cost a copy of it each.
+local SAVE_EVERY = 250
+local saved_at = -math.huge
+local function save_new()
+	saved_at = ui.now()
 	local now: any = nil
-	if here:get() == "" then
-		local text, cargo, quotes = M.text:get(), M.cargo:get(), M.quotes:get()
+	if here:peek() == "" then
+		local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
 		if text ~= "" or #cargo > 0 then
 			now = { text = text, cargo = cargo, quotes = quotes }
 		end
 	else
-		local put = kept:get()[""]
+		local put = kept:peek()[""]
 		if put then
 			now = { text = put.text, cargo = put.cargo, quotes = put.quotes }
 		end
 	end
 	if now ~= nil or saved_new:peek() ~= nil then
 		saved_new:set(now)
+	end
+end
+ui.effect(function()
+	-- What it's saved from, followed (the draft's edits, not the draft).
+	if here:get() == "" then
+		M.text:len()
+		M.cargo:get()
+		M.quotes:get()
+	else
+		kept:len()
+	end
+	-- (A run's timer goes as the next run begins: steady typing saves every
+	-- SAVE_EVERY, and the last keystroke's once it has waited that long.)
+	local wait = SAVE_EVERY - (ui.now() - saved_at)
+	if wait <= 0 then
+		save_new()
+	else
+		ui.after(wait, save_new)
+	end
+end)
+-- The window closing (the app quitting, or the window closed): Zeron's
+-- window sets `app.closing` (src/main.rs) before it writes what the scripts
+-- saved, and a save still waiting its turn goes now. (A timer never fires
+-- once the window has closed, and the last keystrokes were lost with it.)
+local closing = ui.shared("app.closing", false)
+ui.effect(function()
+	if closing:get() == true then
+		save_new()
 	end
 end)
 
@@ -227,6 +263,15 @@ end
 function M.showing(): string
 	return here:peek()
 end
+
+-- The chat the draft in `text` is (a new chat's ""), followed: it changes
+-- with `text` as a move puts one draft away and takes out the next.
+function M.owner(): string
+	return here:get()
+end
+
+-- `showing`, read as it changes.
+M.showing_now = M.owner
 
 function M.show(key: string)
 	local was = here:peek()
@@ -261,7 +306,59 @@ function M.take(): (string, { any })
 		M.cargo:set({})
 		M.quotes:set({})
 	end)
+	-- A new chat's draft, sent: saved empty at once, not on the throttle's
+	-- next turn, which a quit in between would never reach (the message
+	-- coming back as the draft at the next launch).
+	if here:peek() == "" then
+		save_new()
+	end
 	return text, cargo
+end
+
+-- The draft shown, lifted out whole to be put back later (a plugin's
+-- `zeron.take_draft`): its words as typed, its chips and the passages
+-- quoted in it, the composer cleared. Nil when there's nothing to lift.
+function M.lift(): { text: string, cargo: { any }, quotes: { [string]: string } }?
+	local text, cargo, quotes = M.text:peek(), M.cargo:peek(), M.quotes:peek()
+	if text == "" and #cargo == 0 then
+		return nil
+	end
+	ui.batch(function()
+		M.text:set("")
+		M.cargo:set({})
+		M.quotes:set({})
+	end)
+	return { text = text, cargo = cargo, quotes = quotes }
+end
+
+-- A lifted draft put back on the draft shown (`zeron.put_draft`). Onto an
+-- empty composer it's as it was; onto words already there, its words follow
+-- them after a blank line and its chips follow theirs, its files numbered
+-- after those there.
+function M.lay(d: { text: string, cargo: { any }, quotes: { [string]: string } })
+	local here_text, here_cargo = M.text:peek(), M.cargo:peek()
+	ui.batch(function()
+		if here_text == "" and #here_cargo == 0 then
+			M.text:set(d.text)
+			M.cargo:set(d.cargo)
+			M.quotes:set(d.quotes)
+			return
+		end
+		local quotes = table.clone(M.quotes:peek())
+		for line, passage in d.quotes do
+			quotes[line] = passage
+		end
+		M.quotes:set(quotes)
+		if d.text ~= "" then
+			M.text:set(if here_text == "" then d.text else `{here_text}\n\n{d.text}`)
+		end
+		for _, item in d.cargo do
+			local moved = table.clone(item)
+			moved.mention = nil
+			M.push_cargo(nil, moved)
+		end
+	end)
+	M.focus:add(1)
 end
 
 -- A passage of the transcript, quoted into the draft (its line marks it)
@@ -893,6 +990,49 @@ function M.draft_of(key: string): { text: string, cargo: { any }, chosen: { [str
 	}
 end
 
+-- Follows chat `key`'s draft as `draft_of` does, wherever it is, without
+-- reading its words (a long draft isn't copied for it): what follows it to
+-- learn that it changed reads it only then (a split pane's mirror of it).
+function M.track_draft_of(key: string)
+	if here:get() == key then
+		M.text:len()
+		M.cargo:get()
+		M.chosen:get()
+	else
+		kept:len()
+	end
+end
+
+-- The options picked in chat `key`'s question, as `draft_of` reads them,
+-- without its words.
+function M.chosen_of(key: string): { [string]: boolean }
+	if here:get() == key then
+		return M.chosen:get()
+	end
+	local d = kept:get()[key]
+	return if d and type(d.chosen) == "table" then d.chosen else {}
+end
+
+-- The length of chat `key`'s draft's words, in bytes, as `draft_of`
+-- reads them (out in the composer, its draft not copied for it).
+function M.draft_size_of(key: string): number
+	if here:peek() == key then
+		return Draft.size(M.text)
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.text) == "string" then #d.text else 0
+end
+
+-- Chat `key`'s draft's words as they are, read without following them
+-- (`draft_of` follows them): what a plugin's `zeron.compose` adds to.
+function M.peek_text_of(key: string): string
+	if here:peek() == key then
+		return M.text:peek()
+	end
+	local d = kept:peek()[key]
+	return if d and type(d.text) == "string" then d.text else ""
+end
+
 -- Chat `key`'s draft changed where it's shown by its id (`field`: "text"
 -- or "chosen"): written wherever it is, as `draft_of` reads it.
 function M.set_draft_of(key: string, field: string, value: any)
@@ -970,9 +1110,19 @@ local here_device = ui.computed(function(): string?
 end)
 
 -- The accounts' key for a device: "" for this one, whose engine answers
--- for itself.
+-- for itself; "cloud" for any of Cloud's (a chat's machine, or the
+-- account's Cloud device), whose accounts are the vault's, every Cloud
+-- machine's alike, as Settings → Providers shows them (this engine answers
+-- for "cloud": crates/engine cloud_accounts). A machine can't be asked:
+-- its accounts aren't its own, and asking would wake it.
 local function account_key(device: string?): string
-	return if device == nil or device == here_device:get() then "" else device
+	if device == nil or device == here_device:get() then
+		return ""
+	end
+	if cloud.on_device(device) or device == cloud.device() then
+		return "cloud"
+	end
+	return device
 end
 
 -- Models of Cursor's own pool (Composer, Grok), not the third-party one.

@@ -27,7 +27,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -161,6 +160,17 @@ struct Inner {
     /// need many indexes but no updates (each watcher is an inotify instance).
     watch: bool,
     reaper_started: std::sync::Once,
+    /// Wakes a reaper parked with nothing to evict: set as something is
+    /// used (and so held), and as this goes.
+    reaper_wake: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let (woken, wake) = &*self.reaper_wake;
+        *lock(woken) = true;
+        wake.notify_all();
+    }
 }
 
 struct Entry {
@@ -201,15 +211,11 @@ struct NamesWatch {
 struct NamesState {
     index: Option<Arc<NamesIndex>>,
     /// A walk is running; `cancel` stops it when the index is dropped.
-    building: Option<Arc<AtomicBool>>,
-    /// Paths the watcher reported since the last update pass. A walk's end
-    /// applies them to the new index, since the walk may have listed their
-    /// folder before they changed.
-    changed: Vec<PathBuf>,
-    /// The watcher may have lost events, or an ignore file changed.
-    rewalk: bool,
-    /// An update pass is pending.
-    updating: bool,
+    building: Option<Arc<crate::home_index::WalkCancel>>,
+    /// The running walk reads the protected folders too.
+    building_protected: bool,
+    last_used: Option<Instant>,
+    warmed: bool,
 }
 
 impl Default for WorkspaceSearch {
@@ -235,17 +241,23 @@ impl WorkspaceSearch {
                 clock,
                 watch,
                 reaper_started: std::sync::Once::new(),
+                reaper_wake: Arc::default(),
             }),
         }
     }
 
     /// Start (or keep alive) the index for a chat's `root`.
     pub fn warm(&self, root: &Path) -> Result<IndexState, WorkspaceSearchError> {
-        let ready = match self.acquire(root, true)? {
-            Index::Live(picker) => picker.wait_for_scan(Duration::ZERO),
-            Index::Names(names) => names.index(Duration::ZERO).is_some(),
-        };
-        Ok(if ready {
+        if self.is_home(root) {
+            // (Warming asks for no protected folder: opening a chat in home
+            // asks nobody for access; a search there does.)
+            return Ok(match self.home_index(root, true, Duration::ZERO, false) {
+                Some(_) => IndexState::Ready,
+                None => IndexState::Building,
+            });
+        }
+        let picker = self.acquire(root, true)?;
+        Ok(if picker.wait_for_scan(Duration::ZERO) {
             IndexState::Ready
         } else {
             IndexState::Building
@@ -275,19 +287,22 @@ impl WorkspaceSearch {
         kinds: NameKinds,
         wait: Duration,
     ) -> Result<NameSearch, WorkspaceSearchError> {
-        let picker = match self.acquire(root, false)? {
-            Index::Live(picker) => picker,
-            Index::Names(names) => {
-                let index = names.index(wait);
-                return Ok(NameSearch {
-                    matches: index
-                        .as_ref()
-                        .map(|index| index.search(query, limit, kinds))
-                        .unwrap_or_default(),
-                    indexing: index.is_none(),
-                });
-            }
-        };
+        if self.is_home(root) {
+            // Someone searching: the protected folders are read for it
+            // (`HomeIndex::build_for`); an index without them answers
+            // meanwhile, flagged as still indexing.
+            let protected = !query.trim().is_empty();
+            let index = self.home_index(root, false, wait, protected);
+            return Ok(NameSearch {
+                matches: index
+                    .as_ref()
+                    .map(|index| index.search(query, limit, kinds))
+                    .unwrap_or_default(),
+                indexing: index
+                    .as_ref()
+                    .is_none_or(|index| protected && !index.protected),
+            });
+        }
         let query = normalize_name_query(query);
         let query = query.as_ref();
         let indexing = !picker.wait_for_scan(wait);
@@ -514,22 +529,81 @@ impl WorkspaceSearch {
         self.inner.home.as_deref() == Some(root)
     }
 
-    /// A plain folder (outside any git work tree) past the live file limit.
-    /// Inside a repository fff reads its ignore rules and keeps its index;
-    /// that folder is the user's project, whatever its size.
-    fn outgrows_live_index(&self, root: &Path) -> bool {
-        if root.ancestors().any(|dir| dir.join(".git").exists()) {
+    /// Home's index, walking it in the background when missing or stale;
+    /// waits up to `wait` for a first walk. `warm`: a chat is asking.
+    /// `protected`: the walk is to read the protected folders too
+    /// (`HomeIndex::build_for`): someone is searching.
+    fn home_index(
+        &self,
+        root: &Path,
+        warm: bool,
+        wait: Duration,
+        protected: bool,
+    ) -> Option<Arc<HomeIndex>> {
+        self.start_reaper();
+        let now = (self.inner.clock)();
+        let mut home = lock(&self.inner.home_index);
+        home.last_used = Some(now);
+        home.warmed |= warm;
+        let short = |index: &HomeIndex| protected && !index.protected;
+        let stale = home
+            .index
+            .as_ref()
+            .is_none_or(|index| index.built.elapsed() >= HOME_REFRESH || short(index));
+        // (A walk without them, under way, gives way to one with them.)
+        let walking_short = home.building.is_some() && protected && !home.building_protected;
+        if stale && (home.building.is_none() || walking_short) {
+            if let Some(cancel) = home.building.take() {
+                cancel.cancel();
+            }
+            // (A refresh keeps what the index read: once someone searched,
+            // the protected folders stay in it.)
+            let protected = protected || home.index.as_ref().is_some_and(|index| index.protected);
+            let cancel = Arc::new(crate::home_index::WalkCancel::default());
+            home.building = Some(cancel.clone());
+            home.building_protected = protected;
+            let inner = Arc::downgrade(&self.inner);
+            let root = root.to_path_buf();
+            let spawned = std::thread::Builder::new()
+                .name("workspace-search-home".into())
+                .spawn(move || build_home(inner, root, cancel, protected));
+            if let Err(error) = spawned {
+                home.building = None;
+                tracing::warn!(%error, "home search index did not start");
+            }
+        }
+        let waiting = |home: &HomeEntry| {
+            home.building.is_some() && home.index.as_deref().is_none_or(|index| short(index))
+        };
+        if waiting(&home) && !wait.is_zero() {
+            home = self
+                .inner
+                .home_built
+                .wait_timeout_while(home, wait, |home| waiting(home))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        home.index.clone()
+    }
+
+    /// Drop home's index (and stop its walk) when `drop` says so.
+    fn release_home(&self, drop: impl FnOnce(&HomeEntry) -> bool) -> bool {
+        let mut home = lock(&self.inner.home_index);
+        if (home.index.is_none() && home.building.is_none()) || !drop(&home) {
             return false;
         }
-        let large = crate::names_index::holds_more_files_than(root, self.inner.max_live_files);
-        if large {
-            tracing::info!(
-                root = %root.display(),
-                max_files = self.inner.max_live_files,
-                "workspace search: plain folder too large to index live, indexing names only"
-            );
+        if let Some(cancel) = home.building.take() {
+            cancel.cancel();
         }
-        large
+        let dropped = std::mem::take(&mut *home);
+        self.inner.home_built.notify_all();
+        std::mem::drop(home);
+        std::mem::drop(dropped);
+        // Its paths sit in the pages of the walk's thread, long gone: only a
+        // forced collect gives them back.
+        crate::heap::trim();
+        tracing::info!("workspace search home index evicted");
+        true
     }
 
     /// `warm`: a chat is asking (see [`Entry::warmed`]).
@@ -588,6 +662,10 @@ impl WorkspaceSearch {
     }
 
     fn start_reaper(&self) {
+        // (Something is about to be held: a parked reaper looks again.)
+        let (woken, wake) = &*self.inner.reaper_wake;
+        *lock(woken) = true;
+        wake.notify_all();
         let weak = Arc::downgrade(&self.inner);
         self.inner.reaper_started.call_once(move || {
             let spawned = std::thread::Builder::new()
@@ -600,122 +678,15 @@ impl WorkspaceSearch {
     }
 }
 
-impl NamesEntry {
-    /// The index, walking the folder in the background when missing or
-    /// stale; waits up to `wait` for a first walk.
-    fn index(self: &Arc<Self>, wait: Duration) -> Option<Arc<NamesIndex>> {
-        let watched = self.watched();
-        let mut state = lock(&self.state);
-        let stale = state
-            .index
-            .as_ref()
-            .is_none_or(|index| !watched && index.built.elapsed() >= NAMES_REFRESH);
-        if stale {
-            self.start_walk(&mut state);
-        }
-        if state.index.is_none() && state.building.is_some() && !wait.is_zero() {
-            state = self
-                .built
-                .wait_timeout_while(state, wait, |state| {
-                    state.index.is_none() && state.building.is_some()
-                })
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0;
-        }
-        state.index.clone()
-    }
-
-    /// Walk the folder in the background, unless a walk is running.
-    fn start_walk(self: &Arc<Self>, state: &mut NamesState) {
-        if state.building.is_some() {
-            return;
-        }
-        let cancel = Arc::new(AtomicBool::new(false));
-        state.building = Some(cancel.clone());
-        let names = Arc::downgrade(self);
-        let spawned = std::thread::Builder::new()
-            .name("workspace-search-names".into())
-            .spawn(move || build_names(names, cancel));
-        if let Err(error) = spawned {
-            state.building = None;
-            tracing::warn!(%error, "names search index did not start");
-        }
-    }
-
-    /// Follow the folder's changes with one recursive watch. The watch's
-    /// first event asks for a walk, which covers what changed before it.
-    fn start_watch(self: &Arc<Self>) {
-        let names = Arc::downgrade(self);
-        let watch = FsWatchHub::global().watch(
-            &self.root,
-            notify::RecursiveMode::Recursive,
-            move |event| {
-                if let Some(names) = names.upgrade() {
-                    names.changed(event);
-                }
-            },
-        );
-        let root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
-        *lock(&self.watch) = Some(NamesWatch { watch, root });
-    }
-
-    /// The watch is installed (it isn't, briefly, after it starts, and for
-    /// good if it failed).
-    fn watched(&self) -> bool {
-        lock(&self.watch)
-            .as_ref()
-            .is_some_and(|watch| watch.watch.is_live())
-    }
-
-    /// A watcher event: queue its paths for the next update pass.
-    fn changed(self: &Arc<Self>, event: &notify::Event) {
-        if matches!(event.kind, notify::EventKind::Access(_)) {
-            return;
-        }
-        let mut state = lock(&self.state);
-        if event.need_rescan() || event.paths.is_empty() {
-            state.rewalk = true;
-        } else {
-            state.changed.extend(event.paths.iter().cloned());
-            if state.changed.len() > MAX_UPDATE_PATHS {
-                state.changed = Vec::new();
-                state.rewalk = true;
-            }
-        }
-        self.schedule_update(&mut state);
-    }
-
-    /// Start an update pass, unless one is pending or a walk is running
-    /// (its end starts one).
-    fn schedule_update(self: &Arc<Self>, state: &mut NamesState) {
-        if state.updating || state.building.is_some() || (state.changed.is_empty() && !state.rewalk)
-        {
-            return;
-        }
-        state.updating = true;
-        let names = Arc::downgrade(self);
-        let spawned = std::thread::Builder::new()
-            .name("workspace-search-names-update".into())
-            .spawn(move || update_names(names));
-        if let Err(error) = spawned {
-            state.updating = false;
-            tracing::warn!(%error, "names search index update did not start");
-        }
-    }
-
-    /// Stop a running walk and the watch; anyone waiting for the walk stops
-    /// waiting.
-    fn cancel(&self) {
-        if let Some(cancel) = lock(&self.state).building.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
-        lock(&self.watch).take();
-        self.built.notify_all();
-    }
-}
-
-fn build_names(names: Weak<NamesEntry>, cancel: Arc<AtomicBool>) {
-    let Some(names) = names.upgrade() else {
+fn build_home(
+    inner: Weak<Inner>,
+    root: PathBuf,
+    cancel: Arc<crate::home_index::WalkCancel>,
+    protected: bool,
+) {
+    let started = Instant::now();
+    let index = HomeIndex::build_for(&root, &cancel, protected);
+    let Some(inner) = inner.upgrade() else {
         return;
     };
     let started = Instant::now();
@@ -734,6 +705,7 @@ fn build_names(names: Weak<NamesEntry>, cancel: Arc<AtomicBool>) {
         root = %names.root.display(),
         home = names.home,
         entries = index.len(),
+        protected = index.protected,
         scan_ms = started.elapsed().as_millis() as u64,
         walk,
         "workspace search names index scanned"
@@ -782,28 +754,41 @@ fn update_names(names: Weak<NamesEntry>) {
         update_ms = started.elapsed().as_millis() as u64,
         "workspace search names index updated"
     );
-    if update == Update::Rewalk {
-        let mut state = lock(&names.state);
-        state.changed.clear();
-        names.start_walk(&mut state);
-    }
+    home.index = Some(Arc::new(index));
+    home.building = None;
+    inner.home_built.notify_all();
+    drop(home);
+    // What the walk's workers allocated and dropped is in their pages, given
+    // back once they've exited (they're leaving now).
+    std::thread::sleep(Duration::from_millis(200));
+    crate::heap::trim();
 }
 
-/// Mark `root`'s index used and return it, if it has one.
-fn touch(
-    entries: &mut HashMap<PathBuf, Entry>,
-    root: &Path,
-    now: Instant,
-    warm: bool,
-) -> Option<Index> {
-    let entry = entries.get_mut(root)?;
-    entry.last_used = now;
-    entry.warmed |= warm;
-    Some(entry.index.clone())
-}
-
+/// Evicts idle indexes each [`REAPER_INTERVAL`] while any is held; with
+/// none (all evicted, or released), parks until one is used again.
 fn reap(inner: Weak<Inner>) {
     loop {
+        let Some(strong) = inner.upgrade() else {
+            return;
+        };
+        let held = !lock(&strong.entries).is_empty() || {
+            let home = lock(&strong.home_index);
+            home.index.is_some() || home.building.is_some()
+        };
+        let park = strong.reaper_wake.clone();
+        drop(strong);
+        if !held {
+            let (woken, wake) = &*park;
+            let mut woken = lock(woken);
+            while !*woken {
+                woken = wake
+                    .wait(woken)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            *woken = false;
+            // (Woken as something is used: it is held by now, or will be
+            // within the interval, which runs from here.)
+        }
         std::thread::sleep(REAPER_INTERVAL);
         let Some(inner) = inner.upgrade() else {
             return;
@@ -1231,6 +1216,55 @@ mod tests {
         );
         assert!(search.release_unless_warmed(&home));
         assert_eq!(search.live(), 0);
+    }
+
+    /// Opening New project (an empty query) and a chat in home (a warm)
+    /// read no protected folder; the first search does, and answers as still
+    /// indexing until it has; later refreshes keep them.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn home_reads_the_protected_folders_only_once_someone_searches() {
+        let (_dir, home) = folder(&[
+            ("dev/plan.md", b""),
+            ("Documents/proj/plan.md", b""),
+            ("Music/plan.md", b""),
+        ]);
+        let search = WorkspaceSearch::with_clock(Arc::new(Instant::now), false, Some(home.clone()));
+        let paths = |found: &NameSearch| -> Vec<String> {
+            found.matches.iter().map(|m| m.path.clone()).collect()
+        };
+        // The picker opening: an empty query, no protected folder read.
+        search.warm(&home).unwrap();
+        let opened = search
+            .search_names_within(&home, "", 20, NameKinds::Directories, NAME_SCAN_WAIT)
+            .unwrap();
+        assert!(!opened.indexing);
+        assert!(
+            !lock(&search.inner.home_index)
+                .index
+                .as_ref()
+                .is_some_and(|index| index.protected)
+        );
+        // A search: the protected folders are read (never Music).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let found = loop {
+            let found = search
+                .search_names_within(&home, "plan", 20, NameKinds::Files, NAME_SCAN_WAIT)
+                .unwrap();
+            if !found.indexing {
+                break found;
+            }
+            assert!(Instant::now() < deadline, "the search's walk finished");
+        };
+        assert_eq!(paths(&found), ["dev/plan.md", "Documents/proj/plan.md"]);
+        // A warm after it keeps what the index read.
+        search.warm(&home).unwrap();
+        assert!(
+            lock(&search.inner.home_index)
+                .index
+                .as_ref()
+                .is_some_and(|index| index.protected)
+        );
     }
 
     #[test]

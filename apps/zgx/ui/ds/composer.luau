@@ -52,9 +52,11 @@ local dock = require("@self/composer_dock")
 local ask = require("@self/composer_ask")
 local mentions = require("@self/composer_mentions")
 local locale = require("@self/locale")
+local Tooltip = require("@self/tooltip")
 local VoiceWave = require("@self/voice_wave").VoiceWave
 local context_usage = require("@self/context_usage")
 local TextMetrics = require("@self/composer_metrics")
+local Draft = require("@self/draft_text")
 local Layout = require("@self/composer_layout")
 local ComposerMotion = require("@self/composer_motion")
 local EditorMenu = require("@self/editor_menu")
@@ -123,9 +125,12 @@ export type Props = {
 	-- A turn is running: Send becomes Stop while the draft is empty, and
 	-- queues what is typed.
 	running: State<boolean>?,
-	-- What the agent may do unasked: "supervised", "edits" or "full"; and
-	-- plan mode (explore and propose before changing anything).
+	-- What the agent may do unasked: "supervised", "edits", "auto" or
+	-- "full"; and plan mode (explore and propose before changing anything).
 	access: State<string?>?,
+	-- The chat's agent has an auto mode of its own (Claude Code's, Codex's
+	-- auto-review): the picker offers Auto.
+	access_auto: (() -> boolean)?,
 	plan: State<boolean>?,
 	-- The model (a ModelPicker: its agents' tabs, its models, its reasoning,
 	-- Fast mode and its other options' picks).
@@ -364,23 +369,32 @@ end
 -- The access modes, as Zeron offers them; their icons (Central Icons,
 -- centralicons.com, round outlined, radius 2, stroke 1.5) say what each
 -- does: it waits for you (a raised hand), edits go through (a pencil with
--- sparkles), nothing is held back (an open padlock). (Made as they're
--- read, in the locale's words.)
-local function ACCESS(): { Dropdown.Item }
-	return {
-	worded({ value = "supervised", icon = "access-supervised" }, {
-		label = "ds.composer.access.supervised",
-		description = "ds.composer.access.supervised_hint",
-	}),
-	worded({ value = "edits", icon = "access-edits" }, {
-		label = "ds.composer.access.edits",
-		description = "ds.composer.access.edits_hint",
-	}),
-	worded({ value = "full", icon = "access-full" }, {
+-- sparkles), the agent's reviewer vets each action (a shield), nothing is
+-- held back (an open padlock). Auto only where the agent has one (`auto`),
+-- or while it's the mode chosen. (Made as they're read, in the locale's
+-- words.)
+local function ACCESS(auto: boolean, chosen: string?): { Dropdown.Item }
+	local items = {
+		worded({ value = "supervised", icon = "access-supervised" }, {
+			label = "ds.composer.access.supervised",
+			description = "ds.composer.access.supervised_hint",
+		}),
+		worded({ value = "edits", icon = "access-edits" }, {
+			label = "ds.composer.access.edits",
+			description = "ds.composer.access.edits_hint",
+		}),
+	}
+	if auto or chosen == "auto" then
+		table.insert(items, worded({ value = "auto", icon = "shield-check", disabled = not auto }, {
+			label = if auto then "ds.composer.access.auto" else "ds.composer.access.auto_unavailable",
+			description = if auto then "ds.composer.access.auto_hint" else "ds.composer.access.auto_unavailable_hint",
+		}))
+	end
+	table.insert(items, worded({ value = "full", icon = "access-full" }, {
 		label = "ds.composer.access.full",
 		description = "ds.composer.access.full_hint",
-	}),
-	}
+	}))
+	return items
 end
 
 -- Plan mode's row at the access panel's foot: an item's shape, its icon on
@@ -1002,12 +1016,14 @@ return ui.component(function(props: Props): Node
 		-- Past the cap a draft is measured no more: its size changes nothing
 		-- (Layout.estimate). The type's line height changed (tracked), it is
 		-- measured again.
-		estimate = function(text: string, line_height: number): Layout.Sample?
+		estimate = function(line_height: number): Layout.Sample?
 			local line = ui.theme.get("zeron.composer.line")
 			if type(line) == "number" and math.abs(line - line_height) > 0.01 then
 				return nil
 			end
-			return Layout.estimate(text, line_height)
+			-- Its line breaks counted where it's held, up to the cap's.
+			local capped = Layout.capped_lines(line_height)
+			return Layout.estimate_lines(1 + #value:find("\n", { limit = capped - 1 }), line_height)
 		end,
 	}
 	local head_h_seen = kept("head_h", 0)
@@ -1048,10 +1064,19 @@ return ui.component(function(props: Props): Node
 	end
 
 	local function has_text(): boolean
-		return string.find(value:get(), "%S") ~= nil
+		return Draft.has_text(value)
 	end
 	local function disabled(): boolean
 		return read(props.disabled) == true
+	end
+	-- Auto is chosen on an agent without it ("Auto unavailable"): nothing is
+	-- sent until another mode or agent is picked (the engine would refuse
+	-- the run).
+	local function access_blocked(): boolean
+		return props.access ~= nil
+			and props.access_auto ~= nil
+			and props.access:get() == "auto"
+			and not props.access_auto()
 	end
 	local function dictating(): boolean
 		return props.dictating ~= nil and props.dictating:get()
@@ -1111,6 +1136,9 @@ return ui.component(function(props: Props): Node
 			return
 		end
 		if not string.find(text, "%S") and not has_cargo() then
+			return
+		end
+		if access_blocked() then
 			return
 		end
 		if props.on_send then
@@ -1179,7 +1207,7 @@ return ui.component(function(props: Props): Node
 			cargo = has_cargo(),
 			asking = asking(),
 			dictating = dictating(),
-			multiline = string.find(value:get(), "\n") ~= nil,
+			multiline = Draft.multiline(value),
 		}
 	end
 	local target_geometry = ui.use_state(Layout.calculate(layout_input(), previous_text_expanded:peek()))
@@ -1421,7 +1449,10 @@ return ui.component(function(props: Props): Node
 				end
 				else nil,
 			value = props.access,
-			items = ACCESS,
+			items = function(): { Dropdown.Item }
+				local chosen = props.access and props.access:get()
+				return ACCESS(props.access_auto ~= nil and props.access_auto(), chosen)
+			end,
 			tone = "chip",
 			label = locale.t("ds.composer.access.label") :: any,
 			search = false,
@@ -1453,20 +1484,41 @@ return ui.component(function(props: Props): Node
 		on_click = props.on_dictate,
 		Icon { name = "microphone", size = 18 },
 	})
-	local send_button = Button {
-		shape = "pill",
-		size = "sm",
-		icon = true,
-		label = function()
-			return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
-		end,
-		disabled = function()
-			return disabled() or not (has_text() or has_cargo() or dictating())
-		end,
-		on_press = if spoken then spoken.on_send_press else nil,
-		on_click = send,
-		Icon { name = "arrow-up", size = 14 },
-	}
+	local function send_control(): Node
+		return Button {
+			shape = "pill",
+			size = "sm",
+			icon = true,
+			label = function()
+				return locale.s(if running and running:get() then "ds.composer.queue_message" else "ds.composer.send_message")
+			end,
+			disabled = function()
+				return disabled() or access_blocked() or not (has_text() or has_cargo() or dictating())
+			end,
+			on_press = if spoken then spoken.on_send_press else nil,
+			on_click = send,
+			Icon { name = "arrow-up", size = 14 },
+		}
+	end
+	-- Held by an unavailable Auto, it says why when rested on. (A tooltip is
+	-- set once, not followed, and a disabled button hears no pointer: the
+	-- held one is a button of its own under a box that carries the words.)
+	local send_button = ui.show(
+		access_blocked,
+		ui.div {
+			relative = true,
+			send_control(),
+			ui.div {
+				absolute = true,
+				left = 0,
+				right = 0,
+				top = 0,
+				bottom = 0,
+				tooltip = Tooltip { locale.t("ds.composer.send_auto_unavailable") },
+			},
+		},
+		send_control()
+	)
 	local stop_button = Button {
 		shape = "pill",
 		size = "sm",
