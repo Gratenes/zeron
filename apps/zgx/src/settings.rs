@@ -101,6 +101,9 @@ const ENGINE_METHODS: &[&str] = &[
     "SetTitleSettings",
     "GetNativeSubagents",
     "SetNativeSubagents",
+    // "Keep Zeron running after you quit" (src/quit_prompt.rs).
+    "GetBackgroundSettings",
+    "SetBackgroundSettings",
     // Whether this window has the keys: banners set to "only when in the
     // background" hold while it does.
     "SetViewportFocus",
@@ -343,6 +346,7 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
         let path = args.field("path").map(text).unwrap_or_default();
         Value::from(std::path::Path::new(&path).is_file())
     });
+    crate::quit_prompt::install(host);
     host.async_action("settings.engine", |args| {
         let method = args.field("method").map(text).unwrap_or_default();
         let params = args.field("params").map(value_json).unwrap_or(json!({}));

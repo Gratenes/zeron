@@ -617,6 +617,13 @@
         "worktree_hint": "An isolated copy, on a branch of its own."
       },
       "work_in": "Work in",
+      "reach": {
+        "label": "Reaches",
+        "devices": "All devices",
+        "devices_hint": "Works with your other devices: their chats, and commands on them.",
+        "isolated": "Isolated",
+        "isolated_hint": "Only its own machine and the chats it starts."
+      },
       "project": {
         "label": "Project",
         "search": "Search projects…",
@@ -1173,6 +1180,11 @@
         "description": "Blurred everywhere, for screen sharing. Click one to see it.",
         "terms": "screen sharing recording blur blurred mosaic private censor redact"
       },
+      "keep_chats_local": {
+        "label": "Keep chats on this device",
+        "description": "Stay signed in, but this device's chats, chat list and projects aren't synced to Zeron's servers. Your other devices won't see them, and this one won't see theirs. Zeron restarts its engine to switch.",
+        "terms": "sync synced local only offline private privacy server cloud upload chats transcripts devices"
+      },
       "links_in": {
         "external": "Your default browser.",
         "tab": "A browser tab beside the conversation."
@@ -1205,6 +1217,12 @@
         "terms": "co-author coauthor attribution bot commit message",
         "cloud": "Always on for Cloud",
         "on": "Agents' commits add zeronsh[bot] as a co-author"
+      },
+      "keep_running": {
+        "label": "Keep Zeron running after you quit",
+        "on": "Chats keep working, and other devices can reach them.",
+        "off": "When you quit, Zeron stops once its chats are done.",
+        "terms": "background quit close engine agents running stop memory battery"
       }
     },
     "engine": {
@@ -2059,6 +2077,12 @@
         "terms": "machine size vcpu memory disk credits rate xlarge large small standard",
         "description": "The size new Cloud chats start on. Bigger machines use credits faster.",
         "failed": "Couldn't change the default machine. Try again in a moment."
+      },
+      "reach": {
+        "title": "New chats reach",
+        "terms": "reach access devices isolated isolate remote commands security",
+        "description": "Whether new Cloud chats work with your other devices — their chats, and commands on them — or stay on their own machine. You can change it for each chat from its composer.",
+        "failed": "Couldn't change what new Cloud chats reach. Try again in a moment."
       }
     },
     "billing": {
@@ -3396,6 +3420,12 @@
       "old": "This Zeron needs a newer engine",
       "old_tip": "Its engine is older than this version needs. Open About & updates to go back to Stable.",
       "short_old": "Needs a newer engine"
+    },
+    "quit": {
+      "working": "{n, plural, one {# chat is still working.} other {# chats are still working.}}",
+      "detail": "Keep running in the background until they finish, or stop them now?",
+      "keep": "Keep Running",
+      "stop": "Stop Them Now"
     }
   },
   "account": {
@@ -3422,6 +3452,9 @@
         "expired": "You were signed out. Sign in again to carry on.",
         "failed": "Sign-in didn't finish. Try again."
       }
+    },
+    "cloud": {
+      "reach_not_changed": "Couldn't change what this Cloud chat reaches."
     }
   },
   "plugins": {
