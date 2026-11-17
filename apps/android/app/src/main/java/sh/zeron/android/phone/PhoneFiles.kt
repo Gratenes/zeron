@@ -60,6 +60,15 @@ class PhoneFiles(private val context: Context) {
         return hit to below
     }
 
+    /** A real file inside an allowed folder, for handing to another app: needs All files access (a picked tree can't give a path). */
+    fun readableFile(path: String): File {
+        val (root, below) = locate(path)
+        if (!allFilesAccess()) fail("files.unavailable", "sending attachments from storage needs All files access for Zeron")
+        val f = fileOf(root, below)
+        if (!f.isFile) fail("files.not_found", "$path is not a file")
+        return f
+    }
+
     /** `..`, `.` and repeated slashes resolved; for real files also symlinks (so a link can't leave the folder). */
     private fun canonicalize(path: String): String {
         val parts = ArrayList<String>()

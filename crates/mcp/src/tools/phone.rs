@@ -11,7 +11,7 @@ use zeron_rpc::methods;
 
 use super::{ToolDef, Tools};
 
-pub(super) const NAMES: [&str; 20] = [
+pub(super) const NAMES: [&str; 22] = [
     "phone_ping",
     "phone_screen_read",
     "phone_screenshot",
@@ -28,6 +28,8 @@ pub(super) const NAMES: [&str; 20] = [
     "phone_sms_threads",
     "phone_sms_read",
     "phone_sms_send",
+    "phone_sms_attachment",
+    "phone_sms_react",
     "phone_contacts_search",
     "phone_files_list",
     "phone_files_stat",
@@ -161,9 +163,28 @@ pub(super) fn catalog() -> Vec<ToolDef> {
             input_schema: schema(json!({
                 "to": { "type": "string", "description": "A phone number. Give this or thread_id." },
                 "thread_id": { "type": "string", "description": "A one-to-one conversation's id from phone_sms_threads. Give this or to." },
-                "text": { "type": "string" },
+                "text": { "type": "string", "description": "The message, or the caption when attachments are given (may then be empty)." },
+                "attachments": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of files on the phone, inside its allowed folders (copy one there first with device_file_copy). Sent through Google Messages as an RCS file transfer, or MMS if Messages falls back. Images, video, audio, files. Needs the person to have allowed \"Send attachments\". UNPROVEN on a real phone: check the reply's confirmedInMessages." },
                 "via": { "type": "string", "enum": ["auto", "sms", "rcs"], "description": "auto (default): through Google Messages (RCS if possible, else SMS with Messages' retry); sms: a bare SMS from the radio, only when asked for; rcs: only by RCS." }
             }), &["text"]),
+        },
+        ToolDef {
+            name: "phone_sms_attachment",
+            description: "Save one attachment of a picture or chat message (an entry of `attachments` from phone_sms_read: message id `m…` and its `partId`) as a file on the phone, under /storage/emulated/0/Zeron/Attachments (an allowed folder, read-only), so it can be copied off with device_file_copy. A photo up to about 600 KB is also saved on this machine and its `savedTo` path is returned, so you can look at it. Needs the person to have allowed \"Read attachments\".",
+            input_schema: schema(json!({
+                "message_id": { "type": "string", "description": "The message's id from phone_sms_read, like m123." },
+                "part_id": { "type": "string", "description": "The attachment's partId from that message." }
+            }), &["message_id", "part_id"]),
+        },
+        ToolDef {
+            name: "phone_sms_react",
+            description: "React to a message with an emoji, by driving Google Messages (long-press the bubble, pick the emoji). Name the message by `message_id` (from phone_sms_read), or by `thread_id` plus `match` text from it. One-to-one chats only; the message needs text. Needs the person to have allowed \"React to messages\"; the send-confirm setting applies; it takes over the screen for a few seconds and refuses while the person is using the phone. The reply says whether the reaction showed up in Google Messages' database (`confirmedInMessages`): UNPROVEN on a real phone, so check it. In phone_sms_read a reaction appears as a message with a `reaction` field, not as text.",
+            input_schema: schema(json!({
+                "message_id": { "type": "string" },
+                "thread_id": { "type": "string" },
+                "match": { "type": "string", "description": "With thread_id: text the message contains." },
+                "emoji": { "type": "string", "description": "One emoji, like 👍 or ❤️." }
+            }), &["emoji"]),
         },
         ToolDef {
             name: "phone_contacts_search",
@@ -217,6 +238,9 @@ impl Tools {
         if tool == SCREENSHOT {
             reply = save_screenshot(reply).await?;
         }
+        if tool == "phone_sms_attachment" {
+            reply = save_attachment(reply).await;
+        }
         Ok(reply)
     }
 
@@ -252,6 +276,35 @@ impl Tools {
             ),
         }
     }
+}
+
+/// A small photo comes back inline (`inlineBase64`): save it here and give its path, so an agent can look at it.
+async fn save_attachment(mut reply: Value) -> Value {
+    let Some(encoded) = reply.get("inlineBase64").and_then(Value::as_str).map(str::to_owned) else {
+        return reply;
+    };
+    let ext = match reply.get("type").and_then(Value::as_str) {
+        Some("image/png") => "png",
+        Some("image/gif") => "gif",
+        Some("image/webp") => "webp",
+        _ => "jpg",
+    };
+    let saved = async {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+        let dir = std::env::temp_dir().join("zeron-phone");
+        tokio::fs::create_dir_all(&dir).await.ok()?;
+        let path = dir.join(format!("attachment-{}.{ext}", uuid::Uuid::new_v4().simple()));
+        tokio::fs::write(&path, bytes).await.ok()?;
+        Some(path)
+    }
+    .await;
+    if let Some(object) = reply.as_object_mut() {
+        object.remove("inlineBase64");
+        if let Some(path) = saved {
+            object.insert("savedTo".into(), json!(path.to_string_lossy()));
+        }
+    }
+    reply
 }
 
 /// The phone sends the JPEG inline (`jpegBase64`); an agent reads it as a file.

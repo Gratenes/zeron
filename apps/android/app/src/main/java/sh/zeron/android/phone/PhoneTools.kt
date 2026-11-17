@@ -94,10 +94,18 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
                 val via = args.optString("via").ifEmpty { "auto" }
                 if (via != "auto" && via != "sms" && via != "rcs") throw PhoneToolException("via is auto, sms or rcs")
                 val to = args.optString("to").takeIf { it.isNotBlank() }
+                val attach = args.optJSONArray("attachments")?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } }.orEmpty()
+                if (attach.isNotEmpty() && !settings.groupOn(PhoneSettings.Group.ATTACH_SEND)) throw PhoneToolException("Sending attachments isn't allowed on this phone (Zeron → Settings → Agent phone access → Send attachments)")
                 sms.send(to, args.optString("thread_id").takeIf { it.isNotBlank() }, text, via, if (settings.confirmSmsSend) ({ how ->
-                    PhoneConfirm.ask(context, "${who ?: "An agent"} wants to send a message $how".take(120), text)
-                }) else null)
+                    PhoneConfirm.ask(context, "${who ?: "An agent"} wants to send a message $how".take(120), text.ifBlank { attach.joinToString(", ") { it.substringAfterLast('/') } })
+                }) else null, attach)
             }
+            "sms_attachment" -> sms.attachment(args.optString("message_id"), args.optString("part_id"))
+            "sms_react" -> sms.react(
+                args.optString("message_id").takeIf { it.isNotBlank() }, args.optString("thread_id").takeIf { it.isNotBlank() },
+                args.optString("match").takeIf { it.isNotBlank() }, args.optString("emoji"),
+                if (settings.confirmSmsSend) ({ how -> PhoneConfirm.ask(context, "${who ?: "An agent"} wants $how".take(120), args.optString("emoji")) }) else null,
+            )
             "files_list" -> files.list(args.optString("path"), args.optString("cursor").takeIf { it.isNotEmpty() })
             "files_stat" -> files.stat(args.optString("path"))
             "files_hash" -> files.hash(args.optString("path"))
@@ -196,6 +204,8 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
         "sms_threads" -> "listed text conversations"
         "sms_read" -> "read texts from ${a.optString("thread_id").ifEmpty { a.optString("address") }}"
         "sms_send" -> "sent a message (${a.optString("text").length} characters) to ${a.optString("to").ifEmpty { "thread " + a.optString("thread_id") }}"
+        "sms_attachment" -> "saved attachment ${a.optString("part_id")} of ${a.optString("message_id")}"
+        "sms_react" -> "reacted ${a.optString("emoji")} to a message"
         "contacts_search" -> "searched contacts"
         "files_list" -> "listed files in ${a.optString("path").ifEmpty { "the allowed folders" }}"
         "files_stat" -> "looked at ${a.optString("path")}"
@@ -216,6 +226,8 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             "wait" to PhoneSettings.Group.SCREEN_READ,
             "sms_threads" to PhoneSettings.Group.SMS_READ, "sms_read" to PhoneSettings.Group.SMS_READ,
             "sms_send" to PhoneSettings.Group.SMS_SEND,
+            "sms_attachment" to PhoneSettings.Group.ATTACH_READ,
+            "sms_react" to PhoneSettings.Group.REACTIONS,
             "contacts_search" to PhoneSettings.Group.CONTACTS,
             "files_list" to PhoneSettings.Group.FILES, "files_stat" to PhoneSettings.Group.FILES, "files_hash" to PhoneSettings.Group.FILES,
             "files_read" to PhoneSettings.Group.FILES, "files_write_part" to PhoneSettings.Group.FILES,

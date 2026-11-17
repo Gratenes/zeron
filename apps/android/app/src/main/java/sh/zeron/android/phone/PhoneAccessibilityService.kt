@@ -359,6 +359,170 @@ class PhoneAccessibilityService : AccessibilityService() {
     }
 
     /** What a Google Messages conversation screen shows: its compose box, its Send button, the line that says how it will go. */
+    private fun labelsOf(root: AccessibilityNodeInfo): List<String> {
+        val out = ArrayList<String>()
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val n = queue.removeFirst()
+            if (n.isVisibleToUser) {
+                n.text?.toString()?.takeIf { it.isNotBlank() }?.let(out::add)
+                n.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let(out::add)
+            }
+            for (i in 0 until n.childCount) n.getChild(i)?.let(queue::add)
+        }
+        return out
+    }
+
+    private fun clickableAncestor(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        var t: AccessibilityNodeInfo? = n
+        while (t != null && !t.isClickable) t = t.parent
+        return t
+    }
+
+    private fun findByLabel(root: AccessibilityNodeInfo, accept: (String) -> Boolean): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val n = queue.removeFirst()
+            if (n.isVisibleToUser) {
+                val a = n.text?.toString()
+                val b = n.contentDescription?.toString()
+                if ((a != null && accept(a)) || (b != null && accept(b))) return n
+            }
+            for (i in 0 until n.childCount) n.getChild(i)?.let(queue::add)
+        }
+        return null
+    }
+
+    private fun messagesRoot(): AccessibilityNodeInfo? = rootInActiveWindow?.takeIf { it.packageName?.toString() == "com.google.android.apps.messaging" }
+
+    /**
+     * Opens Google Messages with files to send to [number]: first straight into the conversation, else through
+     * Messages' own share sheet (pick the conversation). Taps Send only when the compose screen shows the files
+     * attached. Returns the transport its Send button announces. Unproven on a real phone until tried.
+     */
+    fun sendAttachmentsInMessages(number: String, text: String, uris: List<android.net.Uri>, mimes: List<String>, names: List<String>, who: String?, requireRcs: Boolean): String {
+        val messages = "com.google.android.apps.messaging"
+        PhoneUnlock.ours(60_000)
+        for (u in uris) grantUriPermission(messages, u, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        fun withStreams(i: Intent): Intent {
+            val clip = android.content.ClipData.newRawUri("files", uris[0]).also { c -> uris.drop(1).forEach { c.addItem(android.content.ClipData.Item(it)) } }
+            i.clipData = clip
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            return i
+        }
+        fun launch(i: Intent) = try { startActivity(i) } catch (e: Exception) { throw PhoneToolException("Google Messages can't be opened here (${e.javaClass.simpleName}): is it installed?") }
+        fun composeScreen(seconds: Int, pick: Boolean): MessagesScreen? {
+            val digits = number.filter { it.isDigit() }.takeLast(7)
+            for (i in 0 until seconds * 2) {
+                Thread.sleep(500)
+                val root = messagesRoot() ?: continue
+                val screen = scanMessages(root)
+                if (screen.send != null && screen.field != null) return screen
+                if (pick) {
+                    // Messages' share sheet lists conversations: choose the one with this person.
+                    val hit = findByLabel(root) { l -> (digits.length >= 7 && l.filter { it.isDigit() }.endsWith(digits)) || (!who.isNullOrBlank() && l.equals(who, ignoreCase = true)) }
+                    hit?.let { clickableAncestor(it)?.performAction(AccessibilityNodeInfo.ACTION_CLICK) }
+                }
+            }
+            return null
+        }
+        fun attached(): Boolean = messagesRoot()?.let { MessagesUi.showsAttachment(labelsOf(it), names) } == true
+        var screen: MessagesScreen? = null
+        var ok = false
+        // Route 1 (one file): the conversation opens with the file already attached.
+        if (uris.size == 1) {
+            launch(withStreams(Intent(Intent.ACTION_SENDTO, android.net.Uri.parse("smsto:" + android.net.Uri.encode(number))).setPackage(messages)
+                .putExtra("sms_body", text).putExtra(Intent.EXTRA_STREAM, uris[0])))
+            screen = composeScreen(10, false)
+            for (i in 0 until 6) { if (screen != null && attached()) { ok = true; break }; Thread.sleep(500) }
+            if (!ok) { performGlobalAction(GLOBAL_ACTION_BACK); Thread.sleep(500) }
+        }
+        // Route 2: Messages' share sheet, then pick the conversation.
+        if (!ok) {
+            val send = Intent(if (uris.size == 1) Intent.ACTION_SEND else Intent.ACTION_SEND_MULTIPLE).setPackage(messages)
+            send.type = if (mimes.distinct().size == 1) mimes[0] else "*/*"
+            if (uris.size == 1) send.putExtra(Intent.EXTRA_STREAM, uris[0]) else send.putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+            if (text.isNotBlank()) send.putExtra(Intent.EXTRA_TEXT, text)
+            launch(withStreams(send))
+            screen = composeScreen(20, true)
+            for (i in 0 until 6) { if (screen != null && attached()) { ok = true; break }; Thread.sleep(500) }
+        }
+        if (!ok || screen == null) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            throw PhoneToolException("Google Messages' compose screen didn't show the file(s) attached, so nothing was sent. (This route is untested on this phone: the conversation or attachment label wasn't recognised.)")
+        }
+        val fresh = messagesRoot()?.let(::scanMessages) ?: screen
+        val s = fresh.send ?: screen.send ?: throw PhoneToolException("couldn't find Google Messages' Send button")
+        val field = fresh.field ?: screen.field
+        val hint = if (Build.VERSION.SDK_INT >= 26) field?.hintText?.toString() else null
+        val label = s.contentDescription?.toString() ?: s.text?.toString() ?: s.getChild(0)?.contentDescription?.toString()
+        val transport = MessagesUi.transportOf(label, hint, fresh.header ?: screen.header)
+        if (requireRcs && transport != "rcs") {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            throw PhoneToolException(if (transport == "sms") "Google Messages says this conversation is SMS/MMS (the person isn't on RCS), so nothing was sent." else "Google Messages' compose screen doesn't say whether this goes by RCS, so nothing was sent.")
+        }
+        if (!s.isEnabled || !s.performAction(AccessibilityNodeInfo.ACTION_CLICK)) throw PhoneToolException("Google Messages' Send button didn't respond")
+        Thread.sleep(800)
+        return transport
+    }
+
+    /**
+     * Opens the conversation with [number], finds the bubble whose text starts like [bubbleText] (scrolling back a
+     * few screens), long-presses it and taps [emoji] in the reaction picker. Unproven on a real phone.
+     */
+    fun reactInMessages(number: String, bubbleText: String, emoji: String) {
+        val messages = "com.google.android.apps.messaging"
+        PhoneUnlock.ours(40_000)
+        val intent = Intent(Intent.ACTION_SENDTO, android.net.Uri.parse("smsto:" + android.net.Uri.encode(number)))
+            .setPackage(messages).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        try { startActivity(intent) } catch (e: Exception) { throw PhoneToolException("Google Messages can't be opened here (${e.javaClass.simpleName}): is it installed?") }
+        val needle = bubbleText.replace(Regex("\\s+"), " ").take(40)
+        var bubble: AccessibilityNodeInfo? = null
+        for (round in 0 until 8) {
+            for (i in 0 until 6) {
+                Thread.sleep(400)
+                val root = messagesRoot() ?: continue
+                bubble = findByLabel(root) { l -> l.replace(Regex("\\s+"), " ").contains(needle) }
+                if (bubble != null) break
+            }
+            if (bubble != null) break
+            val m = resources.displayMetrics
+            gesture(Path().apply { moveTo(m.widthPixels / 2f, m.heightPixels * 0.35f); lineTo(m.widthPixels / 2f, m.heightPixels * 0.75f) }, 300)
+        }
+        val target = bubble ?: throw PhoneToolException("couldn't find that message on screen in Google Messages (looked back a few screens)")
+        var t: AccessibilityNodeInfo? = target
+        while (t != null && !t.isLongClickable) t = t.parent
+        val pressed = t?.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK) == true || run {
+            val b = Rect().also(target::getBoundsInScreen)
+            longPressAt(b.exactCenterX(), b.exactCenterY())
+        }
+        if (!pressed) throw PhoneToolException("couldn't long-press the message")
+        val bare = emoji.replace("\uFE0F", "")
+        var pick: AccessibilityNodeInfo? = null
+        for (i in 0 until 10) {
+            Thread.sleep(400)
+            val root = messagesRoot() ?: continue
+            pick = findByLabel(root) { l -> l.replace("\uFE0F", "").trim() == bare || l.replace("\uFE0F", "").contains(bare) && l.length <= bare.length + 14 }
+            if (pick != null) break
+        }
+        val chosen = pick ?: run {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            throw PhoneToolException("Google Messages' reaction picker didn't show $emoji (the picker's labels weren't recognised; nothing was sent)")
+        }
+        val click = clickableAncestor(chosen) ?: chosen
+        if (!click.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            val b = Rect().also(chosen::getBoundsInScreen)
+            tapAt(b.exactCenterX(), b.exactCenterY())
+        }
+        Thread.sleep(800)
+    }
+
+    private fun tapAt(x: Float, y: Float) { gesture(Path().apply { moveTo(x, y) }, 60) }
+
+    private fun longPressAt(x: Float, y: Float): Boolean = gesture(Path().apply { moveTo(x, y) }, 700)
+
     private class MessagesScreen(val field: AccessibilityNodeInfo?, val send: AccessibilityNodeInfo?, val header: String?)
 
     private fun scanMessages(root: AccessibilityNodeInfo): MessagesScreen {

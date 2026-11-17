@@ -2379,7 +2379,7 @@ mod tests {
     fn a_message_is_sent_to_a_number_or_a_thread_by_sms_or_in_the_chat() {
         let send = catalog().into_iter().find(|d| d.name == "phone_sms_send").expect("listed");
         let props = &send.input_schema["properties"];
-        for field in ["to", "thread_id", "text", "via"] {
+        for field in ["to", "thread_id", "text", "via", "attachments"] {
             assert!(props.get(field).is_some(), "{field}");
         }
         // Only the text is required here: who to send to is `to` or `thread_id`, which the phone checks.

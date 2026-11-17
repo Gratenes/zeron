@@ -78,6 +78,9 @@ class PhoneSettings(context: Context) {
         SMS_READ("sms-read", "Read text and chat messages", "SMS, picture messages and Google Messages (RCS) chats", true),
         SMS_SEND("sms-send", "Send text and chat messages", "From your number, or in a Messages chat (see the question below)", true),
         CONTACTS("contacts", "Search contacts", "Names and numbers", true),
+        ATTACH_READ("attachments-read", "Read attachments", "Save photos, videos and files from messages so agents can look at them", true),
+        ATTACH_SEND("attachments-send", "Send attachments", "Photos, videos and files in a message (through Google Messages)", false),
+        REACTIONS("reactions", "React to messages", "Send an emoji reaction to a message", false),
         FILES("files", "Use files in allowed folders", "List, read and (where you allow it) write files; set the folders below", false),
     }
 }

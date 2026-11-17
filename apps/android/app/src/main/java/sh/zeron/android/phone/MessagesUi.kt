@@ -24,4 +24,14 @@ object MessagesUi {
         val l = label?.trim()?.lowercase() ?: return false
         return Regex("^send( (rcs|sms|mms|chat|text))? ?(message)?$").matches(l)
     }
+
+    /**
+     * Whether Messages' compose screen shows that the files were attached: any label that names a file, or says
+     * image, photo, video, audio, file or attachment. Sending without this would send the caption alone.
+     */
+    fun showsAttachment(labels: List<String>, fileNames: List<String>): Boolean {
+        val all = labels.map { it.lowercase() }
+        if (fileNames.any { n -> n.isNotBlank() && all.any { it.contains(n.lowercase()) } }) return true
+        return all.any { Regex("\\b(attachment|attached|image|photo|picture|video|audio|file|remove)\\b").containsMatchIn(it) && !it.startsWith("send ") && !it.startsWith("add ") && !it.contains("attach files") }
+    }
 }

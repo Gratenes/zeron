@@ -31,3 +31,14 @@ class MessagesUiTest {
         }
     }
 }
+
+class MessagesUiAttachmentTest {
+    @org.junit.Test fun aFileNameCounts() =
+        org.junit.Assert.assertTrue(MessagesUi.showsAttachment(listOf("Text message", "report.pdf"), listOf("report.pdf")))
+
+    @org.junit.Test fun anAttachmentLabelCounts() =
+        org.junit.Assert.assertTrue(MessagesUi.showsAttachment(listOf("Remove attachment"), listOf("x.png")))
+
+    @org.junit.Test fun theComposeBarAloneDoesNot() =
+        org.junit.Assert.assertFalse(MessagesUi.showsAttachment(listOf("Send message", "Add attachment", "Attach files", "Text message"), listOf("x.png")))
+}
