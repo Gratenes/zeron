@@ -3208,6 +3208,7 @@ mod tests {
             switchable: true,
             saved_at: None,
             provider: None,
+            needs_signin: false,
         };
         let snapshot = |supported, enabled, accounts: Vec<AgentAccount>| AgentAccountsSnapshot {
             rotation: vec![zeron_proto::AgentAccountRotation {
