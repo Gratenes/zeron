@@ -1157,6 +1157,8 @@ impl AgentAccounts {
                             now,
                         )
                     }),
+                    needs_signin: entry
+                        .is_some_and(|entry| entry_needs_signin(entry, harness, active, slot)),
                     display_name: slot.profile.display_name.clone(),
                     organization: slot.profile.organization.clone(),
                     auth_kind: Some(slot.profile.auth_kind),
@@ -1182,6 +1184,7 @@ impl AgentAccounts {
                     codex_reset_credits: None,
                     usage_fetched_at: None,
                     usage_error: None,
+                    needs_signin: false,
                     display_name: u.profile.display_name.clone(),
                     organization: u.profile.organization.clone(),
                     auth_kind: Some(u.profile.auth_kind),
@@ -3227,6 +3230,30 @@ impl AgentAccounts {
         self.persist_usage(&usage);
     }
 
+    /// Whether the saved login `account_id` needs signing in again, from the
+    /// last failure on record (no network). `false` for a login that is
+    /// healthy, unknown, or whose failure predates its current credentials.
+    pub(crate) fn slot_needs_signin(&self, harness: HarnessId, account_id: &str) -> bool {
+        let Some(slot) = self.read_slot(harness, account_id) else {
+            return false;
+        };
+        lock(&self.inner.usage)
+            .get(&usage_key(harness, &slot.account_key))
+            .is_some_and(|entry| entry_needs_signin(entry, harness, false, &slot))
+    }
+
+    /// A run (not a probe) found `slot`'s login refused: record it where the
+    /// listing and [`Self::slot_needs_signin`] read it, keeping its last good
+    /// meters.
+    pub(crate) fn note_signin_failure(&self, harness: HarnessId, slot: &Slot, error: ProbeError) {
+        let mut usage = lock(&self.inner.usage);
+        usage
+            .entry(usage_key(harness, &slot.account_key))
+            .or_default()
+            .record(Err(error), credentials_fingerprint(&slot.credentials), now_ms());
+        self.persist_usage(&usage);
+    }
+
     /// Write the usage cache; the caller holds [`Inner::usage`].
     fn persist_usage(&self, usage: &HashMap<String, UsageEntry>) {
         let file = UsageCacheFile {
@@ -3882,6 +3909,7 @@ impl AntigravityLogin {
             codex_reset_credits: None,
             usage_fetched_at: None,
             usage_error: None,
+            needs_signin: false,
             display_name: Some(label.to_string()),
             organization: None,
             auth_kind: Some(kind),
@@ -4296,6 +4324,37 @@ fn parse_when(value: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
 
 fn usage_key(harness: HarnessId, account_key: &str) -> String {
     format!("{}:{account_key}", harness_slug(harness))
+}
+
+/// Whether a failed probe says the saved login is DEAD — the cases the row
+/// reads "Signed out — sign in again" for (see [`usage_error_message`]). A
+/// live login is the CLI's to refresh, and Codex-style slots refresh when
+/// switched to, so neither counts. For Claude only a refused refresh (400
+/// `invalid_grant`) does: a bare 401 on a login that shares the CLI's own
+/// refresh token is the CLI's to sort out.
+fn error_needs_signin(harness: HarnessId, active: bool, error: &ProbeError) -> bool {
+    let ProbeError::Unauthorized { status } = error else {
+        return false;
+    };
+    match harness {
+        HarnessId::Devin => true,
+        _ if active => false,
+        HarnessId::Codex | HarnessId::Opencode | HarnessId::Pi | HarnessId::Hermes => false,
+        HarnessId::ClaudeCode => *status == 400,
+        _ => true,
+    }
+}
+
+/// Whether `slot`'s last failure says it needs signing in again. The failure
+/// must be against the credentials the slot holds NOW: a fresh sign-in (or a
+/// refresh that worked) replaces them, which clears the flag at once rather
+/// than at the next probe.
+fn entry_needs_signin(entry: &UsageEntry, harness: HarnessId, active: bool, slot: &Slot) -> bool {
+    entry
+        .error
+        .as_ref()
+        .is_some_and(|error| error_needs_signin(harness, active, error))
+        && entry.credentials.as_deref() == Some(credentials_fingerprint(&slot.credentials).as_str())
 }
 
 /// A short digest of a slot's credential blob — tells "same token that was
@@ -5832,6 +5891,39 @@ mod probe_tests {
     }
 
     #[test]
+    fn only_a_dead_saved_login_needs_signing_in() {
+        let rejected = |status| ProbeError::Unauthorized { status };
+        // Claude: a refused refresh (400) on a saved login. A bare 401 is the
+        // CLI's to sort out, and the live login is never ours to call dead.
+        assert!(error_needs_signin(HarnessId::ClaudeCode, false, &rejected(400)));
+        assert!(!error_needs_signin(HarnessId::ClaudeCode, false, &rejected(401)));
+        assert!(!error_needs_signin(HarnessId::ClaudeCode, true, &rejected(400)));
+        // Outages and rate limits say nothing about the login.
+        assert!(!error_needs_signin(
+            HarnessId::ClaudeCode,
+            false,
+            &ProbeError::RateLimited {
+                retry_after_secs: None
+            }
+        ));
+        assert!(!error_needs_signin(
+            HarnessId::ClaudeCode,
+            false,
+            &ProbeError::Http {
+                status: 503,
+                retry_after_secs: None
+            }
+        ));
+        // Providers that refresh a switched-to login on its next run don't.
+        for harness in [HarnessId::Codex, HarnessId::Opencode, HarnessId::Pi, HarnessId::Hermes] {
+            assert!(!error_needs_signin(harness, false, &rejected(401)), "{harness:?}");
+        }
+        // The rest say "Signed out — sign in again", and so does Devin's key.
+        assert!(error_needs_signin(HarnessId::Cursor, false, &rejected(401)));
+        assert!(error_needs_signin(HarnessId::Devin, true, &rejected(401)));
+    }
+
+    #[test]
     fn usage_errors_read_as_reasons() {
         let mut entry = UsageEntry::default();
         entry.record(
@@ -6300,6 +6392,62 @@ mod login_tests {
             &serde_json::json!({}),
             &pair("new", 20.into())
         ));
+    }
+
+    #[tokio::test]
+    async fn a_refused_claude_refresh_flags_the_slot_until_it_is_signed_in_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (usage_url, _) = fixed_server("401 Unauthorized", "{}").await;
+        let (token_url, _) =
+            fixed_server("400 Bad Request", r#"{"error":"invalid_grant"}"#).await;
+        let endpoints = ProbeEndpoints {
+            claude_usage: usage_url,
+            claude_token: token_url,
+            ..Default::default()
+        };
+        let accounts =
+            AgentAccounts::with_endpoints(config(tmp.path()), endpoints, Default::default());
+        write_live_claude(tmp.path(), "acct-a", "a@example.com", "live");
+        let dead = claude_slot("acct-b", "b@example.com", "spent", now_ms() - 60_000);
+        accounts.write_slot(&dead).unwrap();
+        // It had meters once: they must survive, flagged, not vanish.
+        lock(&accounts.inner.usage)
+            .entry(usage_key(HarnessId::ClaudeCode, "acct-b"))
+            .or_default()
+            .record(
+                Ok(UsageSnapshot {
+                    windows: vec![AgentUsageWindow {
+                        label: "Week".into(),
+                        used_fraction: 0.28,
+                        resets_at: None,
+                    }],
+                    plan_label: None,
+                    codex_reset_credits: None,
+                }),
+                credentials_fingerprint(&dead.credentials),
+                1_000,
+            );
+        assert!(!accounts.slot_needs_signin(HarnessId::ClaudeCode, &dead.id));
+
+        let listed = accounts.list(true).await.unwrap();
+        let row = |snapshot: &AgentAccountsSnapshot| {
+            snapshot.accounts.iter().find(|a| a.id == dead.id).cloned().unwrap()
+        };
+        let row_now = row(&listed);
+        assert!(row_now.needs_signin, "{row_now:?}");
+        assert_eq!(row_now.usage_error.as_deref(), Some("Signed out — sign in again"));
+        assert_eq!(row_now.usage_windows.len(), 1, "the last reading is kept");
+        let live = listed.accounts.iter().find(|a| a.active).unwrap();
+        assert!(!live.needs_signin);
+        assert!(accounts.slot_needs_signin(HarnessId::ClaudeCode, &dead.id));
+
+        // Signing in again replaces the credentials: no longer flagged, at
+        // once, before anything probes it.
+        let mut again = dead.clone();
+        again.credentials["claudeAiOauth"]["refreshToken"] = "fresh".into();
+        accounts.write_slot(&again).unwrap();
+        assert!(!accounts.slot_needs_signin(HarnessId::ClaudeCode, &dead.id));
+        assert!(!row(&accounts.list(false).await.unwrap()).needs_signin);
     }
 
     #[tokio::test]
