@@ -3418,6 +3418,31 @@ impl AgentAccounts {
             .is_some_and(|entry| entry_needs_signin(entry, harness, false, &slot))
     }
 
+    /// A run that started with `credential` was refused its login (the CLI's
+    /// `authentication_failed`): when it ran on a saved account's login (a
+    /// pin's or a rotation's `login:{slot}` / `rotation:{slot}:{token}`),
+    /// that account is flagged as needing signing in. The live login is not
+    /// (the CLI holds its refresh token), and neither is a credential that
+    /// names no saved account.
+    pub(crate) fn note_run_refused(&self, harness: HarnessId, credential: &str) {
+        if harness != HarnessId::ClaudeCode {
+            return;
+        }
+        let slot_id = credential
+            .strip_prefix("login:")
+            .or_else(|| credential.strip_prefix("rotation:").and_then(|r| r.split(':').next()));
+        let Some(slot) = slot_id.and_then(|id| self.read_slot(harness, id)) else {
+            return;
+        };
+        if credential.ends_with(":live") {
+            return;
+        }
+        tracing::warn!(slot = %slot.id, "a run on a saved Claude login was refused it; flagging the account");
+        // 400 is what a refused Claude refresh answers; a bare 401 is not
+        // taken for a dead login.
+        self.note_signin_failure(harness, &slot, ProbeError::Unauthorized { status: 400 });
+    }
+
     /// A run (not a probe) found `slot`'s login refused: record it where the
     /// listing and [`Self::slot_needs_signin`] read it, keeping its last good
     /// meters.
@@ -6874,6 +6899,9 @@ mod login_tests {
         // once, before anything probes it.
         let mut again = dead.clone();
         again.credentials["claudeAiOauth"]["refreshToken"] = "fresh".into();
+        // A sign-in is a newer login: where saved logins live in folders, a
+        // slot only replaces its folder's login going forward.
+        again.credentials["claudeAiOauth"]["expiresAt"] = (now_ms() + 28_800_000).into();
         accounts.write_slot(&again).unwrap();
         assert!(!accounts.slot_needs_signin(HarnessId::ClaudeCode, &dead.id));
         assert!(!row(&accounts.list(false).await.unwrap()).needs_signin);
