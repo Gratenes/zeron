@@ -51,6 +51,8 @@ class PhoneSms(private val context: Context) {
         val mmsId: String?,
         val smsAddress: String?,
         val smsBody: String?,
+        /** The provider's box: `type` for an SMS, `msg_box` for an MMS/RCS row (2 sent, 4 outbox, 5 failed, 6 queued). */
+        val box: Int = 0,
     )
 
     // ── threads ─────────────────────────────────────────────────────────────
@@ -128,7 +130,7 @@ class PhoneSms(private val context: Context) {
         query(Telephony.Sms.CONTENT_URI, arrayOf("_id", "thread_id", "address", "date", "body", "type", "read"), sel, args, limit)?.use { c ->
             while (c.moveToNext()) {
                 out += Message("s" + c.str("_id"), "sms", c.str("thread_id"), c.long("date"), c.int("type") == Telephony.Sms.MESSAGE_TYPE_INBOX,
-                    c.int("read") != 0, null, c.str("address"), c.str("body"))
+                    c.int("read") != 0, null, c.str("address"), c.str("body"), c.int("type"))
             }
         }
         return out
@@ -141,7 +143,7 @@ class PhoneSms(private val context: Context) {
             while (c.moveToNext()) {
                 val rcs = c.str("tr_id").startsWith("proto:") || c.str("sub").startsWith("proto:")
                 out += Message("m" + c.str("_id"), if (rcs) "rcs" else "mms", c.str("thread_id"), c.long("date") * 1000,
-                    c.int("msg_box") == Telephony.Mms.MESSAGE_BOX_INBOX, c.int("read") != 0, c.str("_id"), null, null)
+                    c.int("msg_box") == Telephony.Mms.MESSAGE_BOX_INBOX, c.int("read") != 0, c.str("_id"), null, null, c.int("msg_box"))
             }
         }
         return out
@@ -266,18 +268,18 @@ class PhoneSms(private val context: Context) {
         val rcsThread = threads.isNotEmpty() && inRcs(threads)
         val wantRcs = via == "rcs"
         val handle = if (via == "sms") null else PhoneChatReply.find(context, number, contactName(number))
-        // RCS whenever possible: a live reply notification, else Google Messages itself (it picks RCS when both
-        // sides have it); plain SMS only when asked for, or when the conversation is plainly SMS-only.
+        // Never the bare SmsManager unless asked for: it gives no failed/queued state in Messages and no retry, and
+        // a message it hands to the carrier can vanish without a trace. Default: the live reply notification, else
+        // Google Messages itself (it picks RCS or SMS, retries, and shows a failure).
         val transport = when {
             via == "sms" -> "sms"
             handle != null && (!wantRcs || rcsThread) -> "chat-reply"
-            wantRcs || rcsThread || threads.isEmpty() -> "messages"
-            else -> "sms"
+            else -> "messages"
         }
         val how = when (transport) {
-            "sms" -> "as a plain text message (SMS)"
+            "sms" -> "as a plain text message (SMS) straight from the radio, as requested"
             "chat-reply" -> "as a reply in your Messages chat with ${handle?.title ?: number}"
-            else -> "by opening Google Messages and sending it there (a chat message, RCS, if they're on it)"
+            else -> "by opening Google Messages and sending it there (RCS if they're on it, else SMS)"
         }
         if (confirm != null && !confirm("to $number, $how")) throw PhoneToolException("the person declined to send it (or didn't answer in ${PhoneConfirm.WAIT_SECONDS} s)")
         return when (transport) {
@@ -298,21 +300,9 @@ class PhoneSms(private val context: Context) {
         val started = System.currentTimeMillis()
         val transport = service.sendInMessages(number, text, requireRcs)
         // The proof is in the message database a moment later, in the conversation with that person.
-        var seen: Message? = null
-        for (i in 0 until 24) {
-            val threads = runCatching { threadsForAddress(number) }.getOrDefault(emptySet())
-            if (threads.isNotEmpty()) {
-                val sel = "thread_id IN (${threads.joinToString(",") { "?" }})"
-                seen = (scanMms(sel, threads.toTypedArray(), 6) + scanSms(sel, threads.toTypedArray(), 6))
-                    .firstOrNull { !it.incoming && it.ts >= started - 3000 && bodyOf(it).trim() == text.trim() }
-            }
-            if (seen != null) break
-            Thread.sleep(500)
-        }
+        val seen = awaitSent(number, text, started, 24)
         service.pressHome()
-        return JSONObject().put("ok", true).put("to", number).put("via", "Google Messages").put("announcedTransport", transport)
-            .put("confirmedInMessages", seen != null).put("kind", seen?.kind ?: JSONObject.NULL)
-            .put("note", if (seen != null) "Sent in the person's Google Messages conversation as ${seen.kind}." else "Tapped Send in Google Messages; not yet seen in the message database: check with phone_sms_read.")
+        return sentReport(number, text, started, seen, "Google Messages", "messages").put("announcedTransport", transport)
     }
 
     private fun singleAddress(threadId: String): String? {
@@ -332,44 +322,120 @@ class PhoneSms(private val context: Context) {
         val started = System.currentTimeMillis()
         if (!PhoneChatReply.send(context, handle, text)) throw PhoneToolException("Messages did not accept the reply (its notification went away): try again, or open the chat on the phone")
         // Messages writes the sent chat into the provider a moment later: that is the proof.
-        var confirmed = false
-        if (threads.isNotEmpty()) {
-            val sel = "thread_id IN (${threads.joinToString(",") { "?" }})"
-            for (i in 0 until 16) {
-                Thread.sleep(500)
-                val sent = (scanMms(sel, threads.toTypedArray(), 5) + scanSms(sel, threads.toTypedArray(), 5)).filter { !it.incoming && it.ts >= started - 3000 }
-                if (sent.any { bodyOf(it).trim() == text.trim() }) { confirmed = true; break }
-            }
+        val seen = awaitSent(number, text, started, 16)
+        return sentReport(number, text, started, seen, "reply in Google Messages", "chat-reply")
+    }
+
+    /** The message this phone just sent, as the provider shows it, within [tries] half-seconds. */
+    private fun awaitSent(number: String, text: String, started: Long, tries: Int): Message? {
+        for (i in 0 until tries) {
+            val m = findSent(number, text, started)
+            if (m != null) return m
+            Thread.sleep(500)
         }
-        return JSONObject().put("ok", true).put("to", number).put("via", "reply in Google Messages").put("confirmedInMessages", confirmed)
-            .put("note", "Sent through Messages' own reply, so it is in their chat with the person's normal transport (RCS or SMS)." + if (confirmed) "" else " Not yet seen in the message database: check with phone_sms_read.")
+        return null
+    }
+
+    private fun findSent(number: String, text: String, started: Long): Message? {
+        val threads = runCatching { threadsForAddress(number) }.getOrDefault(emptySet())
+        if (threads.isEmpty()) return null
+        val sel = "thread_id IN (${threads.joinToString(",") { "?" }})"
+        return (scanMms(sel, threads.toTypedArray(), 6) + scanSms(sel, threads.toTypedArray(), 6))
+            .firstOrNull { !it.incoming && it.ts >= started - 3000 && bodyOf(it).trim() == text.trim() }
+    }
+
+    /**
+     * What an agent is told after a send through Messages: which way it went, what the provider shows for it, and
+     * whether anything proves delivery (nothing does for chats). A failed message throws. A second look 30 s after
+     * the send tells the person, by notification, if it is still queued, failed or missing.
+     */
+    private fun sentReport(number: String, text: String, started: Long, seen: Message?, via: String, transport: String): JSONObject {
+        val provider = seen?.let { SendReport.providerState(it.box) }
+        val who = contactName(number) ?: number
+        val app = context.applicationContext
+        if (provider == "failed") {
+            PhoneNotice.alert(app, "Text to $who failed", "Google Messages shows it as failed to send: \"${text.take(60)}\"")
+            throw PhoneToolException("NOT SENT: Google Messages shows this message as failed. The person has been notified; do not assume the recipient has it.")
+        }
+        Thread {
+            runCatching {
+                Thread.sleep(maxOf(0L, started + 30_000L - System.currentTimeMillis()))
+                val later = findSent(number, text, started)
+                val state = later?.let { SendReport.providerState(it.box) }
+                if (later == null || state == "failed" || state == "queued") {
+                    PhoneNotice.alert(app, "Text to $who may not have gone", if (later == null) "It isn't in Messages 30 s after sending: \"${text.take(60)}\"" else "Messages shows it as $state: \"${text.take(60)}\"")
+                    PhoneActionLog.add(app, "sms_send", "30 s check: text to $who is ${state ?: "missing"}", false, null)
+                }
+            }
+        }.apply { isDaemon = true }.start()
+        return JSONObject().put("ok", true).put("to", number).put("via", via).put("transport", transport)
+            .put("confirmedInMessages", seen != null).put("kind", seen?.kind ?: JSONObject.NULL)
+            .put("providerState", provider ?: JSONObject.NULL).put("sent", provider == "sent")
+            .put("deliveryConfirmed", false)
+            .put("note", SendReport.note(transport, "unknown", provider))
     }
 
     private fun sendSms(number: String, text: String): JSONObject {
         val manager = context.getSystemService(SmsManager::class.java) ?: throw PhoneToolException("this phone can't send text messages")
         val parts = manager.divideMessage(text)
         val key = "sent-${System.nanoTime()}"
-        val results = ArrayList<CompletableFuture<Int>>()
-        val intents = ArrayList<PendingIntent>()
+        val sentResults = ArrayList<CompletableFuture<Int>>()
+        val deliveredResults = ArrayList<CompletableFuture<String>>()
+        val sentIntents = ArrayList<PendingIntent>()
+        val deliveryIntents = ArrayList<PendingIntent>()
+        val who = contactName(number) ?: number
+        val app = context.applicationContext
         for (i in parts.indices) {
-            val result = CompletableFuture<Int>()
-            results += result
-            val action = "$key-$i"
-            val receiver = object : BroadcastReceiver() {
+            val sent = CompletableFuture<Int>()
+            val delivered = CompletableFuture<String>()
+            sentResults += sent
+            deliveredResults += delivered
+            val sentAction = "$key-s$i"
+            val deliveryAction = "$key-d$i"
+            val sentReceiver = object : BroadcastReceiver() {
                 override fun onReceive(c: Context, i: Intent) {
-                    result.complete(resultCode)
-                    runCatching { context.unregisterReceiver(this) }
+                    sent.complete(resultCode)
+                    runCatching { app.unregisterReceiver(this) }
                 }
             }
-            ContextCompat.registerReceiver(context, receiver, IntentFilter(action), ContextCompat.RECEIVER_NOT_EXPORTED)
-            intents += PendingIntent.getBroadcast(context, (key.hashCode() + i), Intent(action).setPackage(context.packageName), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT)
+            val deliveryReceiver = object : BroadcastReceiver() {
+                override fun onReceive(c: Context, i: Intent) {
+                    val pdu = i.getByteArrayExtra("pdu")
+                    val status = runCatching { android.telephony.SmsMessage.createFromPdu(pdu, i.getStringExtra("format")).status }.getOrDefault(-1)
+                    val state = SendReport.deliveryOf(status)
+                    delivered.complete(state)
+                    runCatching { app.unregisterReceiver(this) }
+                    // A report that comes after the tool answered: if it says failed, the person is told.
+                    if (state == "failed") PhoneNotice.alert(app, "Text to $who failed", "The carrier reported it was not delivered: \"${text.take(60)}\"")
+                }
+            }
+            ContextCompat.registerReceiver(app, sentReceiver, IntentFilter(sentAction), ContextCompat.RECEIVER_NOT_EXPORTED)
+            ContextCompat.registerReceiver(app, deliveryReceiver, IntentFilter(deliveryAction), ContextCompat.RECEIVER_NOT_EXPORTED)
+            sentIntents += PendingIntent.getBroadcast(app, key.hashCode() + i * 2, Intent(sentAction).setPackage(app.packageName), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT)
+            deliveryIntents += PendingIntent.getBroadcast(app, key.hashCode() + i * 2 + 1, Intent(deliveryAction).setPackage(app.packageName), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT)
+            // A delivery report that never comes must not leak its receiver forever.
+            Thread { Thread.sleep(15 * 60_000L); runCatching { app.unregisterReceiver(deliveryReceiver) } }.apply { isDaemon = true }.start()
         }
-        manager.sendMultipartTextMessage(number, null, parts, ArrayList(intents), null)
-        val codes = results.map { runCatching { it.get(20, TimeUnit.SECONDS) }.getOrNull() }
+        manager.sendMultipartTextMessage(number, null, parts, ArrayList(sentIntents), ArrayList(deliveryIntents))
+        val codes = sentResults.map { runCatching { it.get(20, TimeUnit.SECONDS) }.getOrNull() }
         val failed = codes.any { it != Activity.RESULT_OK }
-        if (failed) throw PhoneToolException("the phone could not send it (${if (codes.any { it == null }) "no answer from the radio in 20 s" else "radio error ${codes.first { it != Activity.RESULT_OK }}"})")
-        return JSONObject().put("ok", true).put("to", number).put("via", "sms").put("parts", parts.size)
-            .put("note", "Sent as a plain text message from the person's number. It won't appear in their Messages app's thread.")
+        if (failed) {
+            val why = if (codes.any { it == null }) "no answer from the radio in 20 s" else "radio error ${codes.first { it != Activity.RESULT_OK }}"
+            PhoneNotice.alert(app, "Text to $who failed", "The phone could not send it ($why): \"${text.take(60)}\"")
+            throw PhoneToolException("NOT SENT: the phone could not send it ($why). The person has been notified.")
+        }
+        // The carrier's delivery report usually follows within seconds: wait for it a little, no longer.
+        val reports = deliveredResults.map { runCatching { it.get(12, TimeUnit.SECONDS) }.getOrNull() }
+        val delivery = when {
+            reports.any { it == "failed" } -> "failed"
+            reports.all { it == "delivered" } -> "delivered"
+            reports.any { it == null } -> "unknown"
+            else -> "pending"
+        }
+        if (delivery == "failed") throw PhoneToolException("NOT DELIVERED: the carrier reported the text to $number was not delivered. The person has been notified.")
+        return JSONObject().put("ok", true).put("to", number).put("transport", "sms").put("via", "sms").put("parts", parts.size)
+            .put("sent", true).put("delivery", delivery).put("deliveryConfirmed", SendReport.confirmed(delivery))
+            .put("note", SendReport.note("sms", delivery, null) + " It is a plain SMS from the radio: it won't appear in their Messages app's thread.")
     }
 
     // ── contacts ────────────────────────────────────────────────────────────

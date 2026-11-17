@@ -31,6 +31,7 @@ import sh.zeron.android.R
  */
 object PhoneNotice {
     private const val CHANNEL = "phone-activity"
+    private const val ALERT_CHANNEL = "phone-text-problems"
     private const val ID = 7201
     private const val LINGER_MS = 6_000L
     const val PAUSE_MS = 10 * 60_000L
@@ -60,6 +61,36 @@ object PhoneNotice {
             runCatching { context.getSystemService(NotificationManager::class.java).cancel(ID) }
             removeChip()
         }
+    }
+
+    /** Tells the person something went wrong with what an agent did (a text that failed): a normal, audible notification. */
+    fun alert(context: Context, title: String, text: String) {
+        val app = context.applicationContext
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(app, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) return
+        val manager = app.getSystemService(NotificationManager::class.java)
+        if (manager.getNotificationChannel(ALERT_CHANNEL) == null) {
+            manager.createNotificationChannel(
+                NotificationChannel(ALERT_CHANNEL, "Agent text problems", NotificationManager.IMPORTANCE_HIGH).apply {
+                    description = "A text an agent sent from your phone failed or may not have gone"
+                },
+            )
+        }
+        val open = PendingIntent.getActivity(app, 0, Intent(app, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+        manager.notify(
+            (System.nanoTime() % 100_000).toInt() + 7300,
+            NotificationCompat.Builder(app, ALERT_CHANNEL)
+                .setSmallIcon(R.drawable.zi_arrow_up)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(Notification.CATEGORY_ERROR)
+                .setAutoCancel(true)
+                .setContentIntent(open)
+                .build(),
+        )
     }
 
     private fun notify(context: Context, title: String, text: String) {
