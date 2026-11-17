@@ -1718,13 +1718,13 @@ impl AcpHarness {
         }
     }
 
-    /// The access mode `request` runs with: its own when this agent honors
-    /// it, else full access — as is any auto-approve run.
-    fn access_for(&self, request: &RunRequest) -> AccessMode {
-        if request.auto_approve || !self.spec.access_modes.contains(&request.access) {
-            AccessMode::FullAccess
+    /// Resolve access before launching. Auto must never become full access
+    /// just because an agent cannot honor it.
+    fn access_for(&self, request: &RunRequest) -> Option<AccessMode> {
+        if request.auto_approve {
+            Some(AccessMode::FullAccess)
         } else {
-            request.access
+            request.access.honored_by(self.spec.access_modes)
         }
     }
 
@@ -3238,6 +3238,7 @@ impl Harness for AcpHarness {
     /// the session mode chosen at launch, so a new mode gets a new agent.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         live.cwd == next.cwd
+            && self.access_for(next).is_some()
             && self.access_for(live) == self.access_for(next)
             && (next.model.is_some() || live.model.is_none())
             && (next.reasoning.is_some() || live.reasoning.is_none())
@@ -3444,6 +3445,12 @@ impl Harness for AcpHarness {
         request: RunRequest,
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let access = self.access_for(&request).ok_or_else(|| {
+            HarnessError::Protocol(format!(
+                "{} cannot run in Auto or a stricter access mode. Choose another agent or explicitly select Full access.",
+                self.spec.display_name
+            ))
+        })?;
         let (scratch, mut child, stderr_tail, sign_in_prompted) = self
             .spawn_agent(
                 Some(&request.cwd),
@@ -3503,7 +3510,7 @@ impl Harness for AcpHarness {
             incoming,
             event_tx,
             controls,
-            access: self.access_for(&request),
+            access,
             request,
             harness: self.spec.id,
             agent_name: self.spec.display_name,
