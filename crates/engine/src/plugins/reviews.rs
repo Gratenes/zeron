@@ -51,6 +51,13 @@ pub enum Origin {
     Local,
     /// Another of the account's devices, as the edge verified the link.
     Peer(String),
+    /// A connection into the account's own device room that the edge named
+    /// no device for (an edge that doesn't verify devices at dial, like a
+    /// self-hosted one built before it did). Only a plugin's review and
+    /// allow may be asked of it ([`Origin::of_plugin_review`]), and its
+    /// review is good only to such connections alike, never to this
+    /// device's app or a verified device.
+    Unverified,
 }
 
 impl Origin {
@@ -63,6 +70,20 @@ impl Origin {
             zeron_rpc::Caller::Peer { device: Some(device) } if !device.is_empty() => Some(Origin::Peer(device.clone())),
             zeron_rpc::Caller::Peer { device: _ } | zeron_rpc::Caller::Agent { .. } => None,
         }
+    }
+}
+
+impl Origin {
+    /// Who may ask for a plugin's review and allow it: this device's app, a
+    /// verified device, or (the account's device room is authenticated by
+    /// the edge, and a device there may already decline) a connection the
+    /// edge named no device for. Never an agent's token. Templates and
+    /// signing never use this: they are this device's app's alone.
+    pub fn of_plugin_review(caller: &zeron_rpc::Caller) -> Option<Origin> {
+        Origin::of(caller).or(match caller {
+            zeron_rpc::Caller::Peer { .. } => Some(Origin::Unverified),
+            zeron_rpc::Caller::Local | zeron_rpc::Caller::Agent { .. } => None,
+        })
     }
 }
 
@@ -195,6 +216,34 @@ mod tests {
         }
         let token = reviews.mint(Kind::Plugin, laptop.clone(), "focus", "h1").unwrap();
         reviews.redeem(Kind::Plugin, &laptop, "focus", "h1", Some(&token)).unwrap();
+    }
+
+    /// A plugin's review may also be held by a connection the edge named no
+    /// device for, bound to such connections alone.
+    #[test]
+    fn an_unverified_device_may_hold_a_plugins_review_bound_to_unverified_ones() {
+        use zeron_rpc::Caller;
+        let nobody = Caller::Peer { device: None };
+        assert_eq!(Origin::of_plugin_review(&nobody), Some(Origin::Unverified));
+        assert_eq!(Origin::of_plugin_review(&Caller::Peer { device: Some(String::new()) }), Some(Origin::Unverified));
+        assert_eq!(Origin::of_plugin_review(&Caller::Peer { device: Some("laptop".into()) }), Some(Origin::Peer("laptop".into())));
+        assert_eq!(Origin::of_plugin_review(&Caller::Local), Some(Origin::Local));
+        assert_eq!(Origin::of_plugin_review(&Caller::Agent { chat: None }), None);
+        // The strict rule (uploads, templates) still names no one for it.
+        assert_eq!(Origin::of(&nobody), None);
+        // Its review is good to nobody else, and theirs not to it.
+        let mut reviews = Reviews::default();
+        for (minted, presented) in [
+            (Origin::Unverified, Origin::Local),
+            (Origin::Unverified, Origin::Peer("laptop".into())),
+            (Origin::Local, Origin::Unverified),
+            (Origin::Peer("laptop".into()), Origin::Unverified),
+        ] {
+            let token = reviews.mint(Kind::Plugin, minted, "focus", "h1").unwrap();
+            assert!(reviews.redeem(Kind::Plugin, &presented, "focus", "h1", Some(&token)).is_err());
+        }
+        let token = reviews.mint(Kind::Plugin, Origin::Unverified, "focus", "h1").unwrap();
+        reviews.redeem(Kind::Plugin, &Origin::Unverified, "focus", "h1", Some(&token)).unwrap();
     }
 
     #[test]

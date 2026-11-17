@@ -162,14 +162,14 @@ async fn a_review_allows_once() {
     assert_eq!(status(&f.plugins, "focus").await, Status::Off);
 }
 
-/// R6: an agent (its MCP server's scoped token) or another device can't
-/// mint a review, nor use one minted for the app, nor sign: the engine
-/// checks who asked even past the transport guards.
+/// R6: an agent (its MCP server's scoped token) can't mint a review, nor
+/// use one minted for the app, nor sign: the engine checks who asked even
+/// past the transport guards.
 #[tokio::test]
-async fn agents_and_other_devices_cannot_review_allow_or_sign() {
+async fn agents_cannot_review_allow_or_sign() {
     let f = fixture();
     let hash = waiting(&f.plugins, "evil").await;
-    for caller in [Caller::Agent { chat: Some("chat-1".into()) }, Caller::Peer { device: None }] {
+    for caller in [Caller::Agent { chat: Some("chat-1".into()) }] {
         let minted = with_caller(
             caller.clone(),
             call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "evil", "hash": hash })),
@@ -206,6 +206,81 @@ async fn agents_and_other_devices_cannot_review_allow_or_sign() {
         assert_eq!(status(&f.plugins, "evil").await, Status::Pending);
         assert!(!f.plugins.entry("evil").unwrap().item.own, "not made yours");
     }
+}
+
+/// An unsigned plugin dropped into a device that has no window of its own
+/// (a headless server) is allowed from another of the account's devices'
+/// consent sheet, whether or not the edge named that device on the link: the
+/// review is minted here for what the sheet showed, and used up by the
+/// allow, by the same kind of caller alone.
+#[tokio::test]
+async fn an_unsigned_plugin_on_a_headless_device_is_allowed_from_another_devices_sheet() {
+    for caller in [Caller::Peer { device: None }, Caller::Peer { device: Some("desk".into()) }] {
+        let f = fixture();
+        let hash = waiting(&f.plugins, "focus").await;
+        assert!(!f.plugins.entry("focus").unwrap().item.own, "unsigned: nobody's");
+        let review = with_caller(
+            caller.clone(),
+            call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash })),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{caller:?} couldn't ask for a review: {e}"))["review"]
+            .clone();
+        // Not the app's to use, and not another kind of caller's.
+        let others = [Caller::Local, Caller::Peer { device: Some("laptop".into()) }, Caller::Peer { device: None }];
+        let stranger = others.iter().find(|c| **c != caller && !matches!((&caller, c), (Caller::Peer { device: Some(_) }, Caller::Peer { device: Some(_) }))).unwrap().clone();
+        let refused = with_caller(
+            stranger.clone(),
+            call(&f.plugins, methods::DECIDE_PLUGIN, json!({ "id": "focus", "allow": true, "hash": hash, "review": review })),
+        )
+        .await;
+        assert!(refused.is_err(), "{stranger:?} used {caller:?}'s review: {refused:?}");
+        assert_eq!(status(&f.plugins, "focus").await, Status::Pending);
+        // The review a refused use spent is gone: ask again, and allow.
+        let review = with_caller(
+            caller.clone(),
+            call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash })),
+        )
+        .await
+        .unwrap()["review"]
+            .clone();
+        let allowed = with_caller(
+            caller.clone(),
+            call(&f.plugins, methods::DECIDE_PLUGIN, json!({ "id": "focus", "allow": true, "hash": hash, "review": review })),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{caller:?} couldn't allow it: {e}"));
+        assert_eq!(allowed["status"], "on", "{allowed}");
+        assert_eq!(status(&f.plugins, "focus").await, Status::On);
+        assert!(!f.plugins.entry("focus").unwrap().item.own, "allowing didn't make it anyone's");
+    }
+}
+
+/// What a connection the edge named no device for may NOT do: sign a plugin
+/// as the device's own, use a review minted for the app, or ask about a
+/// template. Those stay this device's app's.
+#[tokio::test]
+async fn a_connection_the_edge_named_no_device_for_cannot_sign_or_decide_templates() {
+    let f = fixture();
+    let hash = waiting(&f.plugins, "focus").await;
+    let unnamed = Caller::Peer { device: None };
+    let review = call(&f.plugins, methods::REVIEW_PLUGIN, json!({ "id": "focus", "hash": hash }))
+        .await
+        .unwrap()["review"]
+        .clone();
+    let signed = with_caller(
+        unnamed.clone(),
+        call(&f.plugins, methods::SIGN_PLUGIN, json!({ "id": "focus", "review": review })),
+    )
+    .await;
+    assert!(signed.is_err(), "signed it as the device's: {signed:?}");
+    assert!(!f.plugins.entry("focus").unwrap().item.own);
+    let template = with_caller(
+        unnamed,
+        call(&f.plugins, methods::REVIEW_TEMPLATE, json!({ "pending": "midnight", "hash": hash })),
+    )
+    .await;
+    assert!(template.as_ref().is_err_and(|e| e.contains("consent window")), "{template:?}");
 }
 
 /// R4/R6: SignPlugin (which makes a plugin yours) needs the consent

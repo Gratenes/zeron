@@ -1584,7 +1584,8 @@ impl Plugins {
     /// Use up a consent-window review for `subject` as shown (`hash`):
     /// only by whom it was minted for (`reviews::Origin`): this device's own
     /// app, or (a plugin's) the verified device that asked for it over the
-    /// link. Never an agent's token, never an unverified dial; a template's
+    /// link, or one the edge named no device for (`Origin::Unverified`).
+    /// Never an agent's token; a template's
     /// and a signing are this device's app's alone.
     fn redeem_review(
         &self,
@@ -1597,7 +1598,14 @@ impl Plugins {
             reviews::Kind::Plugin => "Allowing a plugin",
             reviews::Kind::Template => "Allowing a template",
         };
-        let origin = reviews::Origin::of(&zeron_rpc::caller()).ok_or_else(|| reviews::needed(what))?;
+        let caller = zeron_rpc::caller();
+        // A plugin's allow may come from a device the edge named none for
+        // (see `Origin::Unverified`); a template's is this device's app's.
+        let origin = match kind {
+            reviews::Kind::Plugin => reviews::Origin::of_plugin_review(&caller),
+            reviews::Kind::Template => reviews::Origin::of(&caller),
+        }
+        .ok_or_else(|| reviews::needed(what))?;
         if kind == reviews::Kind::Template && origin != reviews::Origin::Local {
             return Err(reviews::needed(what));
         }
@@ -1659,9 +1667,13 @@ impl Plugins {
                 // account's devices as the edge verified the link: its
                 // consent window shows this plugin as listed here. The
                 // review is good only to whoever asked for it.
-                let origin = reviews::Origin::of(&zeron_rpc::caller())
-                    .filter(|origin| method == methods::REVIEW_PLUGIN || *origin == reviews::Origin::Local)
-                    .ok_or_else(|| reviews::needed("A review"))?;
+                let caller = zeron_rpc::caller();
+                let origin = if method == methods::REVIEW_PLUGIN {
+                    reviews::Origin::of_plugin_review(&caller)
+                } else {
+                    reviews::Origin::of(&caller).filter(|origin| *origin == reviews::Origin::Local)
+                }
+                .ok_or_else(|| reviews::needed("A review"))?;
                 let review = if method == methods::REVIEW_PLUGIN {
                     let id = p.id.unwrap_or_default();
                     self.rescan().await;
