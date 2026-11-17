@@ -1,7 +1,7 @@
 {
   "id": "claude-rotation",
   "name": "Claude rotation",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Spreads Claude Code chats across your saved accounts: each new chat starts on the one with the most left, and a chat that hits its limit moves to another for its next turn.",
   "entry": "init.luau",
   "service": "service.luau",
