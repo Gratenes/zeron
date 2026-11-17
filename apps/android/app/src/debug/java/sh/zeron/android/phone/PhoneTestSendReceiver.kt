@@ -11,7 +11,12 @@ class PhoneTestSendReceiver : BroadcastReceiver() {
         val pending = goAsync()
         Thread {
             val out = runCatching {
-                PhoneSms(context).send(intent.getStringExtra("to"), null, intent.getStringExtra("text") ?: "test", intent.getStringExtra("via") ?: "auto", null).toString()
+                val sms = PhoneSms(context)
+                when (intent.getStringExtra("tool")) {
+                    "attachment" -> return@runCatching sms.attachment(intent.getStringExtra("message_id") ?: "", intent.getStringExtra("part_id") ?: "").toString().take(600)
+                    "read" -> return@runCatching sms.read(intent.getStringExtra("thread_id"), null, 10, null).toString()
+                }
+                sms.send(intent.getStringExtra("to"), null, intent.getStringExtra("text") ?: "test", intent.getStringExtra("via") ?: "auto", null).toString()
             }.getOrElse { "ERROR ${it.message}" }
             Log.i("ZeronSend", out)
             pending.finish()
