@@ -490,11 +490,17 @@ fn usage_row(a: &AgentAccount) -> Json {
 }
 
 /// Whether a usage error says the login needs signing in again.
-fn signed_out(error: &Option<String>) -> bool {
+fn signed_out_error(error: &Option<String>) -> bool {
     error.as_deref().is_some_and(|e| {
         zeron_proto::run_errors::provider_problem(e) == Some(ProviderProblem::SignedOut)
             || e.to_ascii_lowercase().contains("sign in")
     })
+}
+
+/// Whether `a`'s login needs signing in again: its refresh was refused
+/// ([`AgentAccount::needs_signin`]), or its last check said so.
+fn signed_out(a: &AgentAccount) -> bool {
+    a.needs_signin || signed_out_error(&a.usage_error)
 }
 
 /// An account, as `accounts.read` shows it (never a token, never a credit).
@@ -505,7 +511,7 @@ fn account_row(a: &AgentAccount, mechanism: Option<&'static str>) -> Json {
         "active": a.active,
         "switchable": a.switchable,
         "pinnable": mechanism.is_some(),
-        "signed_out": signed_out(&a.usage_error),
+        "signed_out": signed_out(a),
     });
     if let Some(mechanism) = mechanism {
         row["mechanism"] = json!(mechanism);
@@ -979,9 +985,9 @@ impl Agents {
                 .accounts
                 .iter()
                 .find(|a| a.harness == harness && a.id == account)
-                .is_some_and(|a| host.pin_mechanism(a).is_some());
+                .is_some_and(|a| host.pin_mechanism(a).is_some() && !signed_out(a));
             if !usable {
-                self.notice(&plugin, format!("Its run.preparing answer named {account}, which can't be pinned here"));
+                self.notice(&plugin, format!("Its run.preparing answer named {account}, which can't be pinned here or needs signing in again"));
                 continue;
             }
             if self.loop_guard(&by).is_err() {
@@ -1477,13 +1483,7 @@ impl Agents {
                         ));
                     }
                 }
-                let signed_out = |e: &Option<String>| {
-                    e.as_deref().is_some_and(|e| {
-                        zeron_proto::run_errors::provider_problem(e) == Some(ProviderProblem::SignedOut)
-                            || e.to_ascii_lowercase().contains("sign in")
-                    })
-                };
-                if !signed_out(&was.usage_error) && signed_out(&a.usage_error) {
+                if !signed_out(was) && signed_out(a) {
                     events.push(Raw::new("login.expired", json!({ "provider": a.harness.as_str(), "account": a.id })));
                 }
             }

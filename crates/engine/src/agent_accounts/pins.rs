@@ -201,6 +201,59 @@ impl AgentAccounts {
         hook(harness, chat.to_owned()).await
     }
 
+    /// Chats pinned to a login that needs signing in again can't run: when the
+    /// account in use changes, their pins are taken back, so they follow the
+    /// login now in use instead of staying on one that has to be signed in
+    /// first. `accounts` is the listing the change produced.
+    pub(super) fn unpin_signed_out(&self, harness: HarnessId, accounts: &[AgentAccount]) {
+        let dead: std::collections::HashSet<&str> = accounts
+            .iter()
+            .filter(|a| a.harness == harness && a.needs_signin)
+            .map(|a| a.id.as_str())
+            .collect();
+        if dead.is_empty() {
+            return;
+        }
+        let chats: Vec<String> = lock(&self.inner.pins)
+            .chats
+            .iter()
+            .filter(|(_, by)| {
+                by.get(&harness)
+                    .and_then(|entry| entry.account.as_deref())
+                    .is_some_and(|account| dead.contains(account))
+            })
+            .map(|(chat, _)| chat.clone())
+            .collect();
+        for chat in chats {
+            self.set_pin(harness, &chat, None);
+        }
+    }
+
+    /// A chat pinned to a login that can't run it (its refresh was refused: it
+    /// needs signing in again): the pin is taken back, the plugins that pin
+    /// are asked again (a chat with no pin is theirs to place, and they skip a
+    /// login that needs signing in), and the chat runs on the account they
+    /// name that works. With no such account it runs on the live login, as
+    /// without a pin: a run is never refused over a pin.
+    async fn fall_back_from_pin(&self, harness: HarnessId, chat: &str, dead: &str) -> Option<PinRun> {
+        tracing::warn!(%chat, account = %dead, "a chat's pinned account can't run it; moving it to a working one");
+        // The hook only answers a chat that has no pin.
+        self.set_pin(harness, chat, None);
+        let hook = lock(&self.inner.pin_hook).clone()?;
+        let account = hook(harness, chat.to_owned()).await?;
+        if account != dead
+            && let Ok(Some(run)) = self.pin_run(harness, &account).await
+        {
+            // The hook pinned the chat itself when it is a plugin's; this
+            // makes it so for any other.
+            self.set_pin(harness, chat, Some(&account));
+            return Some(run);
+        }
+        // Named nothing that works (or the same dead login): no pin.
+        self.set_pin(harness, chat, None);
+        None
+    }
+
     /// What a run of `chat` needs to reach its account (`None`: the live
     /// login, as without a pin). `Err`: the account can't be used and the
     /// run can't start (the words say what to do).
@@ -219,6 +272,11 @@ impl AgentAccounts {
                 let mut token = str_field(&oauth, "accessToken").ok_or_else(signed_out)?;
                 let expires = oauth.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
                 if expires - now_ms() < CLAUDE_REFRESH_MARGIN.as_millis() as i64 {
+                    // Its refresh was already refused and nothing has changed
+                    // since: asking again only fails again.
+                    if self.slot_needs_signin(harness, account) {
+                        return Err(signed_out());
+                    }
                     match self.refresh_claude_slot(&slot).await {
                         Ok(Some(fresh)) => token = fresh,
                         // Another refresh of this slot is in flight: its
@@ -265,13 +323,26 @@ impl crate::registry::RunEnvironment for PinRunEnvironment {
         if pinnable(harness)
             && let Some(chat) = chat_id
             && let Some(account) = self.0.pin_for_run(harness, chat).await
-            && let Some(run) = self.0.pin_run(harness, &account).await?
         {
-            // Never over what another provider (the Cloud broker) set.
-            for (key, value) in run.env {
-                request.env.entry(key).or_insert(value);
+            let run = match self.0.pin_run(harness, &account).await {
+                Ok(run) => run,
+                // A Claude login that needs signing in again (its refresh was
+                // refused) doesn't stop the chat: it moves to a working
+                // account (see `fall_back_from_pin`). A failure that says
+                // nothing of the login (an outage) still stops this run, and
+                // the pin stays.
+                Err(_) if harness == HarnessId::ClaudeCode && self.0.slot_needs_signin(harness, &account) => {
+                    self.0.fall_back_from_pin(harness, chat, &account).await
+                }
+                Err(why) => return Err(why),
+            };
+            if let Some(run) = run {
+                // Never over what another provider (the Cloud broker) set.
+                for (key, value) in run.env {
+                    request.env.entry(key).or_insert(value);
+                }
+                return Ok(());
             }
-            return Ok(());
         }
         MuseRunEnvironment(self.0.clone()).prepare(harness, chat_id, request).await
     }
