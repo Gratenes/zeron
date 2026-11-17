@@ -89,9 +89,14 @@ pub fn handles(method: &str) -> bool {
 }
 
 /// Who may send a plugin file here: this device's app, or another of your
-/// devices as the edge verified the link (an agent installs by `path`).
+/// devices: as the edge verified the link, or (an edge that names no device
+/// on the link, like a self-hosted one) a connection into the account's
+/// device room, bound to such connections alike. A file only installs
+/// waiting for a consent window, so this grants nothing the review and
+/// allow don't also let that connection do. Never an agent's token (it
+/// installs by `path` or `url`).
 fn uploads_origin() -> Result<super::reviews::Origin, RpcError> {
-    super::reviews::Origin::of(&zeron_rpc::caller())
+    super::reviews::Origin::of_plugin_review(&zeron_rpc::caller())
         .ok_or_else(|| failed("Only Zeron on one of your devices can send a plugin file here"))
 }
 

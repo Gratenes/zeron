@@ -15,7 +15,9 @@
 //! review is bound to who asked for it ([`Origin`]): one minted for this
 //! device's app is good only to this device's app, one minted for a peer
 //! only to that same peer, as the edge verified it (`fromDevice`). A dial
-//! the edge didn't verify gets none. Templates' stay this device's.
+//! the edge named no device for (a self-hosted edge that doesn't verify)
+//! may hold a plugin's review too, good only to such dials
+//! ([`Origin::Unverified`]). Templates' stay this device's.
 //!
 //! What this holds against: an agent through its MCP server (here or on
 //! another device: its token can't mint, and its engine forwards a mint
@@ -77,8 +79,9 @@ impl Origin {
     /// Who may ask for a plugin's review and allow it: this device's app, a
     /// verified device, or (the account's device room is authenticated by
     /// the edge, and a device there may already decline) a connection the
-    /// edge named no device for. Never an agent's token. Templates and
-    /// signing never use this: they are this device's app's alone.
+    /// edge named no device for. Never an agent's token. Also who may send a
+    /// plugin file here (`StagePluginPackage`). Templates and signing never
+    /// use this: they are this device's app's alone.
     pub fn of_plugin_review(caller: &zeron_rpc::Caller) -> Option<Origin> {
         Origin::of(caller).or(match caller {
             zeron_rpc::Caller::Peer { .. } => Some(Origin::Unverified),
