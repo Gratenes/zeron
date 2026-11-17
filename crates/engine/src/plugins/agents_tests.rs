@@ -1107,6 +1107,34 @@ async fn the_pre_run_hook_takes_the_listeners_account_and_pins_the_chat() {
 }
 
 #[tokio::test]
+async fn a_login_whose_refresh_was_refused_reads_as_signed_out_to_plugins() {
+    let f = Fixture::new();
+    f.grant("p", &[ACCOUNTS_READ]);
+    // No usage error says so: the refresh was refused (`needs_signin`).
+    lock(&f.host.snapshot).accounts[1].needs_signin = true;
+    let rows = f.op("p", json!({ "op": "accounts" })).await.unwrap();
+    assert_eq!(rows[0]["signed_out"], false);
+    assert_eq!(rows[1]["signed_out"], true);
+}
+
+#[tokio::test]
+async fn the_pre_run_hook_cant_pin_a_chat_to_a_login_that_needs_signing_in() {
+    let f = Fixture::new();
+    f.pinning().grant("p", PIN);
+    let dead = {
+        let mut snapshot = lock(&f.host.snapshot);
+        snapshot.accounts.iter_mut().find(|a| a.id == "a2").unwrap().needs_signin = true;
+        "a2"
+    };
+    f.agents.observe_accounts(&f.snapshot());
+    f.hook("p");
+    f.answer("p", Ok(json!({ "account": dead })), Duration::ZERO);
+    assert_eq!(f.agents.preparing(HarnessId::ClaudeCode, "c1").await, None);
+    assert!(lock(&f.host.pinned).is_empty(), "the chat was pinned to a dead login");
+    assert!(f.agents.notices("p").iter().any(|n| n.contains("needs signing in")), "{:?}", f.agents.notices("p"));
+}
+
+#[tokio::test]
 async fn the_pre_run_hook_gives_up_after_its_wait_and_runs_the_chat_on_the_live_login() {
     let f = Fixture::with(Pacing { prepare_wait: Duration::from_millis(50), ..Pacing::default() });
     f.pinning().grant("p", PIN);

@@ -225,18 +225,112 @@ async fn a_token_about_to_expire_is_refreshed_first_and_kept_in_its_slot() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn a_spent_login_stops_the_run_and_says_where_to_sign_in() {
+/// A device whose pinned account `acct-b` is spent (its refresh is refused)
+/// and which has a working saved account `acct-c`; the hook answers `hook`.
+async fn spent_pin_device(
+    hook: Option<&'static str>,
+) -> (tempfile::TempDir, AgentAccounts, Arc<AtomicUsize>) {
     let tmp = tempfile::tempdir().unwrap();
     let (token_url, _) = fixed_server("400 Bad Request", r#"{"error":"invalid_grant"}"#).await;
     let endpoints = ProbeEndpoints { claude_token: token_url, ..Default::default() };
     let accounts = AgentAccounts::with_endpoints(config(tmp.path()), endpoints, Default::default());
     write_live_claude(tmp.path(), "acct-a", "a@example.com");
+    accounts.write_slot(&claude_slot("acct-a", "a@example.com", "live-token", now_ms() + 3_600_000)).unwrap();
+    let spent = claude_slot("acct-b", "b@example.com", "at-b", now_ms() - 60_000);
+    let working = claude_slot("acct-c", "c@example.com", "at-c", now_ms() + 3_600_000);
+    accounts.write_slot(&spent).unwrap();
+    accounts.write_slot(&working).unwrap();
+    accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&spent.id));
+    let asked = Arc::new(AtomicUsize::new(0));
+    if let Some(answer) = hook {
+        let (counter, id) = (asked.clone(), slot_id_for(HarnessId::ClaudeCode, answer));
+        let pinning = accounts.clone();
+        accounts.set_pin_hook(Arc::new(move |harness, chat| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            // As a plugin's `preparing` does: answer, and pin the chat there.
+            pinning.set_pin(harness, &chat, Some(&id));
+            let id = id.clone();
+            Box::pin(async move { Some(id) })
+        }));
+    }
+    (tmp, accounts, asked)
+}
+
+fn pinned_to(accounts: &AgentAccounts, chat: &str) -> Option<String> {
+    accounts.pins().into_iter().find(|p| p.chat == chat).map(|p| p.account)
+}
+
+#[tokio::test]
+async fn a_chat_pinned_to_a_spent_login_moves_to_the_account_the_plugins_name() {
+    let (_tmp, accounts, asked) = spent_pin_device(Some("acct-c")).await;
+    let request = prepared(&PinRunEnvironment(accounts.clone()), "c1").await.unwrap();
+    assert_eq!(request.env[TOKEN_ENV], "at-c");
+    assert_eq!(pinned_to(&accounts, "c1"), Some(slot_id_for(HarnessId::ClaudeCode, "acct-c")));
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    // The next run just runs there: nothing is asked again.
+    let again = prepared(&PinRunEnvironment(accounts), "c1").await.unwrap();
+    assert_eq!(again.env[TOKEN_ENV], "at-c");
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_chat_pinned_to_a_spent_login_runs_on_the_live_login_when_nothing_else_works() {
+    // No plugin to ask.
+    let (_tmp, accounts, _) = spent_pin_device(None).await;
+    let env = PinRunEnvironment(accounts.clone());
+    assert!(prepared(&env, "c1").await.unwrap().env.is_empty());
+    assert_eq!(pinned_to(&accounts, "c1"), None);
+    assert_eq!(env.credential(HarnessId::ClaudeCode, Some("c1")).await.as_deref(), Some("live"));
+}
+
+#[tokio::test]
+async fn a_plugin_answering_the_spent_login_again_leaves_the_chat_on_the_live_login() {
+    let (_tmp, accounts, asked) = spent_pin_device(Some("acct-b")).await;
+    let env = PinRunEnvironment(accounts.clone());
+    assert!(prepared(&env, "c1").await.unwrap().env.is_empty());
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert_eq!(pinned_to(&accounts, "c1"), None, "the dead login is not pinned again");
+}
+
+#[tokio::test]
+async fn a_spent_login_no_longer_fails_the_run() {
+    // A login whose refresh was refused is no Err for the run: the words said "pin this chat
+    // to another account", and nothing the user could do reached the pin.
+    // (A spent login is flagged on the first refusal, and not asked again.)
+    let (_tmp, accounts, _) = spent_pin_device(None).await;
+    assert!(prepared(&PinRunEnvironment(accounts), "c1").await.is_ok());
+}
+
+#[tokio::test]
+async fn a_login_already_flagged_as_needing_sign_in_is_not_refreshed_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (token_url, hits) = fixed_server("400 Bad Request", r#"{"error":"invalid_grant"}"#).await;
+    let endpoints = ProbeEndpoints { claude_token: token_url, ..Default::default() };
+    let accounts = AgentAccounts::with_endpoints(config(tmp.path()), endpoints, Default::default());
+    write_live_claude(tmp.path(), "acct-a", "a@example.com");
     let spent = claude_slot("acct-b", "b@example.com", "at-b", now_ms() - 60_000);
     accounts.write_slot(&spent).unwrap();
-    accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&spent.id));
-    let err = prepared(&PinRunEnvironment(accounts), "c1").await.unwrap_err();
-    assert!(err.contains("b@example.com") && err.contains("signing in again"), "{err}");
+    // The first start finds the refusal; the pin falls back, and the next
+    // chat on the same login doesn't go to the network again.
+    assert!(accounts.pin_run(HarnessId::ClaudeCode, &spent.id).await.is_err());
+    assert!(accounts.slot_needs_signin(HarnessId::ClaudeCode, &spent.id));
+    let after_first = hits.load(Ordering::SeqCst);
+    assert!(accounts.pin_run(HarnessId::ClaudeCode, &spent.id).await.is_err());
+    assert_eq!(hits.load(Ordering::SeqCst), after_first, "a refused login was asked to refresh again");
+}
+
+#[tokio::test]
+async fn switching_the_account_in_use_takes_back_pins_to_logins_that_need_signing_in() {
+    let d = device();
+    let dead = slot_id_for(HarnessId::ClaudeCode, "acct-dead");
+    d.accounts.set_pin(HarnessId::ClaudeCode, "stuck", Some(&dead));
+    d.accounts.set_pin(HarnessId::ClaudeCode, "fine", Some(&d.saved));
+    let mut dead_row = row(&dead, AgentAuthKind::Oauth);
+    dead_row.needs_signin = true;
+    let ok_row = row(&d.saved, AgentAuthKind::Oauth);
+    d.accounts.unpin_signed_out(HarnessId::ClaudeCode, &[dead_row, ok_row]);
+    assert_eq!(pinned_to(&d.accounts, "stuck"), None);
+    assert_eq!(pinned_to(&d.accounts, "fine"), Some(d.saved.clone()));
 }
 
 #[tokio::test]
@@ -360,7 +454,9 @@ async fn a_run_that_cannot_refresh_a_pinned_login_flags_it_as_needing_sign_in() 
     accounts.write_slot(&spent).unwrap();
     assert!(!accounts.slot_needs_signin(HarnessId::ClaudeCode, &spent.id));
     accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&spent.id));
-    prepared(&PinRunEnvironment(accounts.clone()), "c1").await.unwrap_err();
+    // The chat isn't stopped: it moves off the dead login (nothing to move
+    // to here, so the live one).
+    assert!(prepared(&PinRunEnvironment(accounts.clone()), "c1").await.unwrap().env.is_empty());
     assert!(accounts.slot_needs_signin(HarnessId::ClaudeCode, &spent.id));
     assert!(!accounts.slot_needs_signin(HarnessId::ClaudeCode, "no-such-slot"));
 }
@@ -377,4 +473,6 @@ async fn an_outage_during_a_refresh_does_not_flag_the_login() {
     accounts.set_pin(HarnessId::ClaudeCode, "c1", Some(&slot.id));
     prepared(&PinRunEnvironment(accounts.clone()), "c1").await.unwrap_err();
     assert!(!accounts.slot_needs_signin(HarnessId::ClaudeCode, &slot.id));
+    // An outage says nothing of the login: the pin stays for the next try.
+    assert_eq!(pinned_to(&accounts, "c1"), Some(slot.id.clone()));
 }

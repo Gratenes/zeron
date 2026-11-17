@@ -1310,6 +1310,9 @@ impl AgentAccounts {
         account_id: &str,
     ) -> Result<AgentAccountsSnapshot, EngineError> {
         let activated = self.activate_unpublished(harness, account_id).await;
+        if let Ok(snapshot) = &activated {
+            self.unpin_signed_out(harness, &snapshot.accounts);
+        }
         self.published(activated)
     }
 
