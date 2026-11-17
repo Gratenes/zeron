@@ -1,0 +1,19 @@
+{
+  "id": "claude-rotation",
+  "name": "Claude rotation",
+  "version": "1.0.0",
+  "description": "Spreads Claude Code chats across your saved accounts: each new chat starts on the one with the most left, and a chat that hits its limit moves to another for its next turn.",
+  "entry": "init.luau",
+  "service": "service.luau",
+  "permissions": ["service", "usage.read", "accounts.read", "accounts.pin", "sessions.read"],
+  "settings_description": "Which Claude Code account each chat runs on.",
+  "settings": [
+    {
+      "id": "enabled",
+      "kind": "switch",
+      "label": "Rotate Claude Code chats",
+      "description": "New chats start on the saved account with the most left (the fewest chats on a tie), and a chat that hits its limit or signs out moves to another for its next turn. Your active account is never switched.",
+      "default": true
+    }
+  ]
+}
