@@ -20,8 +20,9 @@ class ShellArgsTest {
     }
 
     @Test fun installPathsStayInStorageAndAreApks() {
-        assertEquals(listOf("pm", "install", "-r", "--user", "0", "/storage/emulated/0/Download/a.apk"), ShellArgs.install("/storage/emulated/0/Download/a.apk"))
-        for (bad in listOf("/data/local/tmp/a.apk", "/storage/emulated/0/a.txt", "/storage/emulated/0/../../data/a.apk", "/storage/emulated/0/a.apk\nrm", "relative.apk")) refused { ShellArgs.install(bad) }
+        assertEquals(listOf("pm", "install", "-r", "--user", "0", "-S", "1234"), ShellArgs.install("/storage/emulated/0/Download/a.apk", 1234))
+        for (bad in listOf("/data/local/tmp/a.apk", "/storage/emulated/0/a.txt", "/storage/emulated/0/../../data/a.apk", "/storage/emulated/0/a.apk\nrm", "relative.apk")) refused { ShellArgs.install(bad, 10) }
+        refused { ShellArgs.install("/storage/emulated/0/a.apk", 0) }
     }
 
     @Test fun grantAndRevokeAreTypedArgvs() {

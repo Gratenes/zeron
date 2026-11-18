@@ -79,6 +79,14 @@ object PhoneShizuku {
 
     class Result(val exit: Int, val output: String)
 
+    /** Like [run], with a file fed to the command's stdin (an install streams the apk: Android 14+ won't let the package manager open it by path). */
+    fun runWithFile(context: Context, argv: List<String>, stdinPath: String, timeoutMs: Int = 120_000): Result {
+        problem(context)?.let { throw PhoneToolException(it) }
+        val raw = connect(context.applicationContext).runWithFile(argv.toTypedArray(), stdinPath, timeoutMs)
+        val nl = raw.indexOf('\n')
+        return Result(raw.substring(0, if (nl < 0) raw.length else nl).trim().toIntOrNull() ?: -3, if (nl < 0) "" else raw.substring(nl + 1))
+    }
+
     /** Runs a fixed argv as the shell user. Typed tools build the argv: nothing here takes a shell string. */
     fun run(context: Context, argv: List<String>, timeoutMs: Int = 30_000): Result {
         problem(context)?.let { throw PhoneToolException(it) }

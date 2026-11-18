@@ -8,9 +8,20 @@ class ShellService : IShellService.Stub() {
         System.exit(0)
     }
 
-    override fun run(argv: Array<String>, timeoutMs: Int): String {
+    override fun run(argv: Array<String>, timeoutMs: Int): String = exec(argv, null, timeoutMs)
+
+    override fun runWithFile(argv: Array<String>, stdinPath: String, timeoutMs: Int): String = exec(argv, stdinPath, timeoutMs)
+
+    private fun exec(argv: Array<String>, stdinPath: String?, timeoutMs: Int): String {
         return try {
             val process = ProcessBuilder(*argv).redirectErrorStream(true).start()
+            if (stdinPath != null) {
+                Thread {
+                    runCatching { java.io.File(stdinPath).inputStream().use { i -> process.outputStream.use { o -> i.copyTo(o) } } }
+                }.apply { start() }
+            } else {
+                runCatching { process.outputStream.close() }
+            }
             val out = StringBuilder()
             val reader = Thread {
                 process.inputStream.bufferedReader().use { r ->

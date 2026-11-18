@@ -7,4 +7,7 @@ interface IShellService {
 
     /** Runs [argv], waits up to [timeoutMs], and returns "<exit code>\n<combined output, at most 64 KB>". */
     String run(in String[] argv, int timeoutMs) = 1;
+
+    /** Like [run], with the file at [stdinPath] fed to the command's standard input (for `pm install -S <size>`). */
+    String runWithFile(in String[] argv, String stdinPath, int timeoutMs) = 2;
 }

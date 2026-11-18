@@ -60,7 +60,7 @@ class PhoneSystem(private val context: Context, private val settings: PhoneSetti
         val ok: Boolean
         if (settings.groupOn(PhoneSettings.Group.SHELL) && PhoneShizuku.problem(context) == null) {
             via = "shizuku"
-            val r = PhoneShizuku.run(context, ShellArgs.install(file.path), 120_000)
+            val r = PhoneShizuku.runWithFile(context, ShellArgs.install(file.path, file.length()), file.path, 120_000)
             ok = r.exit == 0 && r.output.contains("Success")
             output = r.output.trim().take(300)
         } else {

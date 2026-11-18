@@ -30,7 +30,12 @@ object ShellArgs {
         return path
     }
 
-    fun install(path: String) = listOf("pm", "install", "-r", "--user", "0", requireApkPath(path))
+    /** `pm install` reading the apk from stdin (`-S <size>`): the caller feeds the file. */
+    fun install(path: String, size: Long): List<String> {
+        requireApkPath(path)
+        if (size <= 0) throw PhoneToolException("the apk is empty")
+        return listOf("pm", "install", "-r", "--user", "0", "-S", size.toString())
+    }
 
     fun grant(pkg: String, permission: String, revoke: Boolean, own: String): List<String> {
         requirePackage(pkg, own)
