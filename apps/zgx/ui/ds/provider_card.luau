@@ -74,6 +74,11 @@ export type Account = {
 	-- whether it can be put in use.
 	active: boolean?,
 	switchable: boolean?,
+	-- Its login is dead (its refresh was refused): it needs signing in
+	-- again, can't be switched to, and its meters are only the last reading,
+	-- taken at `as_of` (seconds since the epoch).
+	needs_signin: boolean?,
+	as_of: number?,
 	-- An API key, not an account: no plan, no meters, its provider's mark
 	-- for a face (`provider`, the agent's id for it).
 	key: boolean?,
@@ -237,6 +242,10 @@ export type CardProps = {
 	on_code: ((code: string) -> ())?,
 	settle: (next: string) -> (),
 	on_switch: ((a: Account) -> ())?,
+	-- A dead login's "Sign in again" (one that `needs_signin`): its agent's
+	-- sign-in, for that account's provider where the agent keeps one each.
+	-- Without it, `on_add`.
+	on_sign_in: ((a: Account) -> ())?,
 	-- A Codex account's banked resets: use one (the page's dialog asks
 	-- which: ResetsDialog), and forget how the last went. Without
 	-- `on_reset` the card shows none of it (setup's Your agents).
@@ -323,6 +332,14 @@ end
 local function word(a: Account): string?
 	return if a.reset then a.reset.state else nil
 end
+-- Sign a dead login in again.
+local function sign_in_again(c: CardProps, a: Account)
+	if c.on_sign_in then
+		c.on_sign_in(a)
+	elseif c.on_add then
+		c.on_add()
+	end
+end
 
 -- An account's actions, behind the ⋯ at its end: switch to it, use a
 -- banked reset (Codex), or remove it. `account` is its row's state: each
@@ -366,11 +383,23 @@ local Actions = ui.component(function(p: { card: CardProps, account: State<Accou
 						end
 					end,
 				}),
+				-- (A dead login: signed in again before it is anything else.)
+				ui.show(function(): boolean
+					return account:get().needs_signin == true
+				end, Menu.Row {
+					icon = "lock-keyhole-unlocked",
+					label = locale.s("ds.provider_card.sign_in_again"),
+					on_click = function()
+						open:set(false)
+						sign_in_again(c, account:peek())
+					end,
+				}),
 				-- (Only to one that can be put in use and isn't already: a
-				-- switch the agent can't take is never offered.)
+				-- switch the agent can't take is never offered, nor one
+				-- whose login is dead.)
 				ui.show(function(): boolean
 					local a = account:get()
-					return a.switchable ~= false and a.active ~= true
+					return a.switchable ~= false and a.active ~= true and a.needs_signin ~= true
 				end, Menu.Row {
 					icon = "check-circle",
 					label = locale.s("ds.provider_card.switch"),
@@ -429,6 +458,16 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 	end
 	local function detail(): string
 		local a = row:get()
+		-- A dead login's meters are the last reading: dated, not current.
+		if a.needs_signin then
+			if a.as_of then
+				local when = locale.ago(os.time() - a.as_of)
+				return if a.plan ~= ""
+					then locale.s("ds.provider_card.usage_as_of_plan", { plan = a.plan, when = when })
+					else locale.s("ds.provider_card.usage_as_of", { when = when })
+			end
+			return a.plan
+		end
 		if reset() then
 			return locale.s("ds.provider_card.reset_just_now", { plan = a.plan })
 		elseif a.resets_at then
@@ -480,21 +519,47 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 			else ui.presence(email, function(e: string): Node
 				return Avatar { seed = e, size = 32, label = locale.t("ds.provider_card.account") }
 			end),
-		-- (In a group, the one in use there: each group has its own.)
-		badge = ui.show(function()
-			if group then
-				return row:get().active == true
-			end
-			return c.active() == email()
-		end, Badge { locale.t("ds.provider_card.in_use"), tone = "accent" }),
+		-- (In a group, the one in use there: each group has its own. A dead
+		-- login is marked instead: it is in use nowhere.)
+		badge = ui.row {
+			gap = "$space.2",
+			items = "center",
+			ui.show(function()
+				if row:get().needs_signin == true then
+					return false
+				end
+				if group then
+					return row:get().active == true
+				end
+				return c.active() == email()
+			end, Badge { locale.t("ds.provider_card.in_use"), tone = "accent" }),
+			ui.show(function()
+				return row:get().needs_signin == true
+			end, Badge { locale.t("ds.provider_card.signed_out"), tone = "danger" }),
+		},
 		control = ui.row {
 			gap = "$space.3",
 			items = "center",
+			-- (A dead login: the way back in, beside its last meters.)
+			ui.show(function(): boolean
+				return row:get().needs_signin == true
+			end, Button {
+				locale.t("ds.provider_card.sign_in_again"),
+				tone = "secondary",
+				size = "sm",
+				on_click = function()
+					sign_in_again(c, row:peek())
+				end,
+			}),
 			-- (An API key has no plan, so no windows: no meters for it.)
 			ui.show(function(): boolean
 				return row:get().key ~= true
 			end, ui.column {
 				gap = "$zeron.space.hair",
+				-- (A dead login's are the last reading: dimmed.)
+				opacity = function(): number
+					return if row:get().needs_signin == true then 0.45 else 1
+				end,
 				-- (Labels alone where no reset is known, as the shipping app.)
 				tooltip = Tooltip {
 					function(): string

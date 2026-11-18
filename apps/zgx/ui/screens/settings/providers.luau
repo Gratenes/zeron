@@ -426,6 +426,15 @@ local function card(row: State<agents.Agent>): Node
 				agents.remove(id, acc.id)
 			end
 		end,
+		-- A dead login signs in again through its agent: for its own model
+		-- provider where the agent keeps a login each.
+		on_sign_in = function(acc)
+			if acc.provider then
+				agents.sign_in_to(id, acc.provider)
+			else
+				agents.sign_in(id)
+			end
+		end,
 		-- A Codex account's banked resets: the dialog asks which; how it
 		-- went lands on the account's row.
 		on_reset = function(acc)

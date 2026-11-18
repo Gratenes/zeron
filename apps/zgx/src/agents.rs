@@ -1919,6 +1919,14 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
             Value::Bool(account["authKind"].as_str() == Some("api-key") && account["displayName"].as_str().is_some()),
         ),
     ];
+    // A login that is dead (its refresh was refused): the card says so, and
+    // dates the meters (the last reading, in seconds since the epoch).
+    if account["needsSignin"].as_bool() == Some(true) {
+        fields.push(("needs_signin", Value::Bool(true)));
+        if let Some(at) = account["usageFetchedAt"].as_i64() {
+            fields.push(("as_of", Value::from((at / 1000) as f64)));
+        }
+    }
     if account["codexResetCredits"].is_object() {
         let (count, list) = banked(&account["codexResetCredits"], spent);
         fields.push(("banked", Value::from(count as f64)));
@@ -2367,6 +2375,38 @@ mod tests {
         // Only an account with a credit summary (Codex's) banks anything.
         assert_eq!(bare.field("banked"), None);
         assert_eq!(bare.field("resets"), None);
+    }
+
+    /// A login the engine flags `needsSignin` says so on its row, with when
+    /// its meters were read (seconds); a healthy one carries neither.
+    #[test]
+    fn a_login_that_needs_signing_in_says_so_and_dates_its_meters() {
+        let dead = account_value(
+            &json!({
+                "id": "a", "harness": "claude-code", "email": "a@example.com", "active": false,
+                "needsSignin": true, "usageFetchedAt": 1_793_547_900_000_i64,
+                "usageWindows": [{ "label": "Session", "usedFraction": 0.04 }]
+            }),
+            None,
+        );
+        assert_eq!(dead.field("needs_signin"), Some(&Value::Bool(true)));
+        assert_eq!(dead.field("as_of").and_then(Value::as_f64), Some(1_793_547_900.0));
+        // The last reading stays: dimmed by the card, not dropped.
+        assert_eq!(dead.field("session").and_then(Value::as_f64), Some(0.04));
+        let healthy = account_value(
+            &json!({
+                "id": "b", "harness": "claude-code", "active": true,
+                "usageFetchedAt": 1_793_547_900_000_i64,
+                "usageWindows": [{ "label": "Session", "usedFraction": 0.04 }]
+            }),
+            None,
+        );
+        assert_eq!(healthy.field("needs_signin"), None);
+        assert_eq!(healthy.field("as_of"), None);
+        // (Flagged without a reading time: marked, undated.)
+        let undated = account_value(&json!({ "id": "c", "needsSignin": true }), None);
+        assert_eq!(undated.field("needs_signin"), Some(&Value::Bool(true)));
+        assert_eq!(undated.field("as_of"), None);
     }
 
     fn ids(value: &Value) -> Vec<String> {
