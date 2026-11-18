@@ -7,11 +7,14 @@
 
 local SIDE = "#shell-sidebar"
 
-local function open(): any
+local function open(shelf: boolean?): any
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 900)
 	app:frames(30)
 	app:set_state("screens/shell/activity.luau::shell_sidebar_activity", true)
+	-- (The Working shelf as asked, whatever its default: sm2 is working, and
+	-- most tests below read it from the shelf.)
+	app:set_state("screens/shell/activity.luau::activity_working_shelf", shelf ~= false)
 	app:frames(40)
 	app:command("twins")
 	app:frames(40)
@@ -84,4 +87,11 @@ test("same title: a chat whose title is its own stays one line", function()
 		end
 	end
 	expect(count(app, 'button "Tidy the tests"')).to_be(1)
+end)
+
+test("same title: with working chats left in the list, all three rows say where they run", function()
+	local app = open(false)
+	expect(count(app, 'button "School Management"')).to_be(3)
+	expect(count(app, 'text "Atlas · MacBook Pro"')).to_be(2)
+	expect(count(app, 'text "Borealis · devbox"')).to_be(1)
 end)
