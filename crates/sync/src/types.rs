@@ -14,6 +14,10 @@ pub enum SyncError {
     WebSocket(String),
     #[error("protocol: {0}")]
     Protocol(String),
+    /// The server refused the request itself as invalid (HTTP 400): sending
+    /// it again as it is can only fail the same way.
+    #[error("rejected: {0}")]
+    Rejected(String),
     #[error("join refused: {0}")]
     JoinRefused(String),
     #[error("loro: {0}")]

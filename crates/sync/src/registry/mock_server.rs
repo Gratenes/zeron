@@ -216,6 +216,23 @@ async fn serve(
                                 .await;
                             continue;
                         };
+                        // The room's `validateOp`: one invalid op refuses the WHOLE
+                        // batch, with an error naming the row (not the batch).
+                        if let Some((op, why)) =
+                            ops.iter().find_map(|op| invalid_op(op).map(|why| (op, why)))
+                        {
+                            let _ = sink
+                                .send(WsMessage::Text(
+                                    json!({
+                                        "t": "error",
+                                        "code": "invalid_op",
+                                        "message": format!("{}/{}: {}", op.kind, op.id, why),
+                                    })
+                                    .to_string(),
+                                ))
+                                .await;
+                            continue;
+                        }
                         let (ack, rows_frame) = {
                             let mut state = lock(&state);
                             let next_seq = state.seq + 1;
@@ -320,4 +337,26 @@ async fn serve(
             }
         }
     }
+}
+
+/// Why the room would refuse `op` (`validateOp` in `edge/src/registry-core.ts`):
+/// a field name outside its alphabet, or an op over [`MAX_OP_BYTES`].
+fn invalid_op(op: &RowOp) -> Option<String> {
+    let valid_field = |key: &str| {
+        let mut chars = key.chars();
+        key.len() <= 64
+            && chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && chars.all(|c| c.is_ascii_alphanumeric())
+    };
+    if let Some(bad) = op
+        .set
+        .iter()
+        .flatten()
+        .map(|(key, _)| key)
+        .find(|key| !valid_field(key))
+    {
+        return Some(format!("bad field: {bad}"));
+    }
+    (serde_json::to_vec(op).map_or(0, |bytes| bytes.len()) > zeron_doc::MAX_OP_BYTES)
+        .then(|| "op too large".to_owned())
 }

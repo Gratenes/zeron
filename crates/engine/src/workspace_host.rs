@@ -2466,10 +2466,18 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
                 .await
                 .map_err(|e| zeron_sync::SyncError::WebSocket(describe_http_error(e)))?;
             if !resp.status().is_success() {
-                return Err(zeron_sync::SyncError::Protocol(format!(
-                    "registry push http {}",
-                    resp.status()
-                )));
+                let status = resp.status();
+                let message = format!("registry push http {status}");
+                // Only the room's own refusal of the ops (`invalid_op`) says
+                // the batch itself is bad; any other 400 is no verdict on it.
+                let body = resp.text().await.unwrap_or_default();
+                return Err(
+                    if status == reqwest::StatusCode::BAD_REQUEST && body.contains("invalid_op") {
+                        zeron_sync::SyncError::Rejected(format!("{message}: {body}"))
+                    } else {
+                        zeron_sync::SyncError::Protocol(message)
+                    },
+                );
             }
             resp.text()
                 .await
