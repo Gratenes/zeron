@@ -21,7 +21,12 @@ webrtc = "150.7871.01"
 # ONNX Runtime for on-device dictation; local-asr loads its libonnxruntime.so (ort 2.0.0-rc.13, api-28).
 onnxruntime = "1.32.0"
 
+# Shizuku (rikka): the phone tools can run a few typed shell actions through it when the person starts it.
+shizuku = "13.1.5"
+
 [libraries]
+shizuku-api = { group = "dev.rikka.shizuku", name = "api", version.ref = "shizuku" }
+shizuku-provider = { group = "dev.rikka.shizuku", name = "provider", version.ref = "shizuku" }
 androidx-documentfile = { group = "androidx.documentfile", name = "documentfile", version = "1.0.1" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "coreSplashscreen" }

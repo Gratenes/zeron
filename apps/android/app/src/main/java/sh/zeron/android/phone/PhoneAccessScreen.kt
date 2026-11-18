@@ -222,6 +222,21 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
                 }
             }
 
+            section("Shizuku and installs")
+            group {
+                val shz = remember(refresh) { PhoneShizuku.state(context) }
+                var confirmInstalls by remember(refresh) { mutableStateOf(settings.confirmInstalls) }
+                SettingRow(0, 2, R.drawable.zi_check, "Shizuku", when {
+                    !shz.installed -> "Not installed. Install Shizuku (shizuku.rikka.app) and start it to let agents use the few typed system actions."
+                    !shz.running -> "Installed but not running: open Shizuku and start it (wireless debugging or root). It stops when the phone restarts."
+                    !shz.permitted -> "Running. Tap to allow Zeron to use it."
+                    else -> "Running and allowed (${if (shz.uid == 0) "root" else "shell"}). Agents still need “Allow Shizuku shell” above."
+                }) { if (shz.running && !shz.permitted) PhoneShizuku.requestPermission() else if (shz.installed) context.packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")?.let { context.startActivity(it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } }
+                SettingRow(1, 2, R.drawable.zi_check, "Ask me before each install", if (confirmInstalls) "A notification shows the app, its signer and checksum with Install, Deny and Always for this chat" else "Off: agents install apps without asking. Every install is in the log below.", trailing = {
+                    Switch(confirmInstalls, { confirmInstalls = it; settings.confirmInstalls = it; if (it) settings.trustedInstallChats = emptySet() })
+                }) {}
+            }
+
             section("Files")
             group {
                 SettingRow(0, 2, R.drawable.zi_folder_with_files, "Full access to this phone's files", if (filesOn) (if (allFiles) "On: agents and your other devices can list, read and write any file in shared storage, SD cards included. Android's own Android/data and obb folders and Zeron's private data stay closed." else "On, but Android's “All files access” is still off: tap here to allow it, or nothing works.") else "Off. Turn it on to let agents and your other devices copy files to and from this phone.", trailing = {

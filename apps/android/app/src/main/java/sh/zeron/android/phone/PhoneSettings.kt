@@ -47,6 +47,16 @@ class PhoneSettings(context: Context) {
         get() = prefs.getInt("keepalive-secs", 60)
         set(value) = prefs.edit().putInt("keepalive-secs", value.coerceIn(30, 300)).apply()
 
+    /** Ask before each app an agent wants to install (Install / Deny / Always for this chat). */
+    var confirmInstalls: Boolean
+        get() = prefs.getBoolean("confirm-installs", true)
+        set(value) = prefs.edit().putBoolean("confirm-installs", value).apply()
+
+    /** Chats the person said "always" to for installs: they are not asked again. */
+    var trustedInstallChats: Set<String>
+        get() = prefs.getStringSet("trusted-install-chats", emptySet()) ?: emptySet()
+        set(value) = prefs.edit().putStringSet("trusted-install-chats", value).apply()
+
     /** Ask the person before a file is written to the phone (once per transfer). */
     var confirmFileWrites: Boolean
         get() = prefs.getBoolean("confirm-file-writes", false)
@@ -90,6 +100,8 @@ class PhoneSettings(context: Context) {
         ATTACH_READ("attachments-read", "Read attachments", "Save photos, videos and files from messages so agents can look at them", true),
         ATTACH_SEND("attachments-send", "Send attachments", "Photos, videos and files in a message (through Google Messages)", false),
         REACTIONS("reactions", "React to messages", "Send an emoji reaction to a message", false),
+        INSTALL("install", "Let agents install apps", "Install an .apk an agent put on the phone, after you confirm it", false),
+        SHELL("shell", "Allow Shizuku shell", "Let Zeron use Shizuku for a few fixed system actions (grant a permission, stop an app, read a setting)", false),
         FILES("files", "Full access to this phone's files", "List, read and write any file in shared storage", false),
     }
 }

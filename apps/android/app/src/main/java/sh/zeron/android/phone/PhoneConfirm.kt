@@ -24,11 +24,17 @@ object PhoneConfirm {
     private const val CHANNEL = "phone-confirm"
     const val WAIT_SECONDS = 60L
     const val ACTION = "sh.zeron.android.PHONE_CONFIRM"
-    private val pending = ConcurrentHashMap<Int, CompletableFuture<Boolean>>()
+    private val pending = ConcurrentHashMap<Int, CompletableFuture<Int>>()
+    const val NO = 0
+    const val YES = 1
+    const val ALWAYS = 2
     private var next = 7300
 
     /** `true` only if the person said yes in time. Blocks the calling (tool) thread. */
-    fun ask(context: Context, title: String, text: String): Boolean {
+    fun ask(context: Context, title: String, text: String): Boolean = choose(context, title, text, "Send", "Don't send", null) != NO
+
+    /** Like [ask] with its own button labels and, if [alwaysLabel] is given, a third "yes, and don't ask again" button. */
+    fun choose(context: Context, title: String, text: String, yesLabel: String, noLabel: String, alwaysLabel: String?): Int {
         val app = context.applicationContext
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(app, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -42,11 +48,11 @@ object PhoneConfirm {
             )
         }
         val id = synchronized(this) { next++ }
-        val answer = CompletableFuture<Boolean>()
+        val answer = CompletableFuture<Int>()
         pending[id] = answer
-        fun action(yes: Boolean) = PendingIntent.getBroadcast(
-            app, id * 2 + if (yes) 1 else 0,
-            Intent(ACTION).setPackage(app.packageName).putExtra("id", id).putExtra("yes", yes),
+        fun action(choice: Int) = PendingIntent.getBroadcast(
+            app, id * 4 + choice,
+            Intent(ACTION).setPackage(app.packageName).putExtra("id", id).putExtra("choice", choice),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         manager.notify(
@@ -60,31 +66,32 @@ object PhoneConfirm {
                 .setCategory(NotificationCompat.CATEGORY_MESSAGE)
                 .setAutoCancel(true)
                 .setTimeoutAfter(WAIT_SECONDS * 1000)
-                .addAction(0, "Send", action(true))
-                .addAction(0, "Don't send", action(false))
+                .addAction(0, yesLabel, action(YES))
+                .addAction(0, noLabel, action(NO))
+                .apply { if (alwaysLabel != null) addAction(0, alwaysLabel, action(ALWAYS)) }
                 .build(),
         )
         return try {
             answer.get(WAIT_SECONDS, TimeUnit.SECONDS)
         } catch (_: Exception) {
-            false
+            NO
         } finally {
             pending.remove(id)
             manager.cancel(id)
         }
     }
 
-    fun answer(id: Int, yes: Boolean) {
-        pending[id]?.complete(yes)
+    fun answer(id: Int, choice: Int) {
+        pending[id]?.complete(choice)
     }
 
     fun denyAll() {
-        pending.values.forEach { it.complete(false) }
+        pending.values.forEach { it.complete(NO) }
     }
 }
 
 class PhoneConfirmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == PhoneConfirm.ACTION) PhoneConfirm.answer(intent.getIntExtra("id", -1), intent.getBooleanExtra("yes", false))
+        if (intent.action == PhoneConfirm.ACTION) PhoneConfirm.answer(intent.getIntExtra("id", -1), intent.getIntExtra("choice", if (intent.getBooleanExtra("yes", false)) PhoneConfirm.YES else PhoneConfirm.NO))
     }
 }

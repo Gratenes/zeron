@@ -107,6 +107,7 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        aidl = true
     }
 
     // Pure-Kotlin unit tests only: Android stubs return defaults instead of throwing.
@@ -155,6 +156,8 @@ dependencies {
     implementation(libs.webrtc)
     // The ONNX Runtime library local-asr loads (its libonnxruntime.so); the Java API is unused.
     implementation(libs.onnxruntime.android)
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
     implementation(libs.androidx.car.app)
     implementation(libs.androidx.car.app.projected)
     debugImplementation(libs.compose.ui.tooling)

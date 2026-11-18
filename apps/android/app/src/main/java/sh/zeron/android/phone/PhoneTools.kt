@@ -22,6 +22,7 @@ import uniffi.zeron_core.PhoneToolReply
 class PhoneTools(private val context: Context, private val settings: PhoneSettings) : PhoneToolHandler {
     private val sms by lazy { PhoneSms(context) }
     private val files by lazy { PhoneFiles(context) }
+    private val system by lazy { PhoneSystem(context, settings) }
 
     override fun call(tool: String, argsJson: String, originJson: String): PhoneToolReply {
         PhoneLink.touch(context)
@@ -29,6 +30,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
         val origin = runCatching { JSONObject(originJson) }.getOrNull()
         val who = origin?.optString("chatTitle")?.takeIf { it.isNotBlank() && it != "null" }
             ?: origin?.optString("chatId")?.takeIf { it.isNotBlank() }?.take(8)
+        val chatId = origin?.optString("chatId")?.takeIf { it.isNotBlank() && it != "null" }
         val summary = summarize(tool, args)
         return try {
             gate(tool)
@@ -36,7 +38,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             val quiet = (tool == "files_read" && args.optLong("offset") > 0) ||
                 (tool == "files_write_part" && args.optLong("offset") > 0 && !args.optBoolean("final"))
             if (tool != "ping" && !quiet) PhoneNotice.active(context, who, summary)
-            val result = run(tool, args, who)
+            val result = run(tool, args, who, chatId)
             if (!quiet) PhoneActionLog.add(context, tool, if (tool == "files_read" && result.optBoolean("done")) "$summary (${result.optLong("size")} bytes in all)" else summary, true, who)
             PhoneToolReply(true, result.toString())
         } catch (e: PhoneToolException) {
@@ -62,7 +64,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
         if (!settings.groupOn(group)) throw PhoneToolException("${group.label} is switched off on this phone")
     }
 
-    private fun run(tool: String, args: JSONObject, who: String?): JSONObject {
+    private fun run(tool: String, args: JSONObject, who: String?, chatId: String?): JSONObject {
         fun service() = PhoneAccessibilityService.instance
             ?: throw PhoneToolException("Zeron's accessibility service is off: turn it on in Android Settings → Accessibility → Zeron")
         // A tool that acts on the screen needs it unlocked: unlock it (if the person allows that), or say it is locked.
@@ -100,6 +102,11 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
                     PhoneConfirm.ask(context, "${who ?: "An agent"} wants to send a message $how".take(120), text.ifBlank { attach.joinToString(", ") { it.substringAfterLast('/') } })
                 }) else null, attach)
             }
+            "install_apk" -> system.install(args.optString("path"), args.optString("sha256").takeIf { it.isNotBlank() }, who, chatId)
+            "grant" -> system.grant(args.optString("package"), args.optString("permission"), args.optBoolean("revoke", false))
+            "force_stop" -> system.forceStop(args.optString("package"))
+            "settings_get" -> system.settingsGet(args.optString("namespace"), args.optString("key"))
+            "shizuku_probe" -> system.probe()
             "sms_queue" -> PhoneSendQueue.status(args.optInt("id", -1).takeIf { it >= 0 })
             "sms_attachment" -> sms.attachment(args.optString("message_id"), args.optString("part_id"))
             "sms_react" -> sms.react(
@@ -140,6 +147,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             .put("locked", PhoneUnlock.isLocked(context))
             .put("agentsMayUnlock", settings.unlockEnabled && !settings.unlockFailed && (PhonePinVault.has(context) || !context.getSystemService(android.app.KeyguardManager::class.java).isDeviceSecure))
             .put("confirmsTextSends", settings.confirmSmsSend)
+            .put("shizuku", PhoneShizuku.state(context).let { JSONObject().put("installed", it.installed).put("running", it.running).put("permitted", it.permitted) })
             .put("allowed", JSONObject().also { o -> PhoneSettings.Group.entries.forEach { o.put(it.key, settings.groupOn(it)) } })
             .put("foregroundPackage", service?.foregroundPackage() ?: JSONObject.NULL)
     }
@@ -207,6 +215,11 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
         "sms_send" -> "sent a message (${a.optString("text").length} characters) to ${a.optString("to").ifEmpty { "thread " + a.optString("thread_id") }}"
         "sms_attachment" -> "saved attachment ${a.optString("part_id")} of ${a.optString("message_id")}"
         "sms_queue" -> "checked queued texts"
+        "install_apk" -> "asked to install ${a.optString("path").substringAfterLast('/')}"
+        "grant" -> "${if (a.optBoolean("revoke")) "revoked" else "granted"} ${a.optString("permission").substringAfterLast('.')} ${if (a.optBoolean("revoke")) "from" else "to"} ${a.optString("package")}"
+        "force_stop" -> "force-stopped ${a.optString("package")}"
+        "settings_get" -> "read setting ${a.optString("namespace")}/${a.optString("key")}"
+        "shizuku_probe" -> "probed the carrier and voicemail provider"
         "sms_react" -> "reacted ${a.optString("emoji")} to a message"
         "contacts_search" -> "searched contacts"
         "files_list" -> "listed files in ${a.optString("path").ifEmpty { "the storage volumes" }}"
@@ -230,6 +243,9 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             "sms_send" to PhoneSettings.Group.SMS_SEND,
             "sms_attachment" to PhoneSettings.Group.ATTACH_READ,
             "sms_queue" to PhoneSettings.Group.SMS_READ,
+            "install_apk" to PhoneSettings.Group.INSTALL,
+            "grant" to PhoneSettings.Group.SHELL, "force_stop" to PhoneSettings.Group.SHELL,
+            "settings_get" to PhoneSettings.Group.SHELL, "shizuku_probe" to PhoneSettings.Group.SHELL,
             "sms_react" to PhoneSettings.Group.REACTIONS,
             "contacts_search" to PhoneSettings.Group.CONTACTS,
             "files_list" to PhoneSettings.Group.FILES, "files_stat" to PhoneSettings.Group.FILES, "files_hash" to PhoneSettings.Group.FILES,
