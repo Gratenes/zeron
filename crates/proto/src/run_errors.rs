@@ -31,6 +31,8 @@ const SIGNED_OUT: &[&str] = &[
     "authentication_error",
     "sign in to claude again",
     "sign in again",
+    // The engine's own words for a saved login that was refused.
+    "needs signing in",
     "log in again",
     "invalid api key",
     "invalid x-api-key",
@@ -90,6 +92,7 @@ mod tests {
             "Invalid API key · Please run /login",
             "OAuth token has expired. Please obtain a new token or refresh your existing token.",
             "Not logged in · Please run /login",
+            "chance@example.com needs signing in again (Settings → Providers), or pin this chat to another account",
         ] {
             assert_eq!(
                 provider_problem(signed_out),

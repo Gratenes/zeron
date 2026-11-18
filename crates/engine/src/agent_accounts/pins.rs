@@ -234,7 +234,7 @@ impl AgentAccounts {
                 }
                 if row.needs_signin {
                     let who = row.email.clone().unwrap_or_else(|| "That account".into());
-                    return Err(crate::EngineError::Other(format!("{who} needs signing in again (Settings → Accounts) before a chat can use it")));
+                    return Err(crate::EngineError::Other(format!("{who} needs signing in again (Settings → Providers) before a chat can use it")));
                 }
                 let now = now_ms();
                 let mut state = lock(&self.inner.pins);
@@ -332,7 +332,7 @@ impl AgentAccounts {
             HarnessId::ClaudeCode => {
                 let Some(slot) = self.read_slot(harness, account) else { return Ok(None) };
                 let who = slot.profile.email.clone();
-                let signed_out = || format!("{who} needs signing in again (Settings → Accounts), or pin this chat to another account");
+                let signed_out = || format!("{who} needs signing in again (Settings → Providers), or pin this chat to another account");
                 if login_dir_usable() {
                     // Refused before (a probe or a refresh, or a run on this
                     // login) and the login is unchanged since: starting a CLI
