@@ -212,6 +212,41 @@ struct RunHandle {
     /// server, so with no IPC port served ([`Inner::zeron_mcp`] returns
     /// `None`) the provider keeps its subagents.
     side_chats_only: bool,
+    /// When this run's entry was made, for the run report and the watchdog.
+    born: tokio::time::Instant,
+    /// The run's signs of life (any stream event, a wake): the watchdog's
+    /// evidence that a run which should be answering is not.
+    activity: Arc<Activity>,
+}
+
+/// A run's signs of life: when the last was, and how many there have been
+/// (a count, so two events in one millisecond are still two).
+#[derive(Default)]
+struct Activity {
+    at_ms: std::sync::atomic::AtomicI64,
+    count: std::sync::atomic::AtomicU64,
+}
+
+impl Activity {
+    fn new() -> Self {
+        let activity = Self::default();
+        activity
+            .at_ms
+            .store(mono_ms(), std::sync::atomic::Ordering::Release);
+        activity
+    }
+    fn touch(&self) {
+        self.at_ms
+            .store(mono_ms(), std::sync::atomic::Ordering::Release);
+        self.count
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    fn at_ms(&self) -> i64 {
+        self.at_ms.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn count(&self) -> u64 {
+        self.count.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 /// Which CLI binary a run of `harness` launches now: its real path, size and
@@ -348,7 +383,13 @@ struct Inner {
     warm: Mutex<HashMap<String, warm_start::WarmStart>>,
     /// Their leases (open, typed) when a test sets them.
     warm_leases: Mutex<Option<(std::time::Duration, std::time::Duration)>>,
+    /// Messages the watchdog has already sent again after a run took them and
+    /// never started a turn: the second time ends the turn with a note.
+    stall_retries: Mutex<std::collections::HashSet<String>>,
 }
+
+/// How long a send waits for room in a live run's mailbox.
+const MAILBOX_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long a runtime parked between turns with nothing pending keeps its
 /// agent process when its driver resumes sessions whole
@@ -461,7 +502,18 @@ pub type TurnListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 #[path = "warm_start.rs"]
 mod warm_start;
+mod watchdog;
+pub use watchdog::{RunInfo, RunReport, STALL_NOTE, StatusInfo};
 pub use warm_start::WarmOutcome;
+
+/// Milliseconds on the engine's monotonic clock (tokio's, so a paused test
+/// clock moves it): what run activity is stamped with. Immune to the wall
+/// clock stepping, as a laptop's does on wake.
+fn mono_ms() -> i64 {
+    static BASE: OnceLock<tokio::time::Instant> = OnceLock::new();
+    let base = *BASE.get_or_init(tokio::time::Instant::now);
+    i64::try_from(base.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -517,6 +569,7 @@ impl SessionsEngine {
                 plugins: OnceLock::new(),
                 warm: Mutex::new(HashMap::new()),
                 warm_leases: Mutex::new(None),
+                stall_retries: Mutex::new(std::collections::HashSet::new()),
             }),
         }
     }
@@ -1303,6 +1356,9 @@ impl SessionsEngine {
                 route
             };
             let user_id = message_id.clone().unwrap_or_else(new_id);
+            // A turn already running answers on its own time; only a parked
+            // run is expected to show life soon after a message.
+            let was_active = self.turn_in_flight(chat_id);
             let mut bootstrap = None;
             let same_runtime = route.is_some();
             let reconfigure = route == Some(true);
@@ -1329,7 +1385,37 @@ impl SessionsEngine {
                     // in place: replacing it killed its background work.
                     config: reconfigure.then(|| Box::new(request.clone())),
                 };
-                if let Ok(permit) = steer_tx.reserve().await {
+                // A mailbox nothing drains fills up and would hold this send
+                // forever: after the wait, the runtime is replaced like any
+                // whose mailbox is closed (below).
+                let reserved = tokio::time::timeout(MAILBOX_WAIT, steer_tx.reserve()).await;
+                if reserved.is_err() {
+                    tracing::warn!(
+                        chat = %chat_id,
+                        run_id = %run_id,
+                        "run's mailbox took no message within the wait; replacing the runtime"
+                    );
+                    // What it holds goes to the new runtime, not into the void
+                    // the replacement's teardown would make of it.
+                    let stuck = self
+                        .force_drop(chat_id, &run_id, "mailbox took no message")
+                        .await;
+                    redispatch_orphans(self, chat_id, harness_id, stuck).await;
+                    // This message goes behind them, to the runtime they
+                    // started (or a fresh one): never a second one beside it.
+                    return self
+                        .dispatch_with(
+                            chat_id,
+                            harness_id,
+                            request,
+                            Some(user_id),
+                            startup_retry,
+                            spawn_attempt,
+                            stops_seen,
+                        )
+                        .await;
+                }
+                if let Ok(Ok(permit)) = reserved {
                     // Commit the reserved slot atomically with the update
                     // marker. An accepted update releases the slot instead, and
                     // the prompt takes the fresh-run path behind the update.
@@ -1380,6 +1466,16 @@ impl SessionsEngine {
                     // "completed" flash on every remote send (2026-07-31).
                     self.set_status(chat_id, SessionStatus::Working, false);
                     self.inner.note_message(chat_id, &request.prompt);
+                    if !was_active && !idle {
+                        self.watch_turn_start(
+                            chat_id,
+                            &run_id,
+                            user_id.clone(),
+                            request.clone(),
+                            harness_id,
+                            true,
+                        );
+                    }
                     return Ok(run_id);
                 }
                 // The run died around the send. If its exit drain already
@@ -1583,6 +1679,8 @@ impl SessionsEngine {
             }
             return Ok(String::new());
         }
+        // A Cloud machine's setup runs before any sign of life: not watched.
+        let watch_fresh = !idle && credential.is_none();
         // A new turn: a Stop's mark belongs to the one before it.
         if !idle {
             self.inner.journal.clear_user_stop(chat_id);
@@ -1616,9 +1714,19 @@ impl SessionsEngine {
                 credential,
                 binary,
                 side_chats_only,
+                born: tokio::time::Instant::now(),
+                activity: Arc::new(Activity::new()),
             },
         );
         drop(runs);
+        tracing::info!(
+            chat = %chat_id,
+            run_id = %run_id,
+            harness = ?harness_id,
+            idle,
+            resumed = request.resume.is_some(),
+            "run started"
+        );
         self.set_status(
             chat_id,
             if idle {
@@ -1653,6 +1761,7 @@ impl SessionsEngine {
                 )
             });
 
+        let watched = watch_fresh.then(|| (user_id.clone(), request.clone()));
         tokio::spawn(drive_run(
             self.inner.clone(),
             chat_id.to_string(),
@@ -1679,6 +1788,9 @@ impl SessionsEngine {
             side_chats_only,
             title,
         ));
+        if let Some((message_id, request)) = watched {
+            self.watch_turn_start(chat_id, &run_id, message_id, request, harness_id, false);
+        }
         Ok(run_id)
     }
 
@@ -3649,9 +3761,29 @@ impl Inner {
     }
 
     fn remove_run(&self, chat_id: &str, run_id: &str) {
-        let mut runs = lock(&self.runs);
-        if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
-            runs.remove(chat_id);
+        self.remove_run_because(chat_id, run_id, "ended");
+    }
+
+    /// [`Self::remove_run`] with the reason the entry went, logged with the
+    /// run's age so a chat's runs can be followed in the engine log.
+    fn remove_run_because(&self, chat_id: &str, run_id: &str, reason: &str) {
+        let removed = {
+            let mut runs = lock(&self.runs);
+            if runs.get(chat_id).is_some_and(|h| h.run_id == run_id) {
+                runs.remove(chat_id)
+            } else {
+                None
+            }
+        };
+        if let Some(run) = removed {
+            tracing::info!(
+                chat = %chat_id,
+                run_id = %run_id,
+                harness = ?run.runtime_config.harness_id,
+                age_s = run.born.elapsed().as_secs(),
+                reason,
+                "run dropped"
+            );
         }
     }
 }
@@ -4780,6 +4912,12 @@ async fn drive_run(
     let publish_open = |open: &std::collections::HashSet<String>| {
         open_count.store(open.len(), std::sync::atomic::Ordering::Release);
     };
+    // The run's sign of life, read by the watchdog ([`RunHandle::activity`]).
+    let activity = lock(&inner.runs)
+        .get(&chat_id)
+        .filter(|h| h.run_id == run_id)
+        .map(|h| h.activity.clone())
+        .unwrap_or_default();
     let mut seen_images = std::collections::HashSet::new();
     for entry in doc_ref.read_entries().unwrap_or_default() {
         for part in entry.parts {
@@ -5157,7 +5295,7 @@ async fn drive_run(
                     session_id: None,
                 },
             );
-            inner.remove_run(&chat_id, &run_id);
+            inner.remove_run_because(&chat_id, &run_id, "start failed");
             inner.set_status(&chat_id, SessionStatus::Errored, false);
             return;
         }
@@ -5412,6 +5550,7 @@ async fn drive_run(
                     self_scheduled.woke(tokio::time::Instant::now());
                     if idle_since.is_some() {
                         tracing::info!(chat = %chat_id, "parked session resumed by a wake turn");
+                        activity.touch();
                         idle_since = None;
                         wait = None;
                         self_continued_turn = true;
@@ -5914,6 +6053,7 @@ async fn drive_run(
         // push the quiesce watchdog's window out.
         inner.touch_session(&chat_id);
         last_stream_activity = tokio::time::Instant::now();
+        activity.touch();
         // The engine's input bridge is the sole authority on input requests:
         // it mints the id and parks the resolver BEFORE emitting the event,
         // so a legitimate id is always pending here. A harness emitting its
@@ -6618,7 +6758,14 @@ async fn drive_run(
         .filter(|h| h.run_id == run_id)
         .map(|h| std::mem::take(&mut *lock(&h.routed_steers)).into())
         .unwrap_or_default();
-    inner.remove_run(&chat_id, &run_id);
+    inner.remove_run_because(
+        &chat_id,
+        &run_id,
+        &format!(
+            "run task exited: status {final_status:?}, {}",
+            if interrupted { "interrupted" } else { "not interrupted" }
+        ),
+    );
     inner.set_status_with_completion(
         &chat_id,
         final_status,
@@ -6638,52 +6785,76 @@ async fn drive_run(
     } else {
         orphans
     };
-    if !orphans.is_empty() {
-        // The dying run accepted these into its mailbox but never confirmed a
-        // Steered boundary (idle-reaper race, a mid-turn error discarding
-        // queued boundary steers, a parked child death). Their user entries
-        // are already in the transcript — a message that shows as sent must
-        // never silently not run. Re-dispatch each as a fresh turn
-        // (write_user_message dedupes by id; resume is engine-injected).
-        let engine = SessionsEngine {
-            inner: inner.clone(),
+    spawn_orphan_redispatch(&inner, &chat_id, harness_id, orphans);
+}
+
+/// Re-dispatch steers a dead run accepted but never confirmed, each as a
+/// fresh turn. The run task does it as it exits; the watchdog does it for a
+/// run it had to drop.
+fn spawn_orphan_redispatch(
+    inner: &Arc<Inner>,
+    chat_id: &str,
+    harness_id: HarnessId,
+    orphans: Vec<RoutedSteer>,
+) {
+    if orphans.is_empty() {
+        return;
+    }
+    // The dying run accepted these into its mailbox but never confirmed a
+    // Steered boundary (idle-reaper race, a mid-turn error discarding
+    // queued boundary steers, a parked child death). Their user entries
+    // are already in the transcript — a message that shows as sent must
+    // never silently not run. Re-dispatch each as a fresh turn
+    // (write_user_message dedupes by id; resume is engine-injected).
+    let engine = SessionsEngine {
+        inner: inner.clone(),
+    };
+    let chat = chat_id.to_owned();
+    tokio::spawn(async move {
+        redispatch_orphans(&engine, &chat, harness_id, orphans).await;
+    });
+}
+
+/// [`spawn_orphan_redispatch`], in order, until every message has been handed
+/// to a run (the first starts one, the rest join it).
+async fn redispatch_orphans(
+    engine: &SessionsEngine,
+    chat: &str,
+    harness_id: HarnessId,
+    orphans: Vec<RoutedSteer>,
+) {
+    for steer in orphans {
+        let Some(mut request) = steer
+            .request
+            .map(|request| *request)
+            .or_else(|| engine.last_request(chat))
+        else {
+            tracing::warn!(chat = %chat, "orphaned steer lost: no run config to re-dispatch");
+            break;
         };
-        let chat = chat_id.clone();
-        tokio::spawn(async move {
-            for steer in orphans {
-                let Some(mut request) = steer
-                    .request
-                    .map(|request| *request)
-                    .or_else(|| engine.last_request(&chat))
-                else {
-                    tracing::warn!(chat = %chat, "orphaned steer lost: no run config to re-dispatch");
-                    break;
-                };
-                request.prompt = steer.prompt.clone();
-                request.resume = None;
-                tracing::info!(chat = %chat, "re-dispatching steer orphaned by a dying run");
-                let Some(host) = engine.inner.doc_host() else {
-                    tracing::warn!(chat = %chat, "orphaned steer lost: doc host unavailable");
-                    break;
-                };
-                if let Err(err) = host
-                    .dispatch_with_source_context(
-                        &engine,
-                        &chat,
-                        harness_id,
-                        request,
-                        Some(steer.message_id.clone()),
-                    )
-                    .await
-                {
-                    tracing::warn!(chat = %chat, error = %err, "orphaned steer re-dispatch failed");
-                    engine
-                        .inner
-                        .set_status(&chat, SessionStatus::Errored, false);
-                    break;
-                }
-            }
-        });
+        request.prompt = steer.prompt.clone();
+        request.resume = None;
+        tracing::info!(chat = %chat, "re-dispatching steer orphaned by a dying run");
+        let Some(host) = engine.inner.doc_host() else {
+            tracing::warn!(chat = %chat, "orphaned steer lost: doc host unavailable");
+            break;
+        };
+        if let Err(err) = host
+            .dispatch_with_source_context(
+                engine,
+                chat,
+                harness_id,
+                request,
+                Some(steer.message_id.clone()),
+            )
+            .await
+        {
+            tracing::warn!(chat = %chat, error = %err, "orphaned steer re-dispatch failed");
+            engine
+                .inner
+                .set_status(chat, SessionStatus::Errored, false);
+            break;
+        }
     }
 }
 
