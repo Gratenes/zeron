@@ -92,6 +92,17 @@ do
 		note(`switch_on:{key}:{id}:{account}`)
 		return { after = function(_: any, done: (any) -> ()) done(nil) end }
 	end
+	-- (A chat's own account: its pin asked after, and the choice made.)
+	stub_agents.watch_chat = function(key: string, chat: string, harness: string)
+		note(`watch_chat:{key}:{chat}:{harness}`)
+	end
+	stub_agents.refresh_chat = function(key: string, chat: string, harness: string)
+		note(`refresh_chat:{key}:{chat}:{harness}`)
+	end
+	stub_agents.pin_chat = function(key: string, chat: string, harness: string, account: string?): any
+		note(`pin_chat:{key}:{chat}:{harness}:{account or ""}`)
+		return { after = function(_: any, done: (any) -> ()) done(nil) end }
+	end
 	-- (An Account row adding one of its provider's accounts.)
 	stub_agents.target = function(device: string?)
 		note(`target:{device or ""}`)

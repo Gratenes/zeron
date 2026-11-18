@@ -208,6 +208,29 @@ function M.refresh_device(key: string)
 	pcall(ui.invoke, "agents.refresh_device", key)
 end
 
+-- Each chat's account pin on each device, as the engine said it: `{ [device]
+-- = { ["<chat>:<harness>"] = { account?, by_user } } }` (no account:
+-- automatic). One missing: not asked yet, or an engine that doesn't know
+-- pins, so the composer chooses for the device.
+M.chat_pins = ui.shared("agents.chat_pins", {} :: { [string]: { [string]: { account: string?, by_user: boolean } } })
+
+-- A chat's pin, on first sight (a composer in it).
+function M.watch_chat(key: string, chat: string, harness: string)
+	pcall(ui.invoke, "agents.watch_chat", { device = key, chat = chat, harness = harness })
+end
+
+-- Its pin again (the panel opening).
+function M.refresh_chat(key: string, chat: string, harness: string)
+	pcall(ui.invoke, "agents.refresh_chat", { device = key, chat = chat, harness = harness })
+end
+
+-- That chat runs on that account from its next turn (the person's choice,
+-- which plugins leave be), or with none, automatic: a promise, rejecting
+-- with why not (the engine's words, or "offline").
+function M.pin_chat(key: string, chat: string, harness: string, account: string?): any
+	return ui.call("agents.pin_chat", { device = key, chat = chat, harness = harness, account = account })
+end
+
 -- That account in use on the device: a promise, rejecting with why not.
 function M.switch_on(key: string, id: string, account: string): any
 	return ui.call("agents.switch_on", { device = key, id = id, account = account })

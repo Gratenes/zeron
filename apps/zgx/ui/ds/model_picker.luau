@@ -66,7 +66,12 @@ export type Account = {
 	detail: string,
 	active: boolean,
 	can_switch: boolean,
+	-- Its login needs signing in again: no chat can use it until it is.
+	needs_signin: boolean?,
 }
+-- Where a chat chooses its own account: the one it is on (none: automatic),
+-- and whether the person chose it.
+export type ChatAccount = { account: string?, by_user: boolean }
 -- The accounts a model runs on, where its agent keeps a login per model
 -- provider (Pi, OpenCode, Hermes): who they're with ("ChatGPT"), and, where
 -- Zeron can sign in to it, what adds one and what that does.
@@ -83,6 +88,15 @@ export type Props = {
 	account_group: ((harness: string, provider: string?) -> AccountGroup?)?,
 	on_account: ((harness: string, id: string) -> ())?,
 	on_accounts_open: (() -> ())?,
+	-- For an agent whose chats each run on an account of their own: the
+	-- chat's, nil where the picker chooses for the device instead (`on_account`).
+	-- Then the row is "This chat": Automatic, and each account that can run a
+	-- chat (one that needs signing in again is shown, and not offered);
+	-- `on_chat_account` takes the choice (no id: automatic). `on_sign_in`:
+	-- the page where a signed-out account signs in again.
+	chat_account: ((harness: string) -> ChatAccount?)?,
+	on_chat_account: ((harness: string, id: string?) -> ())?,
+	on_sign_in: ((harness: string) -> ())?,
 	model: State<string?>,
 	effort: State<string?>,
 	fast: State<boolean>?,
@@ -543,7 +557,17 @@ return ui.component(function(props: Props): Node
 		local g = group()
 		return g ~= nil and g.add ~= nil
 	end
+	-- The chosen model's agent's chat choosing its own account (nil: the
+	-- picker chooses for the device).
+	local AUTO = "__automatic__"
+	local function chat_pin(): ChatAccount?
+		local m = current()
+		return if m and props.chat_account then props.chat_account(m.harness) else nil
+	end
 	local function account_label(): string
+		if chat_pin() then
+			return locale.s("ds.model_picker.this_chat")
+		end
 		local g = group()
 		return if g then locale.s("ds.model_picker.account_of", { name = g.name }) else locale.s("ds.model_picker.account")
 	end
@@ -556,6 +580,11 @@ return ui.component(function(props: Props): Node
 		return nil
 	end
 	local function in_use(): Account?
+		-- (A chat on an account of its own: that one, or none: automatic.)
+		local pin = chat_pin()
+		if pin then
+			return if pin.account then account_by_id(pin.account) else nil
+		end
 		for _, a in accounts() do
 			if a.active then
 				return a
@@ -576,21 +605,32 @@ return ui.component(function(props: Props): Node
 	local function account_row(): Node
 		local value = ui.use_state(nil :: string?)
 		local function sync()
+			local pin = chat_pin()
 			local a = in_use()
-			value:set(if a then a.id else nil)
+			value:set(if a then a.id elseif pin then AUTO else nil)
 		end
 		ui.effect(sync)
 		return Dropdown {
 			value = value,
 			items = function(): { Dropdown.Item }
 				local out: { Dropdown.Item } = {}
+				local per_chat = chat_pin() ~= nil
+				if per_chat then
+					table.insert(out, {
+						value = AUTO,
+						label = locale.s("ds.model_picker.automatic"),
+						description = locale.s("ds.model_picker.automatic_hint"),
+					})
+				end
 				for _, a in accounts() do
 					local words = { a.plan or "", a.detail }
 					table.insert(out, {
 						value = a.id,
 						label = a.email,
 						private = true,
-						disabled = not a.active and not a.can_switch,
+						-- (A chat's choice leaves out a login that needs signing
+						-- in again; the device's, one that can't be switched to.)
+						disabled = if per_chat then a.needs_signin == true else not a.active and not a.can_switch,
 						description = if words[1] ~= "" and words[2] ~= ""
 							then `{words[1]} · {words[2]}`
 							else words[1] .. words[2],
@@ -606,6 +646,31 @@ return ui.component(function(props: Props): Node
 			-- (Another of the model's provider's accounts, where Zeron can
 			-- sign in to it: "Add ChatGPT account".)
 			actions = {
+				-- A signed-out account, in a chat's choice: signed in again
+				-- where Settings → Providers has it.
+				{
+					label = function(): string
+						return locale.s("ds.model_picker.sign_in_again")
+					end,
+					icon = "user-rounded",
+					shown = function(): boolean
+						if props.on_sign_in == nil or chat_pin() == nil then
+							return false
+						end
+						for _, a in accounts() do
+							if a.needs_signin then
+								return true
+							end
+						end
+						return false
+					end,
+					on_click = function()
+						local m = current()
+						if m and props.on_sign_in then
+							props.on_sign_in(m.harness)
+						end
+					end,
+				},
 				{
 					label = function(): string
 						local g = group()
@@ -631,6 +696,11 @@ return ui.component(function(props: Props): Node
 				end, ui.div {
 					self = "center",
 					shrink = 0,
+					-- (A login that died: its last figures, quiet.)
+					opacity = function(): number
+						local a = account_by_id(item.value)
+						return if a and a.needs_signin then 0.45 else 1
+					end,
 					context_usage.Ring {
 						ink = context_usage.usage_ink,
 						fraction = function(): number
@@ -641,7 +711,13 @@ return ui.component(function(props: Props): Node
 			end,
 			on_choose = function(id: string)
 				local m = current()
-				if m and props.on_account then
+				if not m then
+					return
+				end
+				-- A chat's own choice (automatic: no id), else the device's.
+				if chat_pin() and props.on_chat_account then
+					props.on_chat_account(m.harness, if id == AUTO then nil else id)
+				elseif props.on_account then
 					props.on_account(m.harness, id)
 				end
 			end,
@@ -657,7 +733,14 @@ return ui.component(function(props: Props): Node
 					-- (None in use: none signed in to the model's provider.)
 					ui.show(function(): boolean
 						return in_use() == nil
-					end, ui.text { locale.t("ds.model_picker.no_account"), shrink = 0, text_size = "$font.size.md", color = "$text.tertiary" }),
+					end, ui.text {
+						function(): string
+							return if chat_pin() then locale.s("ds.model_picker.automatic") else locale.s("ds.model_picker.no_account")
+						end,
+						shrink = 0,
+						text_size = "$font.size.md",
+						color = "$text.tertiary",
+					}),
 					PrivateText {
 						function(): string
 							local a = in_use()

@@ -66,7 +66,19 @@
 //!                                  mismatch, signed_out, missing, busy,
 //!                                  cancelled or failed
 //!   agents.dismiss_reset(account) (an action) forgets its last word
+//!   agents.watch_chat({ device, chat, harness }) a chat's account pin, on first
+//!                                  sight (`GetChatAccountPin`): lands in `agents.chat_pins`
+//!   agents.refresh_chat({ device, chat, harness }) (an action) it again
+//!   agents.pin_chat({ device, chat, harness, account? }) that chat runs on that
+//!                                  account (the person's choice, which plugins
+//!                                  leave be), or with none, automatic
+//!                                  (`PinChatAccount`); rejects with the
+//!                                  engine's words or offline
 //! Any can also reject with offline.
+//!
+//! `agents.chat_pins`: `{ [device] = { ["<chat>:<harness>"] = { account?,
+//! by_user } } }`, each a pin the engine said (none there: not asked, or an
+//! engine that doesn't know pins, so the composer chooses for the device).
 //!
 //! A Codex account also carries what it has banked (`banked`, a count, and
 //! `resets`, soonest to expire first: `{ id, title, scope?, expires? }`) and
@@ -175,6 +187,12 @@ struct Agents {
     /// (`agents.on_device`).
     device_accounts: RefCell<BTreeMap<String, DeviceAccounts>>,
     device_shared: RefCell<Vec<Shared>>,
+    /// Each chat's account pin as the engine last said it, by device id
+    /// ("": this Mac's), then `chat:harness` (`agents.chat_pins`), and which
+    /// a composer has asked after.
+    chat_pins: RefCell<BTreeMap<String, BTreeMap<String, ChatPin>>>,
+    chat_pins_asked: RefCell<std::collections::HashSet<(String, String)>>,
+    chat_pins_shared: RefCell<Vec<Shared>>,
     installing: RefCell<Vec<String>>,
     logins: RefCell<HashMap<String, Login>>,
     /// Registry agents' sign-ins, by harness, once they've said.
@@ -298,6 +316,7 @@ pub fn install(host: &ScriptHost) {
     let agents = AGENTS.with(Rc::clone);
     agents.shared.borrow_mut().push(host.shared("agents", agents.value()));
     agents.device_shared.borrow_mut().push(host.shared("agents.on_device", agents.device_value()));
+    agents.chat_pins_shared.borrow_mut().push(host.shared("agents.chat_pins", agents.chat_pins_value()));
     // (What never changes: each per-provider agent's sign-ins.)
     LOGINS_SHARED.with(|shared| shared.borrow_mut().push(host.shared("agents.logins", logins_value())));
     ICONS_SHARED.with(|shared| shared.borrow_mut().push(host.shared("agent_icons", icons_value())));
@@ -366,6 +385,23 @@ pub fn install(host: &ScriptHost) {
     host.action("agents.watch_device", move |key| a.watch_device(text(&key)));
     let a = agents.clone();
     host.action("agents.refresh_device", move |key| a.load_device(text(&key), true));
+    let a = agents.clone();
+    host.action("agents.watch_chat", move |args| {
+        let (key, chat, harness) = chat_args(&args);
+        a.watch_chat(key, chat, harness);
+    });
+    let a = agents.clone();
+    host.action("agents.refresh_chat", move |args| {
+        let (key, chat, harness) = chat_args(&args);
+        a.load_chat(key, chat, harness);
+    });
+    let a = agents.clone();
+    host.async_action("agents.pin_chat", move |args| {
+        let a = a.clone();
+        let (key, chat, harness) = chat_args(&args);
+        let account = args.field("account").map(text).filter(|a| !a.is_empty());
+        async move { a.pin_chat(key, chat, harness, account).await.map_err(String::from) }
+    });
     let a = agents.clone();
     host.async_action("agents.switch_on", move |args| {
         let a = a.clone();
@@ -528,6 +564,15 @@ pub fn install(host: &ScriptHost) {
             a.publish();
         }
     });
+}
+
+/// `{ device, chat, harness }`, as a chat's account pin is asked after.
+fn chat_args(args: &Value) -> (String, String, String) {
+    (
+        args.field("device").map(text).unwrap_or_default(),
+        args.field("chat").map(text).unwrap_or_default(),
+        args.field("harness").map(text).unwrap_or_default(),
+    )
 }
 
 fn harness_and_account(args: &Value) -> (String, String) {
@@ -704,6 +749,9 @@ impl Agents {
             target: RefCell::default(),
             device_accounts: RefCell::default(),
             device_shared: RefCell::default(),
+            chat_pins: RefCell::default(),
+            chat_pins_asked: RefCell::default(),
+            chat_pins_shared: RefCell::default(),
             installing: RefCell::default(),
             logins: RefCell::default(),
             sign_ins: RefCell::default(),
@@ -1203,6 +1251,88 @@ impl Agents {
                     device.accounts = before;
                 }
                 self.publish_devices();
+                Err(fail(&error))
+            }
+        }
+    }
+
+    fn chat_pins_value(&self) -> Value {
+        chat_pins_value(&self.chat_pins.borrow())
+    }
+
+    fn publish_chat_pins(&self) {
+        let value = self.chat_pins_value();
+        for shared in self.chat_pins_shared.borrow().iter() {
+            shared.set(value.clone());
+        }
+    }
+
+    fn keep_chat_pin(&self, key: &str, chat: &str, harness: &str, pin: Option<ChatPin>) {
+        {
+            let mut pins = self.chat_pins.borrow_mut();
+            let device = pins.entry(key.to_owned()).or_default();
+            match pin {
+                Some(pin) => {
+                    device.insert(chat_pin_key(chat, harness), pin);
+                }
+                None => {
+                    device.remove(&chat_pin_key(chat, harness));
+                }
+            }
+        }
+        self.publish_chat_pins();
+    }
+
+    /// A composer on `key`'s device in `chat`: its account pin, on first sight.
+    fn watch_chat(self: &Rc<Self>, key: String, chat: String, harness: String) {
+        if chat.is_empty() || harness.is_empty() {
+            return;
+        }
+        let first = self.chat_pins_asked.borrow_mut().insert((key.clone(), chat_pin_key(&chat, &harness)));
+        if first {
+            self.load_chat(key, chat, harness);
+        }
+    }
+
+    /// `chat`'s account pin again. An engine that doesn't know the question
+    /// (an older one) leaves none: the composer then chooses for the device.
+    fn load_chat(self: &Rc<Self>, key: String, chat: String, harness: String) {
+        if chat.is_empty() || harness.is_empty() {
+            return;
+        }
+        let me = self.clone();
+        engine::get().spawn(async move {
+            let target = (!key.is_empty()).then_some(key.as_str());
+            let params = addressed_to(target, json!({ "chatId": chat, "harness": harness }));
+            if let Ok(reply) = engine::get().call("GetChatAccountPin", params).await {
+                me.keep_chat_pin(&key, &chat, &harness, Some(ChatPin::from_reply(&reply)));
+            }
+        });
+    }
+
+    /// `chat` runs on `account` from its next turn (the person's choice), or
+    /// with none, automatic: its row at once, the engine's reply replacing
+    /// it, a refusal restoring it.
+    async fn pin_chat(
+        self: Rc<Self>,
+        key: String,
+        chat: String,
+        harness: String,
+        account: Option<String>,
+    ) -> Result<Value, &'static str> {
+        let before = self.chat_pins.borrow().get(&key).and_then(|d| d.get(&chat_pin_key(&chat, &harness)).cloned());
+        let chosen = ChatPin { by_user: account.is_some(), account: account.clone() };
+        self.keep_chat_pin(&key, &chat, &harness, Some(chosen));
+        let target = (!key.is_empty()).then_some(key.as_str());
+        let params = addressed_to(target, json!({ "chatId": chat, "harness": harness, "accountId": account }));
+        match engine::get().call("PinChatAccount", params).await {
+            Ok(reply) => {
+                self.keep_chat_pin(&key, &chat, &harness, Some(ChatPin::from_reply(&reply)));
+                Ok(Value::Nil)
+            }
+            Err(error) => {
+                eprintln!("zeron-zgx: agents: PinChatAccount failed: {error}");
+                self.keep_chat_pin(&key, &chat, &harness, before);
                 Err(fail(&error))
             }
         }
@@ -1811,6 +1941,46 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
     Value::record(fields)
 }
 
+/// The account one chat runs on, as the engine said (`GetChatAccountPin`,
+/// `PinChatAccount`): none is automatic.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ChatPin {
+    account: Option<String>,
+    /// The person chose it (plugins leave it be).
+    by_user: bool,
+}
+
+impl ChatPin {
+    /// From a `ChatAccountPin`: `{ account?, byUser? }`.
+    fn from_reply(reply: &Json) -> Self {
+        Self {
+            account: reply["account"].as_str().filter(|a| !a.is_empty()).map(str::to_owned),
+            by_user: reply["byUser"].as_bool().unwrap_or(false),
+        }
+    }
+}
+
+/// A chat's pin's key among a device's: `chat:harness`.
+fn chat_pin_key(chat: &str, harness: &str) -> String {
+    format!("{chat}:{harness}")
+}
+
+/// `agents.chat_pins`: `{ [device] = { ["chat:harness"] = { account?, by_user } } }`.
+fn chat_pins_value(pins: &BTreeMap<String, BTreeMap<String, ChatPin>>) -> Value {
+    Value::record(pins.iter().map(|(device, chats)| {
+        (
+            device.as_str(),
+            Value::record(chats.iter().map(|(key, pin)| {
+                let mut fields = vec![("by_user", Value::Bool(pin.by_user))];
+                if let Some(account) = &pin.account {
+                    fields.push(("account", Value::from(account.as_str())));
+                }
+                (key.as_str(), Value::record(fields))
+            })),
+        )
+    }))
+}
+
 /// One device's accounts, for its composers.
 #[derive(Default)]
 struct DeviceAccounts {
@@ -1909,6 +2079,11 @@ fn device_accounts_value(accounts: &[Json]) -> Value {
         }
         if let Some(error) = account["usageError"].as_str() {
             fields.push(("error", Value::from(error)));
+        }
+        // A login whose refresh was refused: no chat can use it until it is
+        // signed in again (only said when so).
+        if account["needsSignin"].as_bool() == Some(true) {
+            fields.push(("needs_signin", Value::Bool(true)));
         }
         by.entry(harness).or_default().push(Value::record(fields));
     }
@@ -2061,6 +2236,49 @@ mod tests {
         let hermes = value.field("hermes").expect("hermes").list().to_vec();
         assert!(!hermes[0].field("can_switch").is_some_and(Value::truthy));
         assert_eq!(hermes[0].field("error").map(text).as_deref(), Some("no"));
+    }
+
+    #[test]
+    fn a_login_that_needs_signing_in_says_so_on_the_composers_row_and_only_then() {
+        let value = device_accounts_value(&[
+            json!({ "id": "a", "harness": "claude-code", "email": "a@example.test", "active": true, "switchable": true }),
+            json!({ "id": "b", "harness": "claude-code", "email": "b@example.test", "active": false, "switchable": true,
+                "needsSignin": true, "usageError": "Signed out — sign in again" }),
+            json!({ "id": "c", "harness": "claude-code", "email": "c@example.test", "active": false, "switchable": true,
+                "needsSignin": false }),
+        ]);
+        let rows = value.field("claude-code").expect("claude").list().to_vec();
+        assert!(rows[0].field("needs_signin").is_none());
+        assert!(rows[1].field("needs_signin").is_some_and(Value::truthy));
+        assert!(rows[2].field("needs_signin").is_none());
+    }
+
+    #[test]
+    fn a_chats_account_pin_reads_as_the_engine_said_it() {
+        let pinned = ChatPin::from_reply(&json!({ "account": "claude-code:a", "byUser": true }));
+        assert_eq!(pinned, ChatPin { account: Some("claude-code:a".into()), by_user: true });
+        // Automatic: no account (an empty one is none too).
+        assert_eq!(ChatPin::from_reply(&json!({})), ChatPin::default());
+        assert_eq!(ChatPin::from_reply(&json!({ "account": "" })), ChatPin::default());
+        // A plugin's pin isn't the person's.
+        assert!(!ChatPin::from_reply(&json!({ "account": "x" })).by_user);
+    }
+
+    #[test]
+    fn the_pins_scripts_see_are_keyed_by_device_then_chat_and_agent() {
+        let mut pins: BTreeMap<String, BTreeMap<String, ChatPin>> = BTreeMap::new();
+        pins.entry(String::new()).or_default().insert(
+            chat_pin_key("c1", "claude-code"),
+            ChatPin { account: Some("a".into()), by_user: true },
+        );
+        pins.entry("box".into()).or_default().insert(chat_pin_key("c2", "claude-code"), ChatPin::default());
+        let value = chat_pins_value(&pins);
+        let here = value.field("").expect("this device's").field("c1:claude-code").expect("c1's pin").clone();
+        assert_eq!(here.field("account").map(text).as_deref(), Some("a"));
+        assert!(here.field("by_user").is_some_and(Value::truthy));
+        let auto = value.field("box").expect("box's").field("c2:claude-code").expect("c2's pin").clone();
+        assert!(auto.field("account").is_none());
+        assert!(!auto.field("by_user").is_some_and(Value::truthy));
     }
 
     #[test]

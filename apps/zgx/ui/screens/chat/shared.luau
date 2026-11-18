@@ -1158,6 +1158,10 @@ end
 -- An account's windows in words, or why it has none to show: one not in use
 -- says what's wrong with it, as a signed-out one's old figures would mislead.
 local function account_detail(account: any): string
+	if account.needs_signin then
+		-- (Its last figures are from before it died: not said.)
+		return account.error or locale.s("ds.model_picker.signed_out")
+	end
 	if account.error and (not account.active or #account.windows == 0) then
 		return account.error
 	end
@@ -1188,9 +1192,29 @@ end
 -- is: asked for as it's first seen. An agent that keeps a login per model
 -- provider shows only the model's provider's: switching its ChatGPT
 -- account never touches its Claude one.
-function M.model_accounts(device: () -> string?): any
+function M.model_accounts(device: () -> string?, chat: (() -> string?)?): any
 	ui.effect(function()
 		agents.watch_device(account_key(device()))
+	end)
+	-- The agents whose chats each run on an account of their own (the
+	-- engine's pins), and where: Cloud's accounts are the vault's, which a
+	-- chat isn't pinned among.
+	local PINNABLE = { "claude-code", "muse" }
+	local function pin_scope(): { key: string, id: string }?
+		local id = if chat then chat() else nil
+		local key = account_key(device())
+		if id == nil or id == "" or key == "cloud" then
+			return nil
+		end
+		return { key = key, id = id }
+	end
+	ui.effect(function()
+		local scope = pin_scope()
+		if scope then
+			for _, harness in PINNABLE do
+				agents.watch_chat(scope.key, scope.id, harness)
+			end
+		end
 	end)
 	local function listed(harness: string): { any }?
 		local on = agents.on_device:get()[account_key(device())]
@@ -1221,6 +1245,7 @@ function M.model_accounts(device: () -> string?): any
 					can_switch = a.can_switch,
 					used = account_used(a, harness, model),
 					detail = account_detail(a),
+					needs_signin = a.needs_signin == true,
 				}
 			end
 			return out
@@ -1275,6 +1300,44 @@ function M.model_accounts(device: () -> string?): any
 		end,
 		on_accounts_open = function()
 			agents.refresh_device(account_key(device()))
+			local scope = pin_scope()
+			if scope then
+				for _, harness in PINNABLE do
+					agents.refresh_chat(scope.key, scope.id, harness)
+				end
+			end
+		end,
+		-- Where the chat chooses its own account (an agent with pins, a chat
+		-- on a computer that has answered for it): the account it is on, and
+		-- whether the person chose it; nil: the picker chooses for the
+		-- device, as ever. No account: automatic.
+		chat_account = function(harness: string): { account: string?, by_user: boolean }?
+			local scope = pin_scope()
+			if not scope or not table.find(PINNABLE, harness) then
+				return nil
+			end
+			local pin = (agents.chat_pins:get()[scope.key] or {})[`{scope.id}:{harness}`]
+			if not pin then
+				return nil
+			end
+			return { account = pin.account, by_user = pin.by_user == true }
+		end,
+		-- That account for this chat (nil: automatic).
+		on_chat_account = function(harness: string, account: string?)
+			local scope = pin_scope()
+			if not scope then
+				return
+			end
+			agents.pin_chat(scope.key, scope.id, harness, account):after(function() end, function()
+				toast.show { title = locale.s("chat.composer.chat_account_not_set"), tone = "warning" }
+			end)
+		end,
+		-- A signed-out account: Settings → Providers, on the composer's
+		-- device, where it signs in again.
+		on_sign_in = function(_: string)
+			local key = account_key(device())
+			agents.target(if key == "" then nil else key)
+			route.settings("providers")
 		end,
 	}
 end

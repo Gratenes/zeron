@@ -167,6 +167,9 @@ export type Props = {
 	account_group: ((harness: string, provider: string?) -> ModelPicker.AccountGroup?)?,
 	on_account: ((harness: string, id: string) -> ())?,
 	on_accounts_open: (() -> ())?,
+	chat_account: ((harness: string) -> ModelPicker.ChatAccount?)?,
+	on_chat_account: ((harness: string, id: string?) -> ())?,
+	on_sign_in: ((harness: string) -> ())?,
 	-- How much of the model's context is used (0 to 1): a ring beside its
 	-- chip.
 	context: (number | () -> number)?,
@@ -1553,6 +1556,9 @@ return ui.component(function(props: Props): Node
 			account_group = props.account_group,
 			on_account = props.on_account,
 			on_accounts_open = props.on_accounts_open,
+			chat_account = props.chat_account,
+			on_chat_account = props.on_chat_account,
+			on_sign_in = props.on_sign_in,
 			placement = { side = at, align = "end", offset = 6 },
 			open_with = props.open_model,
 			showing = props.model_open,
