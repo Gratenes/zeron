@@ -2935,6 +2935,7 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_COMMIT_CREDIT
             | methods::SET_COMMIT_CREDIT
             | methods::GET_NATIVE_SUBAGENTS
+            | methods::LIST_RUNS
             | methods::SET_NATIVE_SUBAGENTS
             | methods::SET_HARNESS_ENABLED
             | methods::LIST_MODELS
@@ -3851,6 +3852,7 @@ impl RpcService for EngineRpc {
             methods::GET_NATIVE_SUBAGENTS => {
                 RpcReply::value(&self.registry.native_subagent_settings())
             }
+            methods::LIST_RUNS => RpcReply::value(&self.sessions.run_report()),
             methods::SET_NATIVE_SUBAGENTS => {
                 let p: SetHarnessEnabledParams = parse_params(params)?;
                 self.registry

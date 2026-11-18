@@ -546,6 +546,24 @@ mod proc_table {
 /// as the agent starts it (`McpServer::command`/`args`).
 pub type KnownServer = (String, Vec<String>);
 
+/// Whether process `pid` still runs (a zombie does not): `Some(false)` is
+/// proof it has gone, `None` that this platform can't tell.
+pub fn process_alive(pid: u32) -> Option<bool> {
+    #[cfg(unix)]
+    {
+        let pid = i32::try_from(pid).ok()?;
+        // SAFETY: signal 0 delivers nothing; it only checks the pid exists.
+        let reached = unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        Some(reached && !proc_table::zombie(pid))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// The live descendants of `root` (an agent CLI) that aren't MCP servers its
 /// run was configured with (`known`, and whatever those start), each as
 /// `"<pid> <name>"`: the process's name only, never its arguments (they

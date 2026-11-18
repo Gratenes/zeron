@@ -85,6 +85,9 @@ pub mod methods {
     /// (`{switchable, off}`; set with `{harness, enabled}`).
     pub const GET_NATIVE_SUBAGENTS: &str = "GetNativeSubagents";
     pub const SET_NATIVE_SUBAGENTS: &str = "SetNativeSubagents";
+    /// The engine's run table with each run's age, silence and agent process,
+    /// and the chats that look busy (`{runs, statuses, workingWithoutRun}`).
+    pub const LIST_RUNS: &str = "ListRuns";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
