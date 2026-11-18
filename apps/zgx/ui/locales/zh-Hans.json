@@ -915,7 +915,12 @@
       "not_found_hint": "{where}中没有与“{q}”匹配的内容",
       "where_starred": "已加星标的模型",
       "where_models": "模型",
-      "add_key": "添加 {name} API 密钥"
+      "add_key": "添加 {name} API 密钥",
+      "this_chat": "此会话",
+      "automatic": "自动",
+      "automatic_hint": "在你的账号之间分配",
+      "signed_out": "已退出登录——请重新登录",
+      "sign_in_again": "重新登录…"
     },
     "effort_slider": {
       "reasoning": "推理强度"
@@ -3049,7 +3054,8 @@
         "appshot": "应用截图",
         "image": "图片",
         "file": "文件"
-      }
+      },
+      "chat_account_not_set": "无法更改此会话的账号"
     },
     "dictation": {
       "failed": "听写已停止",

@@ -915,7 +915,12 @@
       "not_found_hint": "Nothing in {where} matches “{q}”",
       "where_starred": "starred models",
       "where_models": "models",
-      "add_key": "Add {name} API key"
+      "add_key": "Add {name} API key",
+      "this_chat": "This chat",
+      "automatic": "Automatic",
+      "automatic_hint": "Spread over your accounts",
+      "signed_out": "Signed out — sign in again",
+      "sign_in_again": "Sign in again…"
     },
     "effort_slider": {
       "reasoning": "Reasoning"
@@ -3049,7 +3054,8 @@
         "appshot": "Appshot",
         "image": "Image",
         "file": "File"
-      }
+      },
+      "chat_account_not_set": "Couldn't change this chat's account"
     },
     "dictation": {
       "failed": "Dictation stopped",

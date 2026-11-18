@@ -1232,7 +1232,11 @@ local function Composer(): Node
 		end, function() end)
 	end)
 	-- (The catalog's device, a new chat's project's host included.)
-	local accounts = shared.model_accounts(run_device)
+	-- (A session's own pin, for a chat that exists: a new chat has none to
+	-- choose before it is sent.)
+	local accounts = shared.model_accounts(run_device, function(): string?
+		return session_id:get()
+	end)
 	local function branch_fixed(): ds.ComposerFixed?
 		local s = open()
 		if not s then
@@ -1350,6 +1354,9 @@ local function Composer(): Node
 			account_group = accounts.account_group,
 			on_account = accounts.on_account,
 			on_accounts_open = accounts.on_accounts_open,
+			chat_account = accounts.chat_account,
+			on_chat_account = accounts.on_chat_account,
+			on_sign_in = accounts.on_sign_in,
 			-- What its context holds (the ring shows once a window is
 			-- reported, its card saying the numbers).
 			usage = function(): ds.ComposerUsage?

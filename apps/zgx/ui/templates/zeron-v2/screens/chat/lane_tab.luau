@@ -392,6 +392,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		end
 		local s = session:get()
 		return if s then s.device else nil
+	end, function(): string?
+		-- (An unsent side chat has no pin to choose yet.)
+		return if unsent() then nil else chat
 	end)
 	-- A new side chat's composer takes the keys as it's made.
 	if lanes.take_keys:peek()[chat] then
@@ -530,6 +533,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		account_group = accounts.account_group,
 		on_account = accounts.on_account,
 		on_accounts_open = accounts.on_accounts_open,
+		chat_account = accounts.chat_account,
+		on_chat_account = accounts.on_chat_account,
+		on_sign_in = accounts.on_sign_in,
 		-- What its context holds: the chat page's ring and card, from the
 		-- side chat's own numbers (once it has run and they're reported).
 		usage = function(): any
