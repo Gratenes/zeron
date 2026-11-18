@@ -14,6 +14,24 @@ class PhoneTestSendReceiver : BroadcastReceiver() {
                 val sms = PhoneSms(context)
                 when (intent.getStringExtra("tool")) {
                     "attachment" -> return@runCatching sms.attachment(intent.getStringExtra("message_id") ?: "", intent.getStringExtra("part_id") ?: "").toString().take(600)
+                    "setting" -> {
+                        val st = PhoneSettings(context)
+                        val name = intent.getStringExtra("name") ?: ""
+                        val on = intent.getBooleanExtra("value", true)
+                        if (name == "confirm-installs") st.confirmInstalls = on else PhoneSettings.Group.entries.firstOrNull { it.key == name }?.let { st.setGroup(it, on) }
+                        return@runCatching "set $name=$on"
+                    }
+                    "sys" -> {
+                        val sys = PhoneSystem(context, PhoneSettings(context))
+                        return@runCatching when (intent.getStringExtra("op")) {
+                            "install" -> sys.install(intent.getStringExtra("path") ?: "", intent.getStringExtra("sha"), "Test chat", "chat-test-1").toString()
+                            "grant" -> sys.grant(intent.getStringExtra("pkg") ?: "", intent.getStringExtra("perm") ?: "", intent.getBooleanExtra("revoke", false)).toString()
+                            "stop" -> sys.forceStop(intent.getStringExtra("pkg") ?: "").toString()
+                            "get" -> sys.settingsGet(intent.getStringExtra("ns") ?: "", intent.getStringExtra("key") ?: "").toString()
+                            "probe" -> sys.probe().toString()
+                            else -> "bad op"
+                        }
+                    }
                     "queue" -> {
                         val mode = intent.getStringExtra("mode") ?: "ok"
                         var tries = 0
