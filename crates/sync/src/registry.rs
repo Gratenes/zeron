@@ -374,6 +374,7 @@ impl RegistryClient {
             stats: stats.clone(),
             transport,
             sync_busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            repush: std::sync::atomic::AtomicBool::new(false),
         };
         let task = tokio::spawn(actor.run(ready_tx));
 
@@ -513,6 +514,8 @@ struct Actor {
     transport: Option<Arc<dyn RegistryTransport>>,
     /// One offline sync in flight at a time.
     sync_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// A refused batch was split: its parts are waiting to be pushed.
+    repush: std::sync::atomic::AtomicBool,
 }
 
 enum SessionEnd {
@@ -816,6 +819,9 @@ impl Actor {
                     if !self.handle_frame(&text) {
                         return SessionEnd::Reconnect;
                     }
+                    if self.repush.swap(false, Relaxed) && !self.push_pending(&mut pipe).await {
+                        return SessionEnd::Reconnect;
+                    }
                 }
                 _ = self.nudge_rx.recv() => {
                     if !self.push_pending(&mut pipe).await {
@@ -908,42 +914,59 @@ impl Actor {
         let stats = self.stats.clone();
         let busy = self.sync_busy.clone();
         tokio::spawn(async move {
-            let batches: Vec<PendingBatch> = lock(&doc).take_pushable();
             let mut push_failed = false;
-            for batch in &batches {
-                let body =
-                    serde_json::json!({ "batch": batch.batch, "ops": batch.ops }).to_string();
-                match transport.push(body).await {
-                    Ok(ack) => {
-                        let parsed = serde_json::from_str::<serde_json::Value>(&ack)
-                            .ok()
-                            .and_then(|v| {
-                                Some((v["batch"].as_str()?.to_owned(), v["seq"].as_u64()?))
-                            });
-                        match parsed {
-                            Some((b, seq)) => {
-                                lock(&doc).ack_batch(&b, seq);
-                                stats.last_ack_ms.store(epoch_ms(), Relaxed);
-                                let _ = events.send(RegistryEvent::Applied);
-                            }
-                            None => {
-                                // An unreadable ack must count as a FAILED
-                                // push: swallowing it left the batch marked
-                                // in-flight, and on a pure-HTTPS device no
-                                // socket disconnect ever comes along to
-                                // un-mark it — the write was stranded until
-                                // process restart.
-                                tracing::warn!("registry: http push ack unreadable; will retry");
-                                push_failed = true;
-                                break;
+            // A refused batch is split (and its lone ops dropped) and its parts
+            // pushed in the next round; the batches behind it are never held up.
+            for _round in 0..MAX_PUSH_ROUNDS {
+                let batches: Vec<PendingBatch> = lock(&doc).take_pushable();
+                if batches.is_empty() {
+                    break;
+                }
+                let mut again = false;
+                for batch in &batches {
+                    let body =
+                        serde_json::json!({ "batch": batch.batch, "ops": batch.ops }).to_string();
+                    match transport.push(body).await {
+                        Ok(ack) => {
+                            let parsed = serde_json::from_str::<serde_json::Value>(&ack)
+                                .ok()
+                                .and_then(|v| {
+                                    Some((v["batch"].as_str()?.to_owned(), v["seq"].as_u64()?))
+                                });
+                            match parsed {
+                                Some((b, seq)) => {
+                                    lock(&doc).ack_batch(&b, seq);
+                                    stats.last_ack_ms.store(epoch_ms(), Relaxed);
+                                    let _ = events.send(RegistryEvent::Applied);
+                                }
+                                None => {
+                                    // An unreadable ack must count as a FAILED
+                                    // push: swallowing it left the batch marked
+                                    // in-flight, and on a pure-HTTPS device no
+                                    // socket disconnect ever comes along to
+                                    // un-mark it — the write was stranded until
+                                    // process restart.
+                                    tracing::warn!("registry: http push ack unreadable; will retry");
+                                    push_failed = true;
+                                    break;
+                                }
                             }
                         }
+                        Err(SyncError::Rejected(reason)) => {
+                            tracing::warn!(%reason, "registry: http push refused as invalid");
+                            let outcome = lock(&doc).reject_batch(&batch.batch);
+                            log_rejection(&outcome, "http push");
+                            again |= outcome.repush();
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, "registry: http push failed; will retry");
+                            push_failed = true;
+                            break;
+                        }
                     }
-                    Err(err) => {
-                        tracing::warn!(error = %err, "registry: http push failed; will retry");
-                        push_failed = true;
-                        break;
-                    }
+                }
+                if push_failed || !again {
+                    break;
                 }
             }
             if push_failed {
@@ -1066,9 +1089,40 @@ impl Actor {
             ServerFrame::Error { code, message } => {
                 self.stats.rejected.fetch_add(1, Relaxed);
                 tracing::warn!(code, message, "registry: server rejected a frame");
+                // The room refuses a whole batch for one invalid op and names
+                // the row, not the batch. Left queued it is sent again, and
+                // refused again, on every connection: isolate the op.
+                if code == "invalid_op"
+                    && let Some((kind, id)) = invalid_op_row(&message)
+                {
+                    let outcome = lock(&self.doc).reject_row(kind, id);
+                    log_rejection(&outcome, "socket push");
+                    if outcome.repush() {
+                        self.repush.store(true, Relaxed);
+                    }
+                }
             }
         }
         true
+    }
+}
+
+/// Rounds of an HTTPS push in one cycle: a refused batch is split in one and
+/// its parts pushed in the next.
+const MAX_PUSH_ROUNDS: usize = 4;
+
+/// The row an `invalid_op` error names: the room words it `kind/id: reason`.
+fn invalid_op_row(message: &str) -> Option<(&str, &str)> {
+    let (row, _reason) = message.split_once(": ")?;
+    row.split_once('/')
+}
+
+fn log_rejection(outcome: &zeron_doc::Rejection, via: &str) {
+    for (kind, id) in &outcome.dropped {
+        tracing::warn!(kind, id, via, "registry: dropped an op the room refuses as invalid");
+    }
+    if outcome.split > 0 {
+        tracing::warn!(ops = outcome.split, via, "registry: split a refused batch into single ops");
     }
 }
 

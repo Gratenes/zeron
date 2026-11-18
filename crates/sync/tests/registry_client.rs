@@ -582,3 +582,162 @@ async fn unreadable_http_ack_retries_instead_of_stranding_the_batch() {
 
     client.shutdown().await;
 }
+
+// ── refused batches are isolated, never replayed for ever ──────────────────
+
+/// A doc whose outbox holds `batches` (lists of chat ids; an id starting
+/// `poison` carries a field name the room refuses), as an older build left it
+/// on disk: the outbox outlives the build that queued it.
+fn doc_with_outbox(batches: &[&[&str]]) -> Arc<Mutex<RegistryDoc>> {
+    let mut seed = RegistryDoc::new("dev-a");
+    let mut batch_json = Vec::new();
+    for (n, ids) in batches.iter().enumerate() {
+        let ops: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| {
+                let field = if id.starts_with("poison") {
+                    "bad-field"
+                } else {
+                    "title"
+                };
+                serde_json::json!({
+                    "kind": "chats",
+                    "id": id,
+                    "op": "upsert",
+                    "set": { field: "t" },
+                    "hlc": format!("0000000000{:03}-0000-dev-a", n + 1),
+                })
+            })
+            .collect();
+        batch_json.push(serde_json::json!({ "batch": format!("b-{n}"), "ops": ops }));
+    }
+    // Take the snapshot of an empty doc and put the batches in its outbox.
+    seed.upsert_chat(&chat("seed", "dev-a")).unwrap();
+    let mut state: serde_json::Value = serde_json::from_slice(&seed.to_bytes().unwrap()).unwrap();
+    state["pending"] = serde_json::Value::Array(batch_json);
+    let doc = RegistryDoc::from_bytes(&serde_json::to_vec(&state).unwrap(), "dev-a")
+        .expect("outbox restores");
+    Arc::new(Mutex::new(doc))
+}
+
+/// Over the socket the room names the row it refused, not the batch: the
+/// batch is split, the lone refused op dropped, and the writes beside and
+/// behind it still arrive. Nothing is refused again after a reconnect.
+#[tokio::test]
+async fn a_batch_the_room_refuses_over_the_socket_is_isolated_not_replayed() {
+    let server = MockRegistryServer::start().await;
+    let doc = doc_with_outbox(&[&["chat-1", "poison-2"], &["chat-3"]]);
+    let client = RegistryClient::connect(&server.url(), doc.clone(), "dev-a")
+        .await
+        .expect("connects");
+
+    wait_until(|| doc.lock().unwrap().pending_len() == 0).await;
+    assert!(
+        server.row("chats", "chat-1").is_some(),
+        "its neighbour applied"
+    );
+    assert!(
+        server.row("chats", "chat-3").is_some(),
+        "the batch behind it applied"
+    );
+    assert!(
+        server.row("chats", "poison-2").is_none(),
+        "the refused op never did"
+    );
+    let refusals = client.stats().rejected;
+    assert!(
+        (1..=3).contains(&refusals),
+        "refused once to split it and once alone, not {refusals} times"
+    );
+
+    // A fresh connection replays nothing that is refused.
+    server.drop_all_connections();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        client.stats().rejected,
+        refusals,
+        "nothing is refused again"
+    );
+    client.shutdown().await;
+}
+
+/// HTTPS fallback: the answer names the batch. The refused batch is split
+/// and its lone op dropped; the batch behind it is pushed in the same cycle,
+/// not held up.
+struct RefusingTransport {
+    calls: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+impl zeron_sync::registry::RegistryTransport for RefusingTransport {
+    fn fetch(
+        &self,
+        _since: u64,
+    ) -> futures::future::BoxFuture<'static, Result<String, zeron_sync::SyncError>> {
+        Box::pin(async {
+            Ok(r#"{"seq":0,"full":false,"gcFloor":0,"rows":[],"presence":{}}"#.to_string())
+        })
+    }
+
+    fn push(
+        &self,
+        body: String,
+    ) -> futures::future::BoxFuture<'static, Result<String, zeron_sync::SyncError>> {
+        let calls = self.calls.clone();
+        Box::pin(async move {
+            let v: serde_json::Value = serde_json::from_str(&body).expect("push body is json");
+            let batch = v["batch"].as_str().expect("batch id").to_owned();
+            let ids: Vec<String> = v["ops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|op| op["id"].as_str().unwrap().to_owned())
+                .collect();
+            let poisoned = ids.iter().any(|id| id.starts_with("poison"));
+            calls.lock().unwrap().push(ids);
+            if poisoned {
+                return Err(zeron_sync::SyncError::Rejected(
+                    r#"registry push http 400 Bad Request: {"error":"invalid_op"}"#.into(),
+                ));
+            }
+            Ok(format!(r#"{{"batch":"{batch}","seq":1,"applied":1}}"#))
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_batch_refused_over_https_is_split_dropped_and_never_holds_up_the_rest() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let doc = doc_with_outbox(&[&["chat-1"], &["chat-2", "poison-2"], &["chat-3"]]);
+    let client = RegistryClient::connect_via_transport(
+        Arc::new(zeron_sync::StaticUrl("ws://127.0.0.1:1/ws".into())),
+        doc.clone(),
+        "dev-a",
+        zeron_sync::RegistryTuning::default(),
+        Arc::new(RefusingTransport {
+            calls: calls.clone(),
+        }),
+    )
+    .await
+    .expect("transport clients construct immediately");
+
+    wait_until(|| doc.lock().unwrap().pending_len() == 0).await;
+    let calls = calls.lock().unwrap().clone();
+    let ids = |at: usize| calls[at].clone();
+    // Round one: the first batch, the refused one, and — in the same cycle —
+    // the one behind it. Round two: the refused batch's parts.
+    assert_eq!(ids(0), ["chat-1"]);
+    assert_eq!(ids(1), ["chat-2", "poison-2"]);
+    assert_eq!(ids(2), ["chat-3"], "not held up by the refused batch");
+    let mut second: Vec<_> = vec![ids(3), ids(4)];
+    second.sort();
+    assert_eq!(
+        second,
+        [vec!["chat-2".to_owned()], vec!["poison-2".to_owned()]]
+    );
+    assert_eq!(
+        calls.len(),
+        5,
+        "the refused op was sent twice, then dropped"
+    );
+    client.shutdown().await;
+}

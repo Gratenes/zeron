@@ -176,10 +176,18 @@ impl RegistryTransport for RegistryHttp {
                 .await
                 .map_err(http_err)?;
             if !response.status().is_success() {
-                return Err(SyncError::Protocol(format!(
-                    "registry push http {}",
-                    response.status()
-                )));
+                let status = response.status();
+                let message = format!("registry push http {status}");
+                // Only the room's own refusal of the ops (`invalid_op`) says
+                // the batch itself is bad; any other 400 is no verdict on it.
+                let body = response.text().await.unwrap_or_default();
+                return Err(
+                    if status == reqwest::StatusCode::BAD_REQUEST && body.contains("invalid_op") {
+                        SyncError::Rejected(format!("{message}: {body}"))
+                    } else {
+                        SyncError::Protocol(message)
+                    },
+                );
             }
             response.text().await.map_err(http_err)
         })
