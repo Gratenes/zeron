@@ -11,7 +11,7 @@ use zeron_rpc::methods;
 
 use super::{ToolDef, Tools};
 
-pub(super) const NAMES: [&str; 23] = [
+pub(super) const NAMES: [&str; 28] = [
     "phone_ping",
     "phone_screen_read",
     "phone_screenshot",
@@ -30,6 +30,11 @@ pub(super) const NAMES: [&str; 23] = [
     "phone_sms_send",
     "phone_sms_attachment",
     "phone_sms_queue",
+    "phone_install_apk",
+    "phone_grant",
+    "phone_force_stop",
+    "phone_settings_get",
+    "phone_shizuku_probe",
     "phone_sms_react",
     "phone_contacts_search",
     "phone_files_list",
@@ -191,6 +196,41 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                 "match": { "type": "string", "description": "With thread_id: text the message contains." },
                 "emoji": { "type": "string", "description": "One emoji, like 👍 or ❤️." }
             }), &["emoji"]),
+        },
+        ToolDef {
+            name: "phone_install_apk",
+            description: "Install an .apk that is already on the phone (copy it there first with device_file_copy into shared storage, e.g. /storage/emulated/0/Download/app.apk). Needs the person to have allowed \"Let agents install apps\" (off by default). By default the person gets a notification showing the app, its signer and the file's checksum with Install / Deny / Always for this chat, and no answer in 60 s is a no. Pass `sha256` (the file's checksum) to refuse a file that isn't the one you meant. Uses Shizuku when it is running and allowed, else Android's installer, which the person has to confirm on screen. The reply says the package, version, signer and how it was installed; every install is in the phone's log. Zeron itself can't be installed or replaced this way.",
+            input_schema: schema(json!({
+                "path": { "type": "string", "description": "An .apk in shared storage." },
+                "sha256": { "type": "string", "description": "The file's expected SHA-256 (optional but recommended)." }
+            }), &["path"]),
+        },
+        ToolDef {
+            name: "phone_grant",
+            description: "Grant (or with revoke, take back) one runtime permission of another app, with `pm grant`/`pm revoke` through Shizuku. Needs the person to have allowed \"Allow Shizuku shell\" and Shizuku to be running; otherwise the error says what to turn on. Never works on Zeron itself.",
+            input_schema: schema(json!({
+                "package": { "type": "string", "description": "The app's package id, like com.example.app." },
+                "permission": { "type": "string", "description": "like android.permission.READ_CONTACTS." },
+                "revoke": { "type": "boolean" }
+            }), &["package", "permission"]),
+        },
+        ToolDef {
+            name: "phone_force_stop",
+            description: "Force-stop an app (`am force-stop`) through Shizuku. Needs \"Allow Shizuku shell\" and Shizuku running. Never works on Zeron itself.",
+            input_schema: schema(json!({ "package": { "type": "string" } }), &["package"]),
+        },
+        ToolDef {
+            name: "phone_settings_get",
+            description: "Read one Android setting (`settings get <namespace> <key>`) through Shizuku, read-only. Needs \"Allow Shizuku shell\" and Shizuku running.",
+            input_schema: schema(json!({
+                "namespace": { "type": "string", "enum": ["system", "secure", "global"] },
+                "key": { "type": "string", "description": "like screen_off_timeout or airplane_mode_on." }
+            }), &["namespace", "key"]),
+        },
+        ToolDef {
+            name: "phone_shizuku_probe",
+            description: "Read-only probe through Shizuku: the SIM carrier's name, and whether the shell user can read the voicemail provider and whether its rows have transcriptions (only counts and column names come back, never a voicemail's content). Needs \"Allow Shizuku shell\" and Shizuku running.",
+            input_schema: schema(json!({}), &[]),
         },
         ToolDef {
             name: "phone_contacts_search",
