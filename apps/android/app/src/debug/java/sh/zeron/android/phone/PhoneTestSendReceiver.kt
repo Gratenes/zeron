@@ -14,6 +14,21 @@ class PhoneTestSendReceiver : BroadcastReceiver() {
                 val sms = PhoneSms(context)
                 when (intent.getStringExtra("tool")) {
                     "attachment" -> return@runCatching sms.attachment(intent.getStringExtra("message_id") ?: "", intent.getStringExtra("part_id") ?: "").toString().take(600)
+                    "queue" -> {
+                        val mode = intent.getStringExtra("mode") ?: "ok"
+                        var tries = 0
+                        return@runCatching PhoneSendQueue.enqueue(context, "5590", "Test person", intent.getStringExtra("text") ?: "queued hello", "busy", false) { force ->
+                            tries++
+                            when {
+                                mode == "busy2" && tries <= 2 && !force -> throw PhoneBusyException("still busy")
+                                mode == "fail" -> throw PhoneToolException("Messages didn't open")
+                                mode == "never" && !force -> throw PhoneBusyException("always busy")
+                                else -> org.json.JSONObject().put("ok", true).put("tries", tries).put("force", force)
+                            }
+                        }.toString()
+                    }
+                    "queueact" -> { PhoneSendQueue.act(context, intent.getIntExtra("id", -1), intent.getStringExtra("do") ?: ""); return@runCatching PhoneSendQueue.status(null).toString() }
+                    "queuestatus" -> return@runCatching PhoneSendQueue.status(null).toString()
                     "files" -> {
                         val f = PhoneFiles(context)
                         val path = intent.getStringExtra("path") ?: ""

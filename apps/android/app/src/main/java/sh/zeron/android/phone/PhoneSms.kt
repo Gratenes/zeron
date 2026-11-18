@@ -344,18 +344,23 @@ class PhoneSms(private val context: Context) {
         if (confirm != null && !confirm("to $number, $how")) throw PhoneToolException("the person declined to send it (or didn't answer in ${PhoneConfirm.WAIT_SECONDS} s)")
         return when (transport) {
             "chat-reply" -> replyInChat(handle!!, number, threads, text)
-            "messages" -> sendViaMessages(number, text, wantRcs)
+            "messages" -> try {
+                sendViaMessages(number, text, wantRcs, force = false)
+            } catch (e: PhoneBusyException) {
+                // Never just die because the person is on the phone: wait for them to be done, and say so.
+                PhoneSendQueue.enqueue(context, number, contactName(number), text, e.message.orEmpty(), wantRcs) { force -> sendViaMessages(number, text, wantRcs, force) }
+            }
             else -> sendSms(number, text)
         }
     }
 
     /** Drives Google Messages' own compose screen (needs the accessibility service and, if locked, agent unlock). */
-    private fun sendViaMessages(number: String, text: String, requireRcs: Boolean): JSONObject {
+    fun sendViaMessages(number: String, text: String, requireRcs: Boolean, force: Boolean): JSONObject {
         val service = PhoneAccessibilityService.instance
             ?: throw PhoneToolException("Sending a chat (RCS) message here means driving Google Messages, and Zeron's accessibility service is off. Turn it on, or send via=\"sms\" for a plain text.")
         PhoneUnlock.ensureUnlocked(context)
-        if (PhoneUnlock.personActiveWithin(60_000)) {
-            throw PhoneToolException("The person is using the phone right now: not taking over its screen to send a message. Try again in a minute, or send via=\"sms\" for a plain text.")
+        if (!force && PhoneUnlock.personActiveWithin(PhoneSendQueue.IDLE_MS)) {
+            throw PhoneBusyException("The person is using the phone right now.")
         }
         val started = System.currentTimeMillis()
         val transport = service.sendInMessages(number, text, requireRcs)
@@ -394,6 +399,17 @@ class PhoneSms(private val context: Context) {
      * Send once Messages' compose screen shows the files attached, so the caption is never sent alone.
      */
     private fun sendWithAttachments(number: String, text: String, paths: List<String>, via: String, confirm: ((String) -> Boolean)?): JSONObject {
+        // The confirm question is asked once, here; a queued retry does not ask again.
+        return try {
+            runAttachments(number, text, paths, via, confirm, force = false)
+        } catch (e: PhoneBusyException) {
+            PhoneSendQueue.enqueue(context, number, contactName(number), text.ifBlank { paths.joinToString(", ") { it.substringAfterLast('/') } }, e.message.orEmpty(), via == "rcs") { force ->
+                runAttachments(number, text, paths, via, null, force)
+            }
+        }
+    }
+
+    private fun runAttachments(number: String, text: String, paths: List<String>, via: String, confirm: ((String) -> Boolean)?, force: Boolean): JSONObject {
         if (via == "sms") throw PhoneToolException("attachments go through Google Messages (RCS file transfer, or MMS): via \"sms\" can't carry them")
         if (paths.size > 10) throw PhoneToolException("at most 10 attachments in one message")
         val files = PhoneFiles(context)
@@ -404,7 +420,7 @@ class PhoneSms(private val context: Context) {
         val service = PhoneAccessibilityService.instance
             ?: throw PhoneToolException("Sending attachments means driving Google Messages, and Zeron's accessibility service is off.")
         PhoneUnlock.ensureUnlocked(context)
-        if (PhoneUnlock.personActiveWithin(60_000)) throw PhoneToolException("The person is using the phone right now: not taking over its screen to send a message. Try again in a minute.")
+        if (!force && PhoneUnlock.personActiveWithin(PhoneSendQueue.IDLE_MS)) throw PhoneBusyException("The person is using the phone right now.")
         // Messages reads the files through Zeron's file provider: copies in the cache, removed afterwards.
         val shared = File(context.cacheDir, "shared/att-${System.nanoTime()}").apply { mkdirs() }
         val copies = picked.map { src -> File(shared, src.name).also { src.copyTo(it, overwrite = true) } }

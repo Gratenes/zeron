@@ -100,6 +100,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
                     PhoneConfirm.ask(context, "${who ?: "An agent"} wants to send a message $how".take(120), text.ifBlank { attach.joinToString(", ") { it.substringAfterLast('/') } })
                 }) else null, attach)
             }
+            "sms_queue" -> PhoneSendQueue.status(args.optInt("id", -1).takeIf { it >= 0 })
             "sms_attachment" -> sms.attachment(args.optString("message_id"), args.optString("part_id"))
             "sms_react" -> sms.react(
                 args.optString("message_id").takeIf { it.isNotBlank() }, args.optString("thread_id").takeIf { it.isNotBlank() },
@@ -205,6 +206,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
         "sms_read" -> "read texts from ${a.optString("thread_id").ifEmpty { a.optString("address") }}"
         "sms_send" -> "sent a message (${a.optString("text").length} characters) to ${a.optString("to").ifEmpty { "thread " + a.optString("thread_id") }}"
         "sms_attachment" -> "saved attachment ${a.optString("part_id")} of ${a.optString("message_id")}"
+        "sms_queue" -> "checked queued texts"
         "sms_react" -> "reacted ${a.optString("emoji")} to a message"
         "contacts_search" -> "searched contacts"
         "files_list" -> "listed files in ${a.optString("path").ifEmpty { "the storage volumes" }}"
@@ -227,6 +229,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             "sms_threads" to PhoneSettings.Group.SMS_READ, "sms_read" to PhoneSettings.Group.SMS_READ,
             "sms_send" to PhoneSettings.Group.SMS_SEND,
             "sms_attachment" to PhoneSettings.Group.ATTACH_READ,
+            "sms_queue" to PhoneSettings.Group.SMS_READ,
             "sms_react" to PhoneSettings.Group.REACTIONS,
             "contacts_search" to PhoneSettings.Group.CONTACTS,
             "files_list" to PhoneSettings.Group.FILES, "files_stat" to PhoneSettings.Group.FILES, "files_hash" to PhoneSettings.Group.FILES,

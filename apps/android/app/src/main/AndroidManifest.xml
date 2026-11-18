@@ -129,6 +129,11 @@
                 <action android:name="sh.zeron.android.PHONE_STOP" />
             </intent-filter>
         </receiver>
+        <receiver android:name=".phone.PhoneQueueReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="sh.zeron.android.PHONE_QUEUE" />
+            </intent-filter>
+        </receiver>
         <receiver android:name=".phone.PhoneConfirmReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="sh.zeron.android.PHONE_CONFIRM" />

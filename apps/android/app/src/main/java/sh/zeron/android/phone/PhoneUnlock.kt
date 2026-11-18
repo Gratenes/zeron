@@ -108,7 +108,7 @@ object PhoneUnlock {
         val pin = if (secure) PhonePinVault.load(context) ?: throw PhoneToolException("No PIN is stored for agents: the person has to enter it in Zeron → Settings → Agent phone access.") else null
         val sinceUser = System.currentTimeMillis() - lastUser
         if (lastUser != 0L && sinceUser < RECENT_USER_MS) {
-            throw PhoneToolException("The person was using the phone ${sinceUser / 1000} s ago: not unlocking it over them. Try again in a few minutes.")
+            throw PhoneBusyException("The person was using the phone ${sinceUser / 1000} s ago: not unlocking it over them. Try again in a few minutes.")
         }
         val service = PhoneAccessibilityService.instance
             ?: throw PhoneToolException("Zeron's accessibility service is off: it is what unlocks the phone.")
