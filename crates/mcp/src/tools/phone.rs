@@ -11,7 +11,7 @@ use zeron_rpc::methods;
 
 use super::{ToolDef, Tools};
 
-pub(super) const NAMES: [&str; 22] = [
+pub(super) const NAMES: [&str; 23] = [
     "phone_ping",
     "phone_screen_read",
     "phone_screenshot",
@@ -29,6 +29,7 @@ pub(super) const NAMES: [&str; 22] = [
     "phone_sms_read",
     "phone_sms_send",
     "phone_sms_attachment",
+    "phone_sms_queue",
     "phone_sms_react",
     "phone_contacts_search",
     "phone_files_list",
@@ -159,7 +160,7 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "phone_sms_send",
-            description: "Send a message from the person's own number, through Google Messages (RCS when both sides have it, else SMS, with Messages' own retry and failure state). In order: (1) an answer through Messages' own live reply notification, when one is waiting for that person (needs Notification access for Zeron); (2) otherwise Google Messages is driven on the phone (opens the conversation, types, taps Send; it unlocks the phone first if the person allows that, takes over the screen for a few seconds, and refuses while the person is using the phone). A bare SMS from the radio is used ONLY when via is \"sms\"; it is never the default. via \"rcs\" sends only if Google Messages says the transport is RCS, else nothing is sent. READ THE REPLY: `transport` says which way it went, `providerState` what Google Messages shows (sent, queued, failed), `deliveryConfirmed` is true only when the carrier reported delivery (plain SMS) and is always false for chats, which give no receipt. A failure comes back as an error starting NOT SENT or NOT DELIVERED, and the person gets a notification; a message still queued or missing 30 s later also notifies the person. Never tell anyone a text arrived unless `deliveryConfirmed` is true; say it was sent. The person may have the phone ask them to confirm each send (then this call waits up to 60 s for their answer). It is a real message to a real person, from the user: send only what they asked for.",
+            description: "Send a message from the person's own number, through Google Messages (RCS when both sides have it, else SMS, with Messages' own retry and failure state). In order: (1) an answer through Messages' own live reply notification, when one is waiting for that person (needs Notification access for Zeron); (2) otherwise Google Messages is driven on the phone (opens the conversation, types, taps Send; it unlocks the phone first if the person allows that, takes over the screen for a few seconds, and, while the person is using the phone, QUEUES the text instead of failing: the reply says queued, the person gets a notification with Send now / Edit / Cancel, and it is retried when they are idle ~25 s, for up to 10 min; read the outcome with phone_sms_queue). A bare SMS from the radio is used ONLY when via is \"sms\"; it is never the default. via \"rcs\" sends only if Google Messages says the transport is RCS, else nothing is sent. READ THE REPLY: `transport` says which way it went, `providerState` what Google Messages shows (sent, queued, failed), `deliveryConfirmed` is true only when the carrier reported delivery (plain SMS) and is always false for chats, which give no receipt. A failure comes back as an error starting NOT SENT or NOT DELIVERED, and the person gets a notification; a message still queued or missing 30 s later also notifies the person. Never tell anyone a text arrived unless `deliveryConfirmed` is true; say it was sent. The person may have the phone ask them to confirm each send (then this call waits up to 60 s for their answer). It is a real message to a real person, from the user: send only what they asked for.",
             input_schema: schema(json!({
                 "to": { "type": "string", "description": "A phone number. Give this or thread_id." },
                 "thread_id": { "type": "string", "description": "A one-to-one conversation's id from phone_sms_threads. Give this or to." },
@@ -167,6 +168,11 @@ pub(super) fn catalog() -> Vec<ToolDef> {
                 "attachments": { "type": "array", "items": { "type": "string" }, "description": "Absolute paths of files on the phone, inside its allowed folders (copy one there first with device_file_copy). Sent through Google Messages as an RCS file transfer, or MMS if Messages falls back. Images, video, audio, files. Needs the person to have allowed \"Send attachments\". UNPROVEN on a real phone: check the reply's confirmedInMessages." },
                 "via": { "type": "string", "enum": ["auto", "sms", "rcs"], "description": "auto (default): through Google Messages (RCS if possible, else SMS with Messages' retry); sms: a bare SMS from the radio, only when asked for; rcs: only by RCS." }
             }), &["text"]),
+        },
+        ToolDef {
+            name: "phone_sms_queue",
+            description: "What happened to texts that phone_sms_send queued because the person was using the phone: with `id` (the queueId from the send) the one, else all recent ones. State is queued or sending (NOT sent yet), sent, failed, expired (the phone wasn't free for 10 min), cancelled or handed (the person took it into Messages to edit). Never report a queued text as sent.",
+            input_schema: schema(json!({ "id": { "type": "integer", "description": "The queueId returned by phone_sms_send." } }), &[]),
         },
         ToolDef {
             name: "phone_sms_attachment",
