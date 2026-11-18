@@ -382,6 +382,88 @@ fn fits_op_budget(op: &RowOp) -> bool {
     serde_json::to_vec(op).is_ok_and(|bytes| bytes.len() <= MAX_OP_BYTES)
 }
 
+/// Most background tasks, and most waited-on items, a synced `sessions` row
+/// lists. Every device only shows a handful; the rest stay on the host.
+const SYNCED_LIST_MAX: usize = 16;
+/// Bytes kept of a task's command line, its label and its description in a
+/// synced `sessions` row, and of an id.
+const SYNCED_COMMAND_MAX: usize = 300;
+const SYNCED_DESCRIPTION_MAX: usize = 160;
+const SYNCED_ID_MAX: usize = 128;
+
+/// `text` cut to at most `max` bytes, on a character boundary.
+fn clip(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn clip_field(item: &mut Value, field: &str, max: usize) {
+    if let Some(Value::String(text)) = item.get_mut(field)
+        && text.len() > max
+    {
+        let kept = clip(text, max).to_owned();
+        *text = kept;
+    }
+}
+
+/// Bound the free text of a `sessions` row: a background shell with a long
+/// command line (a script pasted into it) made rows the room refuses
+/// (`MAX_OP_BYTES`), for ever, with the whole batch they rode in. The tasks'
+/// ids stay whole up to [`SYNCED_ID_MAX`]: `StopBackgroundTask` addresses
+/// them.
+fn clip_session_fields(set: &mut BTreeMap<String, Value>) {
+    if let Some(Value::Array(tasks)) = set.get_mut("backgroundTasks") {
+        tasks.truncate(SYNCED_LIST_MAX);
+        for task in tasks {
+            clip_field(task, "id", SYNCED_ID_MAX);
+            clip_field(task, "command", SYNCED_COMMAND_MAX);
+            clip_field(task, "description", SYNCED_DESCRIPTION_MAX);
+        }
+    }
+    if let Some(Value::Object(waiting)) = set.get_mut("waiting")
+        && let Some(Value::Array(on)) = waiting.get_mut("on")
+    {
+        on.truncate(SYNCED_LIST_MAX);
+        for item in on {
+            clip_field(item, "id", SYNCED_ID_MAX);
+            clip_field(item, "label", SYNCED_COMMAND_MAX);
+        }
+    }
+}
+
+/// Make `op` pass the room's size check if it can be made to: a `sessions`
+/// row has its free text clipped, then its lists emptied (a status row is
+/// worth more than its details). `false`: no way to — the room would refuse
+/// it, and the batch it rides in, on every push.
+fn fit_op(op: &mut RowOp) -> bool {
+    if fits_op_budget(op) {
+        return true;
+    }
+    if op.kind != KIND_SESSIONS {
+        return false;
+    }
+    if let Some(set) = op.set.as_mut() {
+        clip_session_fields(set);
+        if fits_op_budget(op) {
+            return true;
+        }
+        if let Some(set) = op.set.as_mut() {
+            for field in ["backgroundTasks", "waiting"] {
+                if set.contains_key(field) {
+                    set.insert(field.to_owned(), Value::Null);
+                }
+            }
+        }
+    }
+    fits_op_budget(op)
+}
+
 /// The `sessions` fields the room's push notifications switch on
 /// (`notificationFor` in `edge/src/push-notify.ts`): the status indicator
 /// and the completed-turn marker. `updatedAt` only gates staleness, so the
@@ -413,6 +495,24 @@ fn shadows(b: &RowOp, a: &RowOp) -> bool {
 }
 
 // ── pending batches ─────────────────────────────────────────────────────────
+
+/// What [`RegistryDoc::reject_batch`] / [`RegistryDoc::reject_row`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Rejection {
+    /// Ops of batches split into one batch per op (they push again at once).
+    pub split: usize,
+    /// Ops dropped as refused for good: `(kind, id)`.
+    pub dropped: Vec<(String, String)>,
+    /// Single-op batches sent back out unjudged.
+    pub requeued: usize,
+}
+
+impl Rejection {
+    /// Something is waiting to be pushed again.
+    pub fn repush(&self) -> bool {
+        self.split > 0 || self.requeued > 0
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -947,6 +1047,7 @@ impl RegistryDoc {
 
     /// Batches to push: everything not already in flight on this connection.
     pub fn take_pushable(&mut self) -> Vec<PendingBatch> {
+        self.shed_oversized();
         let mut out = Vec::new();
         for batch in &mut self.pending {
             if !batch.in_flight {
@@ -954,6 +1055,106 @@ impl RegistryDoc {
                 out.push(batch.clone());
             }
         }
+        out
+    }
+
+    /// Make every unsent op fit the room's size cap, or drop it: a batch
+    /// queued before the cap was kept (the outbox outlives a build) is one the
+    /// room refuses whole, on every connection, and its neighbours with it.
+    fn shed_oversized(&mut self) {
+        let mut changed = false;
+        for batch in self.pending.iter_mut().filter(|b| !b.in_flight) {
+            let before = batch.ops.len();
+            batch.ops.retain_mut(|op| {
+                let before_len = serde_json::to_vec(&*op).map_or(0, |b| b.len());
+                let fits = fit_op(op);
+                if before_len > MAX_OP_BYTES {
+                    if fits {
+                        tracing::warn!(kind = %op.kind, id = %op.id, bytes = before_len, "registry: clipped a queued op over the room's size cap");
+                    } else {
+                        tracing::warn!(kind = %op.kind, id = %op.id, bytes = before_len, "registry: dropped a queued op over the room's size cap");
+                    }
+                }
+                fits
+            });
+            changed |= batch.ops.len() != before;
+        }
+        let before = self.pending.len();
+        self.pending.retain(|b| !b.ops.is_empty());
+        if changed || self.pending.len() != before {
+            self.generation += 1;
+        }
+    }
+
+    /// The room refused batch `batch` as invalid (HTTPS push: the answer names
+    /// the request). It is never sent as it was again: a batch of several
+    /// ops becomes one batch per op, so a single bad op can't take its
+    /// neighbours down, and a lone op is dropped.
+    pub fn reject_batch(&mut self, batch: &str) -> Rejection {
+        let Some(at) = self.pending.iter().position(|b| b.batch == batch) else {
+            return Rejection::default();
+        };
+        self.split_or_drop(at)
+    }
+
+    /// The room refused an op on row `kind`/`id` (a socket push: the error
+    /// names the row, not the batch). Every in-flight batch holding such an
+    /// op is split, and a lone op is dropped only when it is the one batch in
+    /// flight on that row (so the row is the culprit's, with nothing else
+    /// on it to be mistaken for it).
+    pub fn reject_row(&mut self, kind: &str, id: &str) -> Rejection {
+        let holds = |b: &PendingBatch| b.ops.iter().any(|op| op.kind == kind && op.id == id);
+        let mut candidates: Vec<usize> = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.in_flight && holds(b))
+            .map(|(at, _)| at)
+            .collect();
+        let sole = candidates.len() == 1;
+        let mut out = Rejection::default();
+        // Back to front: a split lengthens the list behind it only.
+        candidates.reverse();
+        for at in candidates {
+            if self.pending[at].ops.len() == 1 && !sole {
+                // Which of several single-op batches on one row was refused is
+                // unknown; they go back out and the next refusal names one alone.
+                self.pending[at].in_flight = false;
+                out.requeued += 1;
+                continue;
+            }
+            let part = self.split_or_drop(at);
+            out.split += part.split;
+            out.dropped.extend(part.dropped);
+        }
+        if out != Rejection::default() {
+            self.generation += 1;
+        }
+        out
+    }
+
+    fn split_or_drop(&mut self, at: usize) -> Rejection {
+        let batch = self.pending.remove(at);
+        let mut out = Rejection::default();
+        if batch.ops.len() == 1 {
+            let op = &batch.ops[0];
+            out.dropped.push((op.kind.clone(), op.id.clone()));
+        } else {
+            out.split = batch.ops.len();
+            let singles: Vec<PendingBatch> = batch
+                .ops
+                .into_iter()
+                .map(|op| PendingBatch {
+                    batch: format!("b-{}", self.next_hlc()),
+                    ops: vec![op],
+                    in_flight: false,
+                })
+                .collect();
+            for (n, single) in singles.into_iter().enumerate() {
+                self.pending.insert(at + n, single);
+            }
+        }
+        self.generation += 1;
         out
     }
 
@@ -994,6 +1195,19 @@ impl RegistryDoc {
             for op in &ops {
                 self.fold_op(op);
             }
+            return;
+        }
+        // The room refuses an op over its size cap, and the whole batch with
+        // it, on every push for ever (see `reject_batch`): no writer gets to
+        // queue one.
+        ops.retain_mut(|op| {
+            let fits = fit_op(op);
+            if !fits {
+                tracing::warn!(kind = %op.kind, id = %op.id, "registry: dropped an op over the room's size cap");
+            }
+            fits
+        });
+        if ops.is_empty() {
             return;
         }
         // The registry room rejects any batch over its op cap (500), and a
@@ -1941,7 +2155,7 @@ impl RegistryDoc {
     /// Upsert a session-status row (writer discipline: each device writes only
     /// its own runs' rows). Staleness is checked client-side via `updatedAt`.
     pub fn upsert_session(&mut self, session: &Session) -> Result<(), DocError> {
-        let set = fields([
+        let mut set = fields([
             ("chatId", json!(session.chat_id)),
             ("deviceId", json!(session.device_id)),
             ("status", serde_json::to_value(session.status)?),
@@ -1960,6 +2174,7 @@ impl RegistryDoc {
             ),
             ("waiting", serde_json::to_value(&session.waiting)?),
         ]);
+        clip_session_fields(&mut set);
         self.write(KIND_SESSIONS, &session.chat_id.clone(), OpKind::Upsert, set);
         Ok(())
     }
@@ -2249,3 +2464,5 @@ fn row_to<T: serde::de::DeserializeOwned>(row: &RegistryRow) -> Option<T> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod poisoned_batches;
