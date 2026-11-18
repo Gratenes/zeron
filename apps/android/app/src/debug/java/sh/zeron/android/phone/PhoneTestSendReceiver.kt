@@ -30,6 +30,7 @@ class PhoneTestSendReceiver : BroadcastReceiver() {
                             "get" -> sys.settingsGet(intent.getStringExtra("ns") ?: "", intent.getStringExtra("key") ?: "").toString()
                             "probe" -> sys.probe().toString()
                             "shzreq" -> { PhoneShizuku.requestPermission(); PhoneShizuku.state(context).let { "requested; running=${it.running} permitted=${it.permitted}" } }
+                            "ans" -> { PhoneConfirm.answer(intent.getIntExtra("id", -1), intent.getIntExtra("choice", 0)); "answered" }
                             "shzstate" -> PhoneShizuku.state(context).let { "installed=${it.installed} running=${it.running} permitted=${it.permitted} uid=${it.uid} v=${it.version}" }
                             else -> "bad op"
                         }
