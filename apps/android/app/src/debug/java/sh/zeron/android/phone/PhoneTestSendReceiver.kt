@@ -18,7 +18,7 @@ class PhoneTestSendReceiver : BroadcastReceiver() {
                         val st = PhoneSettings(context)
                         val name = intent.getStringExtra("name") ?: ""
                         val on = intent.getBooleanExtra("value", true)
-                        if (name == "confirm-installs") st.confirmInstalls = on else PhoneSettings.Group.entries.firstOrNull { it.key == name }?.let { st.setGroup(it, on) }
+                        if (name == "enabled") st.enabled = on else if (name == "confirm-installs") st.confirmInstalls = on else PhoneSettings.Group.entries.firstOrNull { it.key == name }?.let { st.setGroup(it, on) }
                         return@runCatching "set $name=$on"
                     }
                     "sys" -> {
