@@ -107,6 +107,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             "force_stop" -> system.forceStop(args.optString("package"))
             "settings_get" -> system.settingsGet(args.optString("namespace"), args.optString("key"))
             "shizuku_probe" -> system.probe()
+            "voicemails" -> PhoneVoicemails.recent(context, args.optInt("limit", 10).coerceIn(1, 50))
             "sms_queue" -> PhoneSendQueue.status(args.optInt("id", -1).takeIf { it >= 0 })
             "sms_attachment" -> sms.attachment(args.optString("message_id"), args.optString("part_id"))
             "sms_react" -> sms.react(
@@ -215,6 +216,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
         "sms_send" -> "sent a message (${a.optString("text").length} characters) to ${a.optString("to").ifEmpty { "thread " + a.optString("thread_id") }}"
         "sms_attachment" -> "saved attachment ${a.optString("part_id")} of ${a.optString("message_id")}"
         "sms_queue" -> "checked queued texts"
+        "voicemails" -> "read recent voicemails"
         "install_apk" -> "asked to install ${a.optString("path").substringAfterLast('/')}"
         "grant" -> "${if (a.optBoolean("revoke")) "revoked" else "granted"} ${a.optString("permission").substringAfterLast('.')} ${if (a.optBoolean("revoke")) "from" else "to"} ${a.optString("package")}"
         "force_stop" -> "force-stopped ${a.optString("package")}"
@@ -243,6 +245,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             "sms_send" to PhoneSettings.Group.SMS_SEND,
             "sms_attachment" to PhoneSettings.Group.ATTACH_READ,
             "sms_queue" to PhoneSettings.Group.SMS_READ,
+            "voicemails" to PhoneSettings.Group.VOICEMAIL,
             "install_apk" to PhoneSettings.Group.INSTALL,
             "grant" to PhoneSettings.Group.SHELL, "force_stop" to PhoneSettings.Group.SHELL,
             "settings_get" to PhoneSettings.Group.SHELL, "shizuku_probe" to PhoneSettings.Group.SHELL,

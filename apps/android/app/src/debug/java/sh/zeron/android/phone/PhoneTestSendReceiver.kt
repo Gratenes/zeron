@@ -35,6 +35,15 @@ class PhoneTestSendReceiver : BroadcastReceiver() {
                             else -> "bad op"
                         }
                     }
+                    "voicemail" -> {
+                        // A notification shaped like Google Voice's, run through the listener's own pipeline.
+                        val n = android.app.Notification.Builder(context, "test").setSmallIcon(android.R.drawable.ic_dialog_info)
+                            .setContentTitle(intent.getStringExtra("title") ?: "New voicemail from (404) 555-0123")
+                            .setContentText(intent.getStringExtra("text") ?: "Hi it is Dan about the house")
+                            .setStyle(android.app.Notification.BigTextStyle().bigText(intent.getStringExtra("big") ?: "Hi it is Dan about the house on Old Fountain, call me back.")).build()
+                        val handled = PhoneNotificationListener.handleVoicemail(context, intent.getStringExtra("pkg") ?: "com.google.android.apps.googlevoice", n)
+                        return@runCatching "handled=$handled " + PhoneVoicemails.recent(context, 3).toString()
+                    }
                     "queue" -> {
                         val mode = intent.getStringExtra("mode") ?: "ok"
                         var tries = 0

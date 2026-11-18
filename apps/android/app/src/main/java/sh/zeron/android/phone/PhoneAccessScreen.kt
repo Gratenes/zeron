@@ -222,6 +222,14 @@ fun PhoneAccessScreen(model: AppModel, onBack: () -> Unit) {
                 }
             }
 
+            section("Voicemail")
+            group {
+                var vmWake by remember(refresh) { mutableStateOf(settings.voicemailWake) }
+                SettingRow(0, 1, R.drawable.zi_chats, "Send new voicemails to my chat", if (vmWake) "A new voicemail (Google Voice or the Phone app) is sent, with its transcript quoted, to the chat chosen for new texts above" else "Off. Agents can still read them with phone_voicemails (needs Notification access).", trailing = {
+                    Switch(vmWake, { vmWake = it; settings.voicemailWake = it })
+                }) {}
+            }
+
             section("Shizuku and installs")
             group {
                 val shz = remember(refresh) { PhoneShizuku.state(context) }

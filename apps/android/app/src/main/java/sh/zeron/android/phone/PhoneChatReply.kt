@@ -97,9 +97,40 @@ class PhoneNotificationListener : NotificationListenerService() {
         if (instance === this) instance = null
     }
 
+    /** A new-voicemail notification (Google Voice or Google Phone): recorded, logged, and the chat woken if the person set that. */
+    override fun onNotificationPosted(sbn: android.service.notification.StatusBarNotification) {
+        val pkg = sbn.packageName ?: return
+        handleVoicemail(this, pkg, sbn.notification ?: return)
+    }
+
     companion object {
         @Volatile
         var instance: PhoneNotificationListener? = null
             private set
+
+        /** The pipeline for one notification: is it a voicemail, who from and what was said; store it, log it, wake the chat. */
+        fun handleVoicemail(context: android.content.Context, pkg: String, n: Notification): Boolean {
+            if (pkg !in VoicemailParse.PACKAGES) return false
+            val settings = PhoneSettings(context)
+            if (!settings.enabled || !settings.groupOn(PhoneSettings.Group.VOICEMAIL)) return false
+            val x = n.extras ?: return false
+            val title = x.getCharSequence(Notification.EXTRA_TITLE)?.toString()
+            val text = x.getCharSequence(Notification.EXTRA_TEXT)?.toString()
+            val big = x.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
+            val sub = x.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()
+            val messages = runCatching {
+                @Suppress("DEPRECATION")
+                x.getParcelableArray(Notification.EXTRA_MESSAGES)?.mapNotNull { (it as? android.os.Bundle)?.getCharSequence("text")?.toString() }
+            }.getOrNull().orEmpty()
+            if (!VoicemailParse.looksLikeVoicemail(pkg, n.channelId, title, listOfNotNull(text, big, sub).joinToString(" "), n.category)) return false
+            val vm = VoicemailParse.parse(pkg, title, text, big, messages, sub) ?: return false
+            val name = if (vm.caller.any { it.isDigit() }) runCatching { PhoneSms(context).nameOf(vm.caller) }.getOrNull() else vm.caller
+            val entry = PhoneVoicemails.Entry(System.currentTimeMillis(), vm.caller, name, vm.transcript, vm.source)
+            if (!PhoneVoicemails.add(context, entry)) return false
+            PhoneActionLog.add(context, "voicemail", "voicemail from ${name ?: vm.caller} via ${vm.source} (${vm.transcript.length} characters of transcript; channel ${n.channelId})", true, null)
+            if (settings.voicemailWake) PhoneWake.voicemail(context, entry)
+            return true
+        }
+
     }
 }

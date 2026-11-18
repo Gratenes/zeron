@@ -77,6 +77,11 @@ class PhoneSettings(context: Context) {
         get() = prefs.getBoolean("wake-enabled", false)
         set(value) = prefs.edit().putBoolean("wake-enabled", value).apply()
 
+    /** A new voicemail is sent into the same chat as new texts ([wakeChatId]). */
+    var voicemailWake: Boolean
+        get() = prefs.getBoolean("voicemail-wake", false)
+        set(value) = prefs.edit().putBoolean("voicemail-wake", value).apply()
+
     var wakeChatId: String?
         get() = prefs.getString("wake-chat-id", null)
         set(value) = prefs.edit().putString("wake-chat-id", value).apply()
@@ -100,6 +105,7 @@ class PhoneSettings(context: Context) {
         ATTACH_READ("attachments-read", "Read attachments", "Save photos, videos and files from messages so agents can look at them", true),
         ATTACH_SEND("attachments-send", "Send attachments", "Photos, videos and files in a message (through Google Messages)", false),
         REACTIONS("reactions", "React to messages", "Send an emoji reaction to a message", false),
+        VOICEMAIL("voicemail", "Read voicemails", "New voicemails announced by Google Voice or the Phone app, with their transcripts", true),
         INSTALL("install", "Let agents install apps", "Install an .apk an agent put on the phone, after you confirm it", false),
         SHELL("shell", "Allow Shizuku shell", "Let Zeron use Shizuku for a few fixed system actions (grant a permission, stop an app, read a setting)", false),
         FILES("files", "Full access to this phone's files", "List, read and write any file in shared storage", false),
