@@ -1942,13 +1942,33 @@ return ui.component(function(props: Props): Node
 		end
 	end
 
+	-- A press on the draft itself reaches the pill's `on_press` as it bubbles
+	-- up (the draft marks it first). The pill keeps focus where it is
+	-- (`focus_on_press = false`, as the draft is inside it), so the press
+	-- gives the draft the keys, but the caret is the draft's own to place,
+	-- and the word or line it chose (a double click, a triple): sending the
+	-- caret to the end would undo them. Only a press elsewhere on the pill
+	-- (its hairline, the press layer's blind spot) puts the caret at the end.
+	local pressed_draft = false
+	local function from_pill()
+		if pressed_draft then
+			pressed_draft = false
+			local el = field:peek()
+			if el then
+				el:focus({ scroll = false })
+			end
+			return
+		end
+		to_draft()
+	end
+
 	local surface = ui.div {
 		ref = pill,
 		on_resize = measure(pill_w, "w"),
 		-- The pill's hairline border too: the press layer below sits inside
 		-- it, so a press on the hairline reached nothing.
 		focus_on_press = false,
-		on_press = to_draft,
+		on_press = from_pill,
 		relative = true,
 		w_full = true,
 		h = presented(function(g) return g.height end),
@@ -2006,6 +2026,9 @@ return ui.component(function(props: Props): Node
 			h = presented(function(g) return g.text.height end),
 			ui.textarea(EditorMenu.on({
 				ref = field,
+				on_press = function()
+					pressed_draft = true
+				end,
 				value = value,
 				label = locale.t("ds.composer.message"),
 				placeholder = placeholder,
