@@ -109,9 +109,18 @@ jobs:
           ZERON_ZGX_DEFAULT_ENGINE_DATA_NAME: Zeron-dev
           ZERON_ZGX_DEFAULT_ENGINE_BIN: '%LOCALAPPDATA%\Programs\Zeron\zeron-engine.exe'
           ZERON_ZGX_DEFAULT_ROUTE: main
+        # ort-sys downloads the ONNX runtime from cdn.pyke.io in its build
+        # script, which has failed on the runner more than once (v46, v52):
+        # a network blip, not a code error. Retry a few times, with a pause.
         run: |
-          cargo build --release
-          if ($LASTEXITCODE -ne 0) { throw 'zgx failed to build' }
+          $ok = $false
+          foreach ($attempt in 1..3) {
+            cargo build --release
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Host "zgx build attempt $attempt failed (exit $LASTEXITCODE)"
+            Start-Sleep -Seconds (30 * $attempt)
+          }
+          if (-not $ok) { throw 'zgx failed to build' }
       # The headless engine the PC runs as zeron-engine.exe
       # (build-engine-headless.ps1): public zeron-v2 defaults, no secrets.
       - name: zeron-engine
