@@ -217,6 +217,9 @@ struct RunHandle {
     /// The run's signs of life (any stream event, a wake): the watchdog's
     /// evidence that a run which should be answering is not.
     activity: Arc<Activity>,
+    /// The step the run is in before its agent streams (see [`staged`]):
+    /// what a run that never starts is waiting on.
+    stage: Arc<Mutex<&'static str>>,
 }
 
 /// A run's signs of life: when the last was, and how many there have been
@@ -505,6 +508,43 @@ mod warm_start;
 mod watchdog;
 pub use watchdog::{RunInfo, RunReport, STALL_NOTE, StatusInfo};
 pub use warm_start::WarmOutcome;
+
+/// How long a run may sit in one step before the log says
+/// which step it is in.
+const SLOW_STAGE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Await one step of a run's start, recording it as the run's stage and, if
+/// it takes longer than [`SLOW_STAGE`], saying which step in the log (and
+/// again when it ends): a run that never starts is otherwise silent about
+/// what it waits for.
+async fn staged<T>(
+    stage: &Mutex<&'static str>,
+    chat_id: &str,
+    run_id: &str,
+    name: &'static str,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    *lock(stage) = name;
+    let began = tokio::time::Instant::now();
+    tokio::pin!(future);
+    let out = tokio::select! {
+        out = &mut future => out,
+        () = tokio::time::sleep(SLOW_STAGE) => {
+            tracing::warn!(chat = %chat_id, run_id = %run_id, stage = name, "run is waiting in this step of its start");
+            let out = future.await;
+            tracing::warn!(
+                chat = %chat_id,
+                run_id = %run_id,
+                stage = name,
+                waited_s = began.elapsed().as_secs(),
+                "run's wait in this step ended"
+            );
+            out
+        }
+    };
+    *lock(stage) = "starting";
+    out
+}
 
 /// Milliseconds on the engine's monotonic clock (tokio's, so a paused test
 /// clock moves it): what run activity is stamped with. Immune to the wall
@@ -1650,75 +1690,111 @@ impl SessionsEngine {
         // message sent meanwhile registers its own: a retry the user stopped
         // (or the shutdown overtook) while no run was live, and a revival a
         // newer message has taken the chat from, end here instead of starting.
-        let mut runs = lock(&self.inner.runs);
-        let stops = self.inner.user_stop_count(chat_id);
-        let moved_on = superseded || (revival.is_some() && runs.contains_key(chat_id));
-        let stopped = stops_seen.is_some_and(|seen| seen != stops);
-        let shutting_down = stops_seen.is_some()
-            && self
-                .inner
-                .shutting_down
-                .load(std::sync::atomic::Ordering::Acquire);
-        // A deleted chat takes no turn: a message queued behind the run its
-        // delete ended, or a send that crossed the delete. (Checked under the
-        // run lock: a delete after this finds the run below and ends it, see
-        // `follow_chat_deletions`.)
-        let deleted = self.inner.workspace().is_some_and(|ws| ws.chat_deleted(chat_id));
-        if deleted {
-            drop(runs);
-            tracing::info!(chat = %chat_id, "run not started: the chat was deleted");
-            return Ok(String::new());
-        }
-        if moved_on || stopped || shutting_down {
-            drop(runs);
-            if moved_on {
-                tracing::info!(chat = %chat_id, "auto-resume skipped: the chat moved on");
-            } else {
-                tracing::info!(chat = %chat_id, stopped, "start retry abandoned");
-                self.inner.abandon_retry(chat_id, shutting_down && !stopped);
+        let (raced, stops, watch_fresh) = {
+            let mut runs = lock(&self.inner.runs);
+            let stops = self.inner.user_stop_count(chat_id);
+            let moved_on = superseded || (revival.is_some() && runs.contains_key(chat_id));
+            let stopped = stops_seen.is_some_and(|seen| seen != stops);
+            let shutting_down = stops_seen.is_some()
+                && self
+                    .inner
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::Acquire);
+            // A deleted chat takes no turn: a message queued behind the run its
+            // delete ended, or a send that crossed the delete. (Checked under the
+            // run lock: a delete after this finds the run below and ends it, see
+            // `follow_chat_deletions`.)
+            let deleted = self.inner.workspace().is_some_and(|ws| ws.chat_deleted(chat_id));
+            if deleted {
+                drop(runs);
+                tracing::info!(chat = %chat_id, "run not started: the chat was deleted");
+                return Ok(String::new());
             }
-            return Ok(String::new());
+            if moved_on || stopped || shutting_down {
+                drop(runs);
+                if moved_on {
+                    tracing::info!(chat = %chat_id, "auto-resume skipped: the chat moved on");
+                } else {
+                    tracing::info!(chat = %chat_id, stopped, "start retry abandoned");
+                    self.inner.abandon_retry(chat_id, shutting_down && !stopped);
+                }
+                return Ok(String::new());
+            }
+            // Another send found the chat idle at the same moment and started its
+            // run first (a stop and a resend, a queue flush beside a send): a
+            // second run entered here would replace that one in the table, leaving
+            // two agents on one chat and one of them unreachable. This message
+            // goes to the run that is there.
+            let raced = !idle
+                && runs
+                    .get(chat_id)
+                    .is_some_and(|h| !h.retiring.load(std::sync::atomic::Ordering::Acquire));
+            // A Cloud machine's setup runs before any sign of life: not watched
+            // (a local run's credential, from rotation or a pin, says nothing of it).
+            let watch_fresh = !idle && !crate::runner::is_cloud_platform();
+            // A new turn: a Stop's mark belongs to the one before it.
+            if !idle {
+                self.inner.journal.clear_user_stop(chat_id);
+            }
+            if !raced {
+                runs.insert(
+                    chat_id.to_string(),
+                    RunHandle {
+                        voice: (harness_id == HarnessId::Codex).then_some(voice_handle),
+                        voice_active: voice_active.clone(),
+                        run_id: run_id.clone(),
+                        steerable: harness.supports_steering(),
+                        runtime_config: RuntimeConfig::new(harness_id, &request, harness.clone()),
+                        steer_tx,
+                        interrupt_token,
+                        stops_turn_in_place: harness.supports_steering() && harness.stops_turn_in_place(),
+                        steer_stops_tool: harness.supports_steering()
+                            && harness.stops_turn_in_place()
+                            && harness.steer_stops_tool(),
+                        open_tools: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                        redeliver_on_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        redeliver: Arc::new(Mutex::new(Vec::new())),
+                        turn: turn.clone(),
+                        started: started.clone(),
+                        cancel: cancel_tx,
+                        engine_tx,
+                        pending_inputs,
+                        routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                        fork_history_sent: fork_history_sent.clone(),
+                        retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        shutdown_cut: std::sync::atomic::AtomicBool::new(false),
+                        credential,
+                        binary,
+                        side_chats_only,
+                        born: tokio::time::Instant::now(),
+                        activity: Arc::new(Activity::new()),
+                        stage: Arc::new(Mutex::new("starting")),
+                    },
+                );
+            }
+            drop(runs);
+            (raced, stops, watch_fresh)
+        };
+        if raced {
+            tracing::info!(chat = %chat_id, "a run started meanwhile; sending this message to it");
+            if resume_injected {
+                request.resume = None;
+            }
+            if let Some(revival) = revival {
+                lock(&self.inner.revivals).insert(chat_id.to_string(), revival);
+            }
+            return self
+                .dispatch_with(
+                    chat_id,
+                    harness_id,
+                    request,
+                    Some(user_id),
+                    startup_retry,
+                    spawn_attempt,
+                    stops_seen,
+                )
+                .await;
         }
-        // A Cloud machine's setup runs before any sign of life: not watched.
-        let watch_fresh = !idle && credential.is_none();
-        // A new turn: a Stop's mark belongs to the one before it.
-        if !idle {
-            self.inner.journal.clear_user_stop(chat_id);
-        }
-        runs.insert(
-            chat_id.to_string(),
-            RunHandle {
-                voice: (harness_id == HarnessId::Codex).then_some(voice_handle),
-                voice_active: voice_active.clone(),
-                run_id: run_id.clone(),
-                steerable: harness.supports_steering(),
-                runtime_config: RuntimeConfig::new(harness_id, &request, harness.clone()),
-                steer_tx,
-                interrupt_token,
-                stops_turn_in_place: harness.supports_steering() && harness.stops_turn_in_place(),
-                steer_stops_tool: harness.supports_steering()
-                    && harness.stops_turn_in_place()
-                    && harness.steer_stops_tool(),
-                open_tools: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                redeliver_on_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                redeliver: Arc::new(Mutex::new(Vec::new())),
-                turn: turn.clone(),
-                started: started.clone(),
-                cancel: cancel_tx,
-                engine_tx,
-                pending_inputs,
-                routed_steers: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-                fork_history_sent: fork_history_sent.clone(),
-                retiring: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                shutdown_cut: std::sync::atomic::AtomicBool::new(false),
-                credential,
-                binary,
-                side_chats_only,
-                born: tokio::time::Instant::now(),
-                activity: Arc::new(Activity::new()),
-            },
-        );
-        drop(runs);
         tracing::info!(
             chat = %chat_id,
             run_id = %run_id,
@@ -4770,6 +4846,11 @@ async fn drive_run(
     side_chats_only: bool,
     mut title: Option<crate::titles::TitleAfterFirstOutput>,
 ) {
+    let stage = lock(&inner.runs)
+        .get(&chat_id)
+        .filter(|h| h.run_id == run_id)
+        .map(|h| h.stage.clone())
+        .unwrap_or_default();
     let device_id = inner.device_id.clone();
     // Captured for post-run auto-titling (the request moves into the harness).
     let harness_id = harness.id();
@@ -4803,7 +4884,7 @@ async fn drive_run(
                 inner.stop_warm(&chat_id).await;
                 None
             }
-            taken = inner.take_warm(&chat_id, harness_id) => taken,
+            taken = staged(&stage, &chat_id, &run_id, "warm start", inner.take_warm(&chat_id, harness_id)) => taken,
         }
     };
     // Launched with native subagents switched otherwise than now: its Zeron
@@ -5025,7 +5106,7 @@ async fn drive_run(
                 None => tokio::select! {
                     biased;
                     _ = controls.interrupt.cancelled() => None,
-                    lease = inner.registry.execution_lease(harness_id) => Some(Arc::new(lease)),
+                    lease = staged(&stage, &chat_id, &run_id, "CLI execution lease (an update pending?)", inner.registry.execution_lease(harness_id)) => Some(Arc::new(lease)),
                 },
             };
             if let Some(lease) = lease {
@@ -5047,10 +5128,16 @@ async fn drive_run(
                 );
                 // Host-resolved spawn env (a Cloud device's credential broker);
                 // `RunRequest::env` is serde-skipped, never persisted.
-                let prepared = inner
-                    .registry
-                    .prepare_run(harness_id, Some(&chat_id), &mut wire_request)
-                    .await;
+                let prepared = staged(
+                    &stage,
+                    &chat_id,
+                    &run_id,
+                    "run environment (rotation, pins, plugins)",
+                    inner
+                        .registry
+                        .prepare_run(harness_id, Some(&chat_id), &mut wire_request),
+                )
+                .await;
                 if prepared.is_ok() {
                     // Preparing can decide the chat's account (a plugin's
                     // `run.preparing` pin): the session parks on what it
@@ -5093,7 +5180,16 @@ async fn drive_run(
                             Some(taken) => {
                                 harness.run_warm(&taken.key, wire_request, controls).await
                             }
-                            None => harness.run(wire_request, controls).await,
+                            None => {
+                                staged(
+                                    &stage,
+                                    &chat_id,
+                                    &run_id,
+                                    "agent spawn",
+                                    harness.run(wire_request, controls),
+                                )
+                                .await
+                            }
                         }
                     }
                     Err(message) => Err(zeron_harness::HarnessError::NotSignedIn(message)),

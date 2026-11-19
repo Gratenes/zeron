@@ -35,6 +35,10 @@ pub(super) const ORPHAN_GRACE: std::time::Duration = std::time::Duration::from_s
 /// for this long.
 pub(super) const SILENT_AFTER: std::time::Duration = std::time::Duration::from_secs(3 * 60);
 
+/// A run whose harness reports no agent pid, with a message it took and never
+/// confirmed, is judged after this much silence.
+pub(super) const UNSEEN_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 /// A message sent to a parked run starts a turn within this long, or the run
 /// is presumed stuck. Its agent process still being alive stretches it to
 /// [`TURN_START_ALIVE`]: a slow provider answers late, a wedged runtime
@@ -75,6 +79,8 @@ pub struct RunInfo {
     pub background: bool,
     /// Messages accepted into the run's mailbox that no turn has confirmed.
     pub pending_steers: usize,
+    /// The step of its start the run is in, `starting` between steps.
+    pub stage: String,
     pub status: Option<String>,
 }
 
@@ -99,6 +105,45 @@ pub struct RunReport {
     pub working_without_run: Vec<String>,
 }
 
+/// What the watchdog knows of one run.
+struct RunView {
+    voice_live: bool,
+    /// Since its last sign of life.
+    silent: std::time::Duration,
+    /// Since its entry was made.
+    age: std::time::Duration,
+    /// Its harness stream is open.
+    started: bool,
+    /// `None`: no agent pid known. `Some(true)`: known, and that process is gone.
+    agent_pid_gone: Option<bool>,
+    is_claude: bool,
+    /// A message the run took that no turn has confirmed.
+    unconfirmed_steers: bool,
+}
+
+/// Whether a run has no agent behind it and shows no sign of life, as far as
+/// the watchdog can tell. Never a judgement on a quiet run with an agent.
+///
+/// `cloud`: this engine is a Cloud machine, whose setup runs before any sign
+/// of life. That is what decides it; whether the run has a credential does
+/// not: local account rotation and pins give every Claude run one.
+fn is_dead(run: &RunView, silent_after: std::time::Duration, cloud: bool) -> bool {
+    if run.voice_live || run.silent < silent_after {
+        return false;
+    }
+    if !run.started {
+        return !cloud && run.age >= silent_after;
+    }
+    match run.agent_pid_gone {
+        Some(gone) => gone,
+        // Claude reports its pid for as long as the process lives. A harness
+        // that reports none can be quiet for a long tool call; but a message
+        // it took and never confirmed, with no sign of life for this long, is
+        // not a quiet run.
+        None => run.is_claude || (run.silent >= UNSEEN_AFTER && run.unconfirmed_steers),
+    }
+}
+
 impl SessionsEngine {
     /// The run table, with each run's age and how long it has been silent,
     /// and every non-idle status row.
@@ -121,6 +166,7 @@ impl SessionsEngine {
                     open_tools: run.open_tools.load(std::sync::atomic::Ordering::Acquire),
                     background: run.turn.background_live(),
                     pending_steers: lock(&run.routed_steers).len(),
+                    stage: (*lock(&run.stage)).to_owned(),
                     status: statuses.get(chat_id).map(|s| format!("{:?}", s.status)),
                 }
             })
@@ -243,20 +289,27 @@ impl SessionsEngine {
     /// way to spawning; a Cloud machine's setup is allowed its time).
     fn dead_runs(&self, silent_after: std::time::Duration) -> Vec<(String, String, HarnessId)> {
         let now = mono_ms();
-        let silent_ms = i64::try_from(silent_after.as_millis()).unwrap_or(i64::MAX);
+        let cloud = crate::runner::is_cloud_platform();
         lock(&self.inner.runs)
             .iter()
             .filter(|(_, run)| {
-                if run.voice_active.live() || now - run.activity.at_ms() < silent_ms {
-                    return false;
-                }
-                if !run.started.load(std::sync::atomic::Ordering::Acquire) {
-                    return run.credential.is_none() && run.born.elapsed() >= silent_after;
-                }
-                match run.turn.agent_pid() {
-                    Some(pid) => zeron_harness::process::process_alive(pid) == Some(false),
-                    None => run.runtime_config.harness_id == HarnessId::ClaudeCode,
-                }
+                let pid = run.turn.agent_pid();
+                is_dead(
+                    &RunView {
+                        voice_live: run.voice_active.live(),
+                        silent: std::time::Duration::from_millis(
+                            u64::try_from(now - run.activity.at_ms()).unwrap_or(0),
+                        ),
+                        age: run.born.elapsed(),
+                        started: run.started.load(std::sync::atomic::Ordering::Acquire),
+                        agent_pid_gone: pid
+                            .map(|pid| zeron_harness::process::process_alive(pid) == Some(false)),
+                        is_claude: run.runtime_config.harness_id == HarnessId::ClaudeCode,
+                        unconfirmed_steers: !lock(&run.routed_steers).is_empty(),
+                    },
+                    silent_after,
+                    cloud,
+                )
             })
             .map(|(chat, run)| {
                 (

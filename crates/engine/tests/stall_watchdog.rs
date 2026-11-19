@@ -37,6 +37,10 @@ enum Behavior {
     /// Like [`Self::DeafAfterFirst`], and ignores its teardown too: the run
     /// entry would stay listed for ever.
     UnkillableAfterFirst,
+    /// Starts a turn and works on it until it is stopped.
+    Busy,
+    /// Never gets as far as opening its stream: the spawn itself hangs.
+    HangSpawn,
     /// Opens its stream and never says a word.
     Mute,
     /// Starts a turn, then goes silent with an agent pid that is gone.
@@ -102,6 +106,10 @@ impl Harness for Agent {
             .lock()
             .unwrap()
             .push((spawn, request.prompt.clone()));
+        if matches!(behavior, Behavior::HangSpawn) {
+            controls.interrupt.cancelled().await;
+            return Err(HarnessError::Protocol("spawn cancelled".into()));
+        }
         if let Behavior::DeadMidTurn(pid) = behavior {
             controls.turn.set_agent_pid(Some(pid));
         }
@@ -143,7 +151,8 @@ impl Harness for Agent {
                 .await;
             }
             match behavior {
-                Behavior::Mute | Behavior::DeadMidTurn(_) => {
+                Behavior::HangSpawn => unreachable!("returned before streaming"),
+                Behavior::Mute | Behavior::DeadMidTurn(_) | Behavior::Busy => {
                     controls.interrupt.cancelled().await;
                     interrupted(tx).await;
                 }
@@ -201,7 +210,30 @@ struct Rig {
     _dir: tempfile::TempDir,
 }
 
+/// What account rotation and pins give every local Claude run: a credential.
+struct LocalRotation;
+
+#[async_trait]
+impl zeron_engine::registry::RunEnvironment for LocalRotation {
+    async fn prepare(
+        &self,
+        _harness: HarnessId,
+        _chat: Option<&str>,
+        _request: &mut RunRequest,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn credential(&self, _harness: HarnessId, _chat: Option<&str>) -> Option<String> {
+        Some("login:local-rotation".into())
+    }
+}
+
 fn rig(script: Vec<Behavior>) -> Rig {
+    rig_with(script, false)
+}
+
+fn rig_with(script: Vec<Behavior>, local_credential: bool) -> Rig {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
@@ -213,6 +245,9 @@ fn rig(script: Vec<Behavior>) -> Rig {
     });
     let registry = HarnessRegistry::new();
     registry.register(agent.clone());
+    if local_credential {
+        registry.set_run_environment(Arc::new(LocalRotation));
+    }
     let dir = tempfile::tempdir().unwrap();
     let core = EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
         .expect("engine core assembles");
@@ -474,4 +509,117 @@ async fn a_run_that_ignores_its_teardown_is_dropped_and_its_message_sent_again()
     let report = rig.core.sessions.run_report();
     assert_eq!(report.runs.len(), 1, "only the new run is listed");
     rig.core.sessions.shutdown().await;
+}
+
+/// A stop and an immediate resend: the stopped run's teardown and the new
+/// run's start overlap. An agent must come up and answer.
+#[tokio::test(start_paused = true)]
+async fn a_message_sent_right_after_a_stop_starts_an_agent_that_answers() {
+    for concurrent in [false, true] {
+        let rig = rig(vec![Behavior::Busy, Behavior::Normal]);
+        rig.send("work").await;
+        wait_for(|| rig.spawns() == 1, "the agent to start").await;
+        if concurrent {
+            let (stopped, sent) = tokio::join!(
+                rig.core.sessions.interrupt(CHAT),
+                rig.core
+                    .sessions
+                    .dispatch(CHAT, HarnessId::Mock, request("again"), None)
+            );
+            stopped.unwrap();
+            sent.unwrap();
+        } else {
+            rig.core.sessions.interrupt(CHAT).await.unwrap();
+            rig.send("again").await;
+        }
+        wait_for(
+            || rig.shows("answered: again") && rig.status() == Some(SessionStatus::Idle),
+            "the resent message to be answered",
+        )
+        .await;
+        assert_eq!(rig.spawns(), 2, "concurrent={concurrent}: one new agent");
+        rig.core.sessions.shutdown().await;
+    }
+}
+
+/// Two sends at once after a stop (a queue flush racing a resend) start one
+/// agent between them, never two beside each other.
+#[tokio::test(start_paused = true)]
+async fn two_sends_at_once_after_a_stop_share_one_agent() {
+    let rig = rig(vec![Behavior::Busy, Behavior::Normal, Behavior::Normal]);
+    rig.send("work").await;
+    wait_for(|| rig.spawns() == 1, "the agent to start").await;
+    rig.core.sessions.interrupt(CHAT).await.unwrap();
+    let (a, b) = tokio::join!(
+        rig.core
+            .sessions
+            .dispatch(CHAT, HarnessId::Mock, request("one"), None),
+        rig.core
+            .sessions
+            .dispatch(CHAT, HarnessId::Mock, request("two"), None)
+    );
+    a.unwrap();
+    b.unwrap();
+    wait_for(
+        || rig.shows("answered: one") && rig.shows("answered: two"),
+        "both to be answered",
+    )
+    .await;
+    assert_eq!(rig.spawns(), 2, "one agent for both, not one each");
+    rig.core.sessions.shutdown().await;
+}
+
+/// Local account rotation and pins give EVERY Claude run a credential, which
+/// is not what a Cloud machine's broker is: a run that never gets as far as
+/// opening its stream is still judged, and still ends with a note.
+#[tokio::test(start_paused = true)]
+async fn a_run_that_never_spawns_is_judged_though_rotation_gave_it_a_credential() {
+    let rig = rig_with(
+        vec![Behavior::HangSpawn, Behavior::HangSpawn, Behavior::Normal],
+        true,
+    );
+    rig.send("hello").await;
+    // 120 s: sent again once. 240 s: the second run is just as stuck.
+    tokio::time::sleep(Duration::from_secs(250)).await;
+    wait_for(
+        || rig.status() == Some(SessionStatus::Errored),
+        "the turn to end with a note",
+    )
+    .await;
+    assert!(
+        rig.shows("Agent unresponsive"),
+        "the chat says what happened"
+    );
+    assert_eq!(rig.spawns(), 2, "sent again once, not for ever");
+    assert!(rig.core.sessions.run_report().runs.is_empty());
+    rig.core.sessions.shutdown().await;
+}
+
+/// A harness that reports no agent pid can be quiet for a long tool call and
+/// is left alone. Not with a message it took and never confirmed: after half
+/// an hour of silence the run is dropped and the message sent again.
+#[tokio::test(start_paused = true)]
+async fn a_quiet_run_without_a_pid_is_left_alone_but_not_with_a_message_it_never_took_up() {
+    let quiet = rig(vec![Behavior::Busy]);
+    quiet.send("long build").await;
+    wait_for(|| quiet.spawns() == 1, "the agent to start").await;
+    tokio::time::sleep(Duration::from_secs(40 * 60)).await;
+    assert_eq!(quiet.spawns(), 1, "a long quiet turn is not a stuck run");
+    assert_eq!(quiet.core.sessions.run_report().runs.len(), 1);
+    quiet.core.sessions.shutdown().await;
+
+    let stuck = rig(vec![Behavior::Busy, Behavior::Normal]);
+    stuck.send("long build").await;
+    wait_for(|| stuck.spawns() == 1, "the agent to start").await;
+    // Sent while the turn runs: taken into the mailbox, never confirmed.
+    stuck.send("also this").await;
+    assert_eq!(stuck.core.sessions.run_report().runs[0].pending_steers, 1);
+    tokio::time::sleep(Duration::from_secs(31 * 60)).await;
+    wait_for(
+        || stuck.shows("answered: also this") && stuck.status() == Some(SessionStatus::Idle),
+        "the message to be answered by a fresh run",
+    )
+    .await;
+    assert_eq!(stuck.spawns(), 2);
+    stuck.core.sessions.shutdown().await;
 }

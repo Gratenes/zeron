@@ -39,6 +39,9 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
 /// Long enough for a slow link: native updaters download hundreds of megabytes
 /// without printing progress, and stopping one mid-download can leave a
 /// truncated CLI behind.
+/// How often an automatic update that waits for a quiet moment looks for one.
+const AUTOMATIC_UPDATE_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub(crate) const UPDATE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// How long a device asking another to update one of its CLIs waits for the
 /// answer: [`UPDATE_TIMEOUT`], and room for a check, verification and the
@@ -1807,21 +1810,53 @@ impl HarnessUpdateCoordinator {
         let lease = match wait_reason {
             None => None,
             Some(reason) => {
-                self.inner.registry.begin_update(harness);
+                // An update someone asked for may hold new runs back while it
+                // drains the old (their choice, and it says so). An automatic
+                // one waits for a quiet moment WITHOUT gating anything: its
+                // marker and a queued writer held every new run of the CLI
+                // behind it, and on a machine where a chat is always
+                // running (a parked agent with background work never lets
+                // go) that was for ever (2026-11-18/19: chats "working" with
+                // no agent, until the engine restarted).
+                if !automatic {
+                    self.inner.registry.begin_update(harness);
+                }
                 self.mutate(harness, |status| {
                     status.phase = HarnessUpdatePhase::WaitingForIdle;
                     status.wait_reason = Some(reason);
                     status.progress = None;
                     status.error = None;
                 });
-                Some(tokio::select! {
-                    _ = cancel.cancelled() => {
-                        self.finish_cancelled(harness);
-                        intent.finish();
-                        return Err("update cancelled".into());
-                    }
-                    lease = self.inner.registry.update_lease(harness) => lease,
-                })
+                if automatic {
+                    tracing::info!(?harness, "automatic update waiting for a quiet moment (new runs are not held)");
+                    let lease = loop {
+                        if let Some(lease) = self.inner.registry.try_update_lease(harness) {
+                            break lease;
+                        }
+                        tokio::select! {
+                            _ = cancel.cancelled() => {
+                                self.finish_cancelled(harness);
+                                intent.finish();
+                                return Err("update cancelled".into());
+                            }
+                            _ = tokio::time::sleep(AUTOMATIC_UPDATE_POLL) => {}
+                        }
+                    };
+                    // Quiet now, and the lease held: from here a new run waits
+                    // for the update, as before.
+                    self.inner.registry.begin_update(harness);
+                    tracing::info!(?harness, "automatic update has its quiet moment");
+                    Some(lease)
+                } else {
+                    Some(tokio::select! {
+                        _ = cancel.cancelled() => {
+                            self.finish_cancelled(harness);
+                            intent.finish();
+                            return Err("update cancelled".into());
+                        }
+                        lease = self.inner.registry.update_lease(harness) => lease,
+                    })
+                }
             }
         };
         if cancel.is_cancelled() || !self.inner.registry.enabled_set().contains(&harness) {
