@@ -282,6 +282,10 @@ markers = [
   ["crates/mcp/src/tools/phone.rs", 'phone_files_hash'],
   ["crates/mcp/src/tools/phone.rs", 'phone_sms_react'],
   ["crates/mcp/src/tools/phone.rs", 'phone_sms_attachment'],
+  ["crates/mcp/src/tools/phone.rs", 'phone_grant'],
+  ["crates/mcp/src/tools/phone.rs", 'phone_force_stop'],
+  ["crates/mcp/src/tools/phone.rs", 'phone_settings_get'],
+  ["crates/mcp/src/tools/phone.rs", '"attachments"'],
 ]
 rust = [["zeron-mcp", "phone"]]
 
