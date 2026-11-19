@@ -132,7 +132,7 @@ markers = [
   ["crates/engine/src/sessions.rs", 'AUTH_RELAUNCH_PROMPT'],
   ["crates/engine/src/sessions.rs", 'fn auth_relaunch_due'],
 ]
-rust = [["zeron-engine", "auth_relaunch"]]
+rust = [["zeron-engine", "a_refused_"]]
 
 [[feature]]
 id = "claude-rotation"
