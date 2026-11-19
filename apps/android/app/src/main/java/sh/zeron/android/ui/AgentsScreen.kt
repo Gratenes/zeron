@@ -378,6 +378,11 @@ fun AgentsScreen(model: AppModel, onBack: () -> Unit) {
                             onSignOut = { signingOut = h to it },
                         )
                     }
+                    // Pi's custom OpenAI-compatible providers live under its card.
+                    val host = device
+                    if (h.id == "pi" && h.installed && host != null) {
+                        item("pi-providers") { PiProvidersSection(model, host.id) }
+                    }
                 }
             }
         }

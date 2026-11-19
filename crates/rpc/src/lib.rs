@@ -231,6 +231,11 @@ pub mod methods {
     pub const COMPLETE_AGENT_LOGIN: &str = "CompleteAgentLogin";
     pub const POLL_AGENT_LOGIN: &str = "PollAgentLogin";
     pub const CANCEL_AGENT_LOGIN: &str = "CancelAgentLogin";
+    // Pi's custom model providers (`models.json`), per device like the logins.
+    pub const LIST_PI_PROVIDERS: &str = "ListPiProviders";
+    pub const SAVE_PI_PROVIDER: &str = "SavePiProvider";
+    pub const REMOVE_PI_PROVIDER: &str = "RemovePiProvider";
+    pub const DISCOVER_PI_PROVIDER_MODELS: &str = "DiscoverPiProviderModels";
     // Uploads / attachments (ControlRpc, relay-forwardable — target the chat's host device).
     pub const UPLOAD_CHUNK: &str = "UploadChunk";
     pub const UPLOAD_COMMIT: &str = "UploadCommit";

@@ -1318,6 +1318,62 @@ pub struct AgentAccountWarning {
     pub message: String,
 }
 
+/// A model provider in Pi's `models.json` (`providers.<name>`) — usually an
+/// OpenAI-compatible endpoint the user added. The API key never leaves the
+/// engine: only its last four characters and where it comes from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiProvider {
+    pub name: String,
+    pub base_url: String,
+    /// Pi's wire protocol (`openai-completions`, `openai-responses`,
+    /// `anthropic-messages`, …).
+    pub api: String,
+    pub key_source: PiKeySource,
+    /// Last four characters of a literal key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_tail: Option<String>,
+    #[serde(default)]
+    pub models: Vec<PiProviderModel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiProviderModel {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// Where a Pi provider's `apiKey` comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PiKeySource {
+    /// A literal key in `models.json`.
+    Literal,
+    /// `$VAR` / `${VAR}`: an environment variable.
+    Env,
+    /// `!command`: a shell command's output.
+    Command,
+    /// No `apiKey` (Pi may still find one in `auth.json`).
+    None,
+}
+
+/// `SavePiProvider` params: create, edit or rename (`previous_name`) one
+/// provider. `api_key: None` keeps the stored key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavePiProvider {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_name: Option<String>,
+    pub base_url: String,
+    pub api: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    pub models: Vec<PiProviderModel>,
+}
+
 /// `StartAgentLogin` reply: open `url`, then either paste the code back
 /// (`CompleteAgentLogin`) or poll until the browser flow lands (`PollAgentLogin`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

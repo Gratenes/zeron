@@ -499,6 +499,23 @@ struct CompleteAgentLoginParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PiProviderNameParams {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoverPiProviderModelsParams {
+    base_url: String,
+    /// A key just typed; `None` = use provider `name`'s stored key.
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UploadChunkParams {
     upload_id: String,
     /// Base64 payload chunk.
@@ -1667,6 +1684,10 @@ fn forwardable(method: &str) -> bool {
             | methods::COMPLETE_AGENT_LOGIN
             | methods::POLL_AGENT_LOGIN
             | methods::CANCEL_AGENT_LOGIN
+            | methods::LIST_PI_PROVIDERS
+            | methods::SAVE_PI_PROVIDER
+            | methods::REMOVE_PI_PROVIDER
+            | methods::DISCOVER_PI_PROVIDER_MODELS
             // Uploads/attachments target the chat's host device (the agent reads
             // the committed file from that device's disk).
             | methods::UPLOAD_CHUNK
@@ -1968,6 +1989,8 @@ impl RpcService for EngineRpc {
                 | methods::COMPLETE_AGENT_LOGIN
                 | methods::ACTIVATE_AGENT_ACCOUNT
                 | methods::FORGET_AGENT_ACCOUNT
+                | methods::SAVE_PI_PROVIDER
+                | methods::REMOVE_PI_PROVIDER
         ) {
             self.voice.retire();
         }
@@ -3852,6 +3875,38 @@ impl RpcService for EngineRpc {
                 let p: LoginIdParams = parse_params(params)?;
                 self.agent_accounts.cancel_login(&p.login_id);
                 RpcReply::value(&serde_json::json!({ "ok": true }))
+            }
+            methods::LIST_PI_PROVIDERS => {
+                let providers = self
+                    .agent_accounts
+                    .list_pi_providers()
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&providers)
+            }
+            methods::SAVE_PI_PROVIDER => {
+                let p: zeron_proto::SavePiProvider = parse_params(params)?;
+                let providers = self
+                    .agent_accounts
+                    .save_pi_provider(p)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&providers)
+            }
+            methods::REMOVE_PI_PROVIDER => {
+                let p: PiProviderNameParams = parse_params(params)?;
+                let providers = self
+                    .agent_accounts
+                    .remove_pi_provider(&p.name)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&providers)
+            }
+            methods::DISCOVER_PI_PROVIDER_MODELS => {
+                let p: DiscoverPiProviderModelsParams = parse_params(params)?;
+                let ids = self
+                    .agent_accounts
+                    .discover_pi_models(&p.base_url, p.api_key.as_deref(), p.name.as_deref())
+                    .await
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                RpcReply::value(&serde_json::json!({ "models": ids }))
             }
             methods::UPLOAD_CHUNK => {
                 let p: UploadChunkParams = parse_params(params)?;

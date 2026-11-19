@@ -583,6 +583,27 @@ pub(super) fn merge_json_entry(
     entry: Option<&serde_json::Value>,
     lock: StoreLock,
 ) -> Result<(), EngineError> {
+    merge_json(file, lock, |map| {
+        Ok(match entry {
+            Some(entry) => {
+                map.insert(key.to_string(), entry.clone());
+                true
+            }
+            None => map.remove(key).is_some(),
+        })
+    })
+}
+
+/// [`merge_json_entry`] for any edit: `mutate` changes the parsed top-level
+/// object (a missing file reads as `{}`) and returns whether it changed
+/// anything — `false` leaves the file untouched. It may run more than once
+/// (compare-before-write retries), each time on a fresh read, so it must
+/// not depend on earlier calls. An `Err` aborts with nothing written.
+pub(super) fn merge_json(
+    file: &Path,
+    lock: StoreLock,
+    mut mutate: impl FnMut(&mut serde_json::Map<String, serde_json::Value>) -> Result<bool, EngineError>,
+) -> Result<(), EngineError> {
     // Held for its Drop (the unlock) only.
     #[allow(dead_code)]
     enum Guard {
@@ -600,9 +621,6 @@ pub(super) fn merge_json_entry(
     };
     for _ in 0..MERGE_ATTEMPTS {
         let before = read()?;
-        if before.is_none() && entry.is_none() {
-            return Ok(()); // nothing to remove
-        }
         let mut store = match &before {
             Some(bytes) => serde_json::from_slice::<serde_json::Value>(bytes)
                 .ok()
@@ -615,17 +633,10 @@ pub(super) fn merge_json_entry(
                 })?,
             None => serde_json::json!({}),
         };
-        if let Some(map) = store.as_object_mut() {
-            match entry {
-                Some(entry) => {
-                    map.insert(key.to_string(), entry.clone());
-                }
-                None => {
-                    if map.remove(key).is_none() {
-                        return Ok(()); // already gone
-                    }
-                }
-            }
+        if let Some(map) = store.as_object_mut()
+            && !mutate(map)?
+        {
+            return Ok(()); // nothing to change (or to remove)
         }
         let json = serde_json::to_string_pretty(&store)
             .map_err(|e| EngineError::Other(format!("serialize {}: {e}", file.display())))?;

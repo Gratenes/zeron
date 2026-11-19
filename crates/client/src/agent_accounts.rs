@@ -11,6 +11,7 @@ use chrono::{DateTime, Local, Utc};
 use serde_json::{Value, json};
 use zeron_proto::{
     AgentAccount, AgentAccountWarning, AgentAccountsSnapshot, AgentLoginPoll, AgentLoginStart,
+    PiProvider, SavePiProvider,
 };
 use zeron_rpc::methods;
 
@@ -323,6 +324,62 @@ impl Client {
         )
         .await?;
         Ok(())
+    }
+
+    /// The custom model providers in Pi's `models.json` on the device. Keys
+    /// stay on the device: rows carry only their last four characters.
+    pub async fn list_pi_providers(&self, device_id: &str) -> Result<Vec<PiProvider>> {
+        let reply = self
+            .call_accounts(device_id, methods::LIST_PI_PROVIDERS, json!({}))
+            .await?;
+        decode(reply)
+    }
+
+    /// Create, edit or rename (`previous_name`) a Pi provider; `api_key:
+    /// None` keeps the stored key. Pi's model list follows on its own.
+    pub async fn save_pi_provider(
+        &self,
+        device_id: &str,
+        provider: &SavePiProvider,
+    ) -> Result<Vec<PiProvider>> {
+        let params = serde_json::to_value(provider).map_err(|e| ClientError::HostError(e.to_string()))?;
+        let reply = self
+            .call_accounts(device_id, methods::SAVE_PI_PROVIDER, params)
+            .await?;
+        decode(reply)
+    }
+
+    pub async fn remove_pi_provider(&self, device_id: &str, name: &str) -> Result<Vec<PiProvider>> {
+        let reply = self
+            .call_accounts(device_id, methods::REMOVE_PI_PROVIDER, json!({ "name": name }))
+            .await?;
+        decode(reply)
+    }
+
+    /// The model ids `GET {base_url}/models` lists, authenticated with
+    /// `api_key` or — when editing — provider `name`'s stored key.
+    pub async fn discover_pi_provider_models(
+        &self,
+        device_id: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let mut params = json!({ "baseUrl": base_url });
+        if let Some(key) = api_key.filter(|k| !k.trim().is_empty()) {
+            params["apiKey"] = json!(key);
+        }
+        if let Some(name) = name.filter(|n| !n.is_empty()) {
+            params["name"] = json!(name);
+        }
+        let reply = self
+            .call_accounts(device_id, methods::DISCOVER_PI_PROVIDER_MODELS, params)
+            .await?;
+        reply
+            .get("models")
+            .cloned()
+            .map(decode)
+            .unwrap_or_else(|| Err(ClientError::HostError("DiscoverPiProviderModels: bad reply".into())))
     }
 }
 

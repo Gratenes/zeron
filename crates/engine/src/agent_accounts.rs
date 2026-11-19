@@ -95,6 +95,7 @@ use crate::repos::home_dir;
 use crate::{EngineError, new_id, now_ms};
 
 mod oauth;
+mod pi_providers;
 #[cfg(test)]
 mod provider_tests;
 mod stores;

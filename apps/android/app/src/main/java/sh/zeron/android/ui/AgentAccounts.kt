@@ -679,6 +679,7 @@ fun AgentAccountsScreen(model: AppModel, deviceId: String, onBack: () -> Unit) {
                             }
                         }
                     }
+                    if (provider.harness == "pi") item("pi-providers") { PiProvidersSection(model, deviceId) }
                 }
             }
             if (snapshot != null) {
