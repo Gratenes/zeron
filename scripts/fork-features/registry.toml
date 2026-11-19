@@ -157,9 +157,10 @@ markers = [
   ["crates/engine/src/agent_accounts.rs", 'rate-limited by'],
   ["crates/engine/src/agent_accounts.rs", 'CLAUDE_USAGE_FRESH'],
   ["crates/engine/src/agent_accounts.rs", 'fn provider_rate_limited'],
+  ["apps/zgx/src/agents.rs", 'fn usage_as_of'],
 ]
-rust = [["zeron-engine", "claude_rate_limit"], ["zeron-engine", "healthy_claude"], ["zeron-engine", "a_healthy_claude_reading"]]
-# TODO(6d0212ed): the zgx half (rate-limited meters dated 'Usage as of') is being added; then add its marker/test here.
+rust = [["zeron-engine", "claude_rate_limit"], ["zeron-engine", "healthy_claude"], ["zeron-engine", "a_healthy_claude_reading"], ["zeron-zgx", "kept_meters_are_dated"]]
+luau = ["meters a failed re-check left are dated", "says how old its figures are"]
 
 [[feature]]
 id = "send-run-signin"
