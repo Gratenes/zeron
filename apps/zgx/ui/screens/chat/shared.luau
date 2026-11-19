@@ -1155,6 +1155,16 @@ local function account_used(account: any, harness: string, model: string): numbe
 	return most
 end
 
+-- A line, and when its figures were read if they are the last reading a
+-- failed re-check left (`as_of`: the host says so only for those).
+local function dated(text: string, account: any): string
+	if not account.as_of then
+		return text
+	end
+	local when = locale.s("ds.provider_card.usage_as_of", { when = locale.ago(os.time() - account.as_of) })
+	return if text ~= "" then `{text} · {when}` else when
+end
+
 -- An account's windows in words, or why it has none to show: one not in use
 -- says what's wrong with it, as a signed-out one's old figures would mislead.
 local function account_detail(account: any): string
@@ -1163,13 +1173,14 @@ local function account_detail(account: any): string
 		return account.error or locale.s("ds.model_picker.signed_out")
 	end
 	if account.error and (not account.active or #account.windows == 0) then
-		return account.error
+		-- (The ring still reads its last figures: said how old they are.)
+		return dated(account.error, account)
 	end
 	local parts: { string } = {}
 	for _, w in account.windows do
 		table.insert(parts, `{w.label} {math.floor(w.used * 100 + 0.5)}%`)
 	end
-	return table.concat(parts, " · ")
+	return dated(table.concat(parts, " · "), account)
 end
 
 -- Whether `harness` keeps a login per model provider (Pi, OpenCode,

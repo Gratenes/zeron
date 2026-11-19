@@ -1919,13 +1919,13 @@ fn account_value(account: &Json, reset: Option<&Reset>) -> Value {
             Value::Bool(account["authKind"].as_str() == Some("api-key") && account["displayName"].as_str().is_some()),
         ),
     ];
-    // A login that is dead (its refresh was refused): the card says so, and
-    // dates the meters (the last reading, in seconds since the epoch).
+    // A login that is dead (its refresh was refused): the card says so.
     if account["needsSignin"].as_bool() == Some(true) {
         fields.push(("needs_signin", Value::Bool(true)));
-        if let Some(at) = account["usageFetchedAt"].as_i64() {
-            fields.push(("as_of", Value::from((at / 1000) as f64)));
-        }
+    }
+    // Meters that are the last reading, not a current one: dated.
+    if let Some(at) = usage_as_of(account, now_ms()) {
+        fields.push(("as_of", Value::from(at)));
     }
     if account["codexResetCredits"].is_object() {
         let (count, list) = banked(&account["codexResetCredits"], spent);
@@ -2093,9 +2093,32 @@ fn device_accounts_value(accounts: &[Json]) -> Value {
         if account["needsSignin"].as_bool() == Some(true) {
             fields.push(("needs_signin", Value::Bool(true)));
         }
+        // (And when its meters were read, where they are the last reading.)
+        if let Some(at) = usage_as_of(account, now_ms()) {
+            fields.push(("as_of", Value::from(at)));
+        }
         by.entry(harness).or_default().push(Value::record(fields));
     }
     Value::record(by.into_iter().map(|(harness, rows)| (harness, Value::List(rows.into()))))
+}
+
+/// How old a kept reading is before a row dates it: a re-check that just
+/// failed isn't worth a note.
+const STALE_AFTER_MS: i64 = 5 * 60 * 1000;
+
+/// When an account's meters were read (seconds since the epoch), for its row
+/// to date them: a login that needs signing in always (they are from before
+/// it died); any other only while its last re-check has failed (it carries a
+/// `usageError`: a rate limit, an outage), the meters on show are the last
+/// good ones, and they are at least five minutes old. `None`: they are
+/// current, or were never read.
+fn usage_as_of(account: &Json, now_ms: i64) -> Option<f64> {
+    let at = account["usageFetchedAt"].as_i64()?;
+    let dead = account["needsSignin"].as_bool() == Some(true);
+    let kept = account["usageError"].as_str().is_some()
+        && account["usageWindows"].as_array().is_some_and(|w| !w.is_empty())
+        && now_ms - at >= STALE_AFTER_MS;
+    (dead || kept).then_some((at / 1000) as f64)
 }
 
 /// Whether an account can be put in use: one the engine can swap to, of an
@@ -2407,6 +2430,52 @@ mod tests {
         let undated = account_value(&json!({ "id": "c", "needsSignin": true }), None);
         assert_eq!(undated.field("needs_signin"), Some(&Value::Bool(true)));
         assert_eq!(undated.field("as_of"), None);
+    }
+
+    /// A re-check that failed leaves the last good meters: dated once they
+    /// are old, so a rate-limited account's figures aren't taken for current.
+    #[test]
+    fn kept_meters_are_dated_once_a_failed_recheck_leaves_them_old() {
+        let at = 1_793_547_900_000_i64;
+        let limited = json!({
+            "id": "a", "usageFetchedAt": at,
+            "usageError": "Usage check rate-limited by Anthropic — retrying in 30m",
+            "usageWindows": [{ "label": "Session", "usedFraction": 0.04 }]
+        });
+        let minutes = |m: i64| at + m * 60_000;
+        // Old enough: dated, in seconds.
+        assert_eq!(usage_as_of(&limited, minutes(120)), Some(1_793_547_900.0));
+        assert_eq!(usage_as_of(&limited, minutes(5)), Some(1_793_547_900.0));
+        // Just failed: not yet worth saying.
+        assert_eq!(usage_as_of(&limited, minutes(4)), None);
+        // No failure on record: the meters are current, however old.
+        let healthy = json!({
+            "id": "b", "usageFetchedAt": at,
+            "usageWindows": [{ "label": "Session", "usedFraction": 0.04 }]
+        });
+        assert_eq!(usage_as_of(&healthy, minutes(600)), None);
+        // A failure with no meters kept has nothing to date; never read, nothing.
+        let empty = json!({ "id": "c", "usageFetchedAt": at, "usageError": "x", "usageWindows": [] });
+        assert_eq!(usage_as_of(&empty, minutes(600)), None);
+        assert_eq!(usage_as_of(&json!({ "id": "d", "usageError": "x" }), minutes(600)), None);
+        // A login that needs signing in is dated whatever its age.
+        let dead = json!({ "id": "e", "usageFetchedAt": at, "needsSignin": true });
+        assert_eq!(usage_as_of(&dead, minutes(1)), Some(1_793_547_900.0));
+        // The Providers row and the composer's both carry it.
+        let stale = json!({
+            "id": "f", "harness": "claude-code", "usageFetchedAt": 1_000_i64,
+            "usageError": "rate limited",
+            "usageWindows": [{ "label": "Session", "usedFraction": 0.04 }]
+        });
+        assert_eq!(account_value(&stale, None).field("as_of").and_then(Value::as_f64), Some(1.0));
+        let composer = device_accounts_value(&[stale]);
+        let row = match composer.field("claude-code") {
+            Some(Value::List(rows)) => rows.iter().next().cloned().expect("a row"),
+            other => panic!("no claude-code rows: {other:?}"),
+        };
+        assert_eq!(row.field("as_of").and_then(Value::as_f64), Some(1.0));
+        // (A healthy one carries none.)
+        assert_eq!(account_value(&healthy, None).field("as_of"), None);
     }
 
     fn ids(value: &Value) -> Vec<String> {

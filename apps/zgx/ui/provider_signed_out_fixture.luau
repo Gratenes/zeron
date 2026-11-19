@@ -37,6 +37,12 @@ local function account(id: string, email: string, plan: string, provider: string
 	}
 end
 
+local function stale_account(id: string, email: string, plan: string): any
+	local a = account(id, email, plan, nil, false, false)
+	a.as_of = os.time() - 2 * 3600
+	return a
+end
+
 local function agent(id: string, name: string, mark: string, accounts: { any }): any
 	return {
 		id = id,
@@ -56,6 +62,8 @@ local model: { any } = {
 	agent("claude-code", "Claude Code", "claude", {
 		account("cl1", "live@example.com", "Max", nil, true, false),
 		account("cl2", "dead@example.com", "Max", nil, false, true),
+		-- Rate-limited, not dead: its meters are the last reading, two hours old.
+		stale_account("cl3", "limited@example.com", "Max"),
 	}),
 	agent("pi", "Pi", "pi", {
 		account("p1", "pi-live@example.com", "Claude Max", "anthropic", true, false),

@@ -456,7 +456,7 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 	local function week(): number
 		return row:get().week
 	end
-	local function detail(): string
+	local function base(): string
 		local a = row:get()
 		-- A dead login's meters are the last reading: dated, not current.
 		if a.needs_signin then
@@ -487,6 +487,19 @@ local function account(c: CardProps, row: State<Account>, group: { read_only: bo
 				else locale.s("ds.provider_card.limit_reached", { words = words })
 		end
 		return a.plan
+	end
+	-- (Meters a failed re-check left, old: dated after whatever the line
+	-- already says. A dead login's are dated in `base`.)
+	local function detail(): string
+		local a = row:get()
+		local text = base()
+		if a.as_of and not a.needs_signin then
+			local when = locale.ago(os.time() - a.as_of)
+			return if text ~= ""
+				then locale.s("ds.provider_card.usage_as_of_plan", { plan = text, when = when })
+				else locale.s("ds.provider_card.usage_as_of", { when = when })
+		end
+		return text
 	end
 	-- Both windows' resets, over the meters (the shipping app's tooltip).
 	local function resets(): string?
