@@ -1,0 +1,330 @@
+# The fork's features: what pc-combined carries on top of upstream main.
+#
+# One [[feature]] per thing a merge of origin/main could silently drop or break.
+# scripts/fork-features/check.py reads this; FORK_FEATURES.md is generated from
+# it (check.py --md), so edit this file, never the .md.
+#
+#   id        short slug, also the name used in reports
+#   title     what the feature is, in a line
+#   owner     the Zeron chat that knows it (ask it before changing or removing it)
+#   branch    the fork branch (Gratenes/zeron) that carries it on its own, if any
+#   commits   its commits on pc-combined (survival of their lines is checked)
+#   markers   [file, regex] pairs: the file must exist and contain a match.
+#             Pick what only exists while the feature is wired in (a call site,
+#             an RPC method, a setting key, the test's own name), not a type name
+#             that stays when its caller goes.
+#   luau      zgx test-name filters that must pass (zgx test ui <filter>)
+#   rust      [package, filter] pairs: `cargo test -p <package> <filter>` must pass
+#             (package "zeron-zgx" runs --bin zeron-zgx)
+#   status    present (default) | lost (known gone, restoration pending: reported,
+#             not failing) | superseded (upstream or a later change replaced it:
+#             `why` says how; markers still checked if given)
+#
+# Changing a marker or a status because a merge made it fail is a decision, not
+# a fix: say why in the commit message, and tell the owner chat.
+
+[meta]
+base = "origin/main"
+# The zgx rev apps/zgx pins. It carries the fork's zgx commits (Windows taskbar
+# badge at the DPI's size, the hidden-window focus fix, block elements and
+# box drawing in zgx-terminal, the panic banner that clears itself). A merge
+# that brings upstream's pin back changes this line in Cargo.toml: check.py
+# fails until the new pin is shown to carry them and this is updated.
+zgx_pin = "e93df9771486adf8f46b5531fec1073ed1049e12"
+zgx_pin_carries = ["8107109c", "1b84ddc9", "fd3ada21", "4830bf92", "e93df977"]
+
+# ---------------------------------------------------------------- zgx (the app)
+
+[[feature]]
+id = "taskbar-badge"
+title = "The app icon's badge counts the chats waiting for you; Settings → Notifications has the switch and what it counts"
+owner = "Zeron Management (8a6897a4), built by 1f88cdc9"
+branch = "zgx/taskbar-badge-setting"
+commits = ["f2c168ab0", "acf9d27fc", "be434f5bf"]
+markers = [
+  ["apps/zgx/ui/screens/shell/init.luau", 'badge\.install\(\)'],
+  ["apps/zgx/ui/screens/shell/badge.luau", 'badge_count'],
+  ["apps/zgx/ui/screens/settings/notifications.luau", 'prefs\.badge_count'],
+  ["apps/zgx/ui/screens/settings/prefs.luau", 'badge_count'],
+  ["apps/zgx/src/main.rs", 'mod taskbar_badge_tests'],
+]
+rust = [["zeron-zgx", "taskbar_badge_tests"]]
+
+[[feature]]
+id = "taskbar-badge-linux"
+title = "Linux: the app names its desktop file (zeron.desktop), so a dock finds the entry that shows the badge"
+owner = "Zeron Management (8a6897a4)"
+branch = "zgx/taskbar-badge"
+commits = ["f19f5468e"]
+markers = [["apps/zgx/src/main.rs", 'desktop_id\("zeron"\)']]
+
+[[feature]]
+id = "zgx-pin"
+title = "The zgx pin is the Gratenes/zgx fork rev with the Windows badge DPI fix, hidden-window focus, terminal block elements and the self-clearing panic banner"
+owner = "Zeron Management (8a6897a4), built by 1f88cdc9"
+commits = ["f60801034", "995785670", "8c68553fa"]
+survival = false  # Cargo.toml/Cargo.lock lines: the pin check above is its guard
+markers = [["apps/zgx/Cargo.toml", 'github\.com/Gratenes/zgx']]
+
+[[feature]]
+id = "chat-account-picker"
+title = "A chat chooses its own Claude account in the composer's Account row ('This chat: <account>'); PinChatAccount over RPC"
+owner = "553be3e3"
+branch = "claude-zgx-chat-account-picker"
+commits = ["8e126da92", "3c79e0dc1"]
+markers = [
+  ["crates/rpc/src/lib.rs", 'PIN_CHAT_ACCOUNT'],
+  ["crates/engine/src/rpc.rs", 'PinChatAccount'],
+  ["apps/zgx/src/agents.rs", 'PinChatAccount'],
+  ["apps/zgx/ui/tests/chat_account.test.luau", 'choosing an account pins this chat'],
+]
+luau = ["a chat's pin is asked after", "choosing an account pins this chat", "choosing Automatic takes the pin back", "a chat on automatic reads"]
+
+[[feature]]
+id = "pin-fallback"
+title = "A chat pinned to a login that needs signing in moves to a working account instead of failing; the login folders keep each pin"
+owner = "553be3e3"
+branch = "claude-pin-fallback"
+commits = ["046abf8d5", "f0d5d981e", "e943975c8", "ee44a6547", "4af52cdf9"]
+markers = [
+  ["crates/engine/src/agent_accounts.rs", 'needs_signin'],
+  ["crates/proto/src/entities.rs", 'needs_signin'],
+  ["apps/zgx/src/agents.rs", '"needs_signin"'],
+]
+rust = [["zeron-engine", "needs_signin"]]
+
+[[feature]]
+id = "providers-signed-out"
+title = "Settings → Providers marks a login that needs signing in as Signed out, dates its meters, and offers Sign in again (no switch)"
+owner = "6d0212ed"
+branch = "zgx-signed-out-dead-logins"
+commits = ["ae2208beb", "c1dc7b4db"]
+markers = [
+  ["apps/zgx/ui/tests/provider_signed_out.test.luau", 'a dead login is marked signed out'],
+  ["apps/zgx/ui/locales/en.json", 'usage_as_of'],
+]
+luau = ["a dead login is marked signed out", "its Sign in again starts the agent's sign-in", "its menu signs in again and offers no switch"]
+
+[[feature]]
+id = "usage-meters-ratelimit"
+title = "Account usage meters: a rate-limited usage check says so (not 'out of quota'), kept meters are dated 'Usage as of …', the probe stops hammering a rate limit"
+owner = "6d0212ed"
+branch = "account-usage-rate-limit-pr"
+commits = ["33c2cad2b", "5653efb08"]
+markers = [
+  ["crates/engine/src/agent_accounts.rs", 'rate-limited by'],
+  ["apps/zgx/ui/ds/locale_en.luau", 'usage_as_of'],
+]
+
+[[feature]]
+id = "send-run-signin"
+title = "A sign-in failure at run start offers the Log in button; a refused login relaunches the run once"
+owner = "553be3e3"
+commits = ["c1dc7b4db", "13bf085b4", "34a715042"]
+markers = [
+  ["crates/engine/src/sessions.rs", 'AUTH_RELAUNCH_PROMPT'],
+  ["crates/engine/src/sessions.rs", 'fn auth_relaunch_due'],
+]
+rust = [["zeron-engine", "auth_relaunch"]]
+
+[[feature]]
+id = "claude-rotation"
+title = "claude-rotation plugin: Claude chats rotate over the saved accounts with headroom (plugins-dev)"
+owner = "553be3e3 (owns ~/.zeron-v2/plugins/claude-rotation: never touch it)"
+commits = ["3bd8e6cfd", "ac8c29576"]
+markers = [["apps/zgx/plugins-dev/claude-rotation/service.luau", 'signed out']]
+
+[[feature]]
+id = "claude-200k"
+title = "The 200K Claude context window really limits the window (CLAUDE_CODE_DISABLE_1M_CONTEXT)"
+owner = "Zeron Management (8a6897a4)"
+commits = ["1936db2d6", "64b7d1d74"]
+markers = [["crates/harness/src/claude/mod.rs", 'CLAUDE_CODE_DISABLE_1M_CONTEXT']]
+
+[[feature]]
+id = "composer-press"
+title = "Composer: a press on the draft keeps its own caret and selection (double-click selects a word); a press on the pill's hairline gives the draft the keys"
+owner = "Zeron Management (8a6897a4)"
+branch = "fix/composer-double-click"
+commits = ["4ef07a790", "d4655b115"]
+markers = [
+  ["apps/zgx/ui/tests/composer_double_click.test.luau", 'a click in the draft puts the caret there'],
+  ["apps/zgx/ui/tests/composer_press_below.test.luau", 'test\('],
+]
+luau = ["a click in the draft puts the caret there", "a press anywhere under the draft's line"]
+
+[[feature]]
+id = "same-title-location"
+title = "Sidebar: chats that share a title say where they run"
+owner = "Zeron Management (8a6897a4)"
+branch = "zgx/same-title-location"
+commits = ["2d453fa93", "44e2c17a9"]
+markers = [["apps/zgx/ui/tests/same_title.test.luau", 'same title: each chat is a row of its own']]
+luau = ["same title:"]
+
+[[feature]]
+id = "activity-working"
+title = "Activity: a chat that is working stays in the list (the Working shelf; the default is on)"
+owner = "Zeron Management (8a6897a4)"
+branch = "zgx/activity-working-visible"
+commits = ["92fec5472", "44e2c17a9"]
+markers = [["apps/zgx/ui/tests/sidebar_activity.test.luau", 'a chat that starts working folds into Working']]
+luau = ["Activity: a chat that starts working folds into Working", "Activity: Fold working chats into Working"]
+
+[[feature]]
+id = "sidebar-unreachable"
+title = "Sidebar: a chat whose device is offline wears a wifi-off glyph; a row's corner has one fixed width; side chats nest and fold"
+owner = "Zeron Management (8a6897a4)"
+commits = ["7f2ce9d6c", "b747292c7", "7edec9cd6", "ed3e6c2ff", "06948080f"]
+markers = [
+  ["apps/zgx/ui/tests/sidebar_unreachable.test.luau", 'test\('],
+  ["apps/zgx/ui/tests/sidebar_side_chats.test.luau", 'past its first five'],
+]
+luau = ["every chat of an offline device says so", "a row's unreachable glyph is left of its side chats' chevron", "past its first five"]
+
+[[feature]]
+id = "terminal-gui-bridge"
+title = "zgx on Windows: a GUI exe's terminal tabs get a console for their bridge"
+owner = "Zeron Management (8a6897a4)"
+branch = "zgx-terminal-gui-console"
+commits = ["5b991f902"]
+markers = [
+  ["apps/zgx/src/terminal.rs", 'fn wrap_in_cmd'],
+  ["apps/zgx/src/terminal.rs", 'fn gui_subsystem'],
+]
+rust = [["zeron-zgx", "a_gui_exes_bridge_runs_under_cmd"]]
+
+[[feature]]
+id = "terminal-warn-logs"
+title = "Terminal: stream and link failures are logged at warn, so a blank remote terminal leaves a trace"
+owner = "Zeron Management (8a6897a4)"
+branch = "terminal-failures-warn"
+commits = ["3cf46a8ab"]
+status = "superseded"
+why = "The panel.rs half (the SubscribeTerminal retry log) went with crates/ui (#1499): zgx's bridge (apps/zgx/src/terminal.rs) has no retry loop to log. The term-link half, where the failures are, stays."
+markers = [
+  ["crates/term-link/src/link.rs", 'tracing::warn!\(error = %err, "terminal link input failed"\)'],
+  ["crates/term-link/src/remote.rs", 'tracing::warn!\(%error, "direct terminal attach failed"\)'],
+]
+
+[[feature]]
+id = "windows-zgx"
+title = "zgx on Windows: caption buttons in Zeron's ink, rounded corner kept maximized, mouse side buttons step the route history, microphones by friendly name, the engine's app-binary spawn, dev port override"
+owner = "Zeron Management (8a6897a4), built by 1f88cdc9"
+commits = ["d507ed162", "bd757db62", "8823f2bf8", "0ec695c77", "263a02bff", "6df99550f"]
+markers = [
+  ["apps/zgx/Cargo.toml", 'windows-sys'],
+  ["apps/zgx/src/engine/manager.rs", 'ZERON_ZGX_ALLOW_DEFAULT_PORT'],
+]
+
+[[feature]]
+id = "zeron-v2-template"
+title = "The zeron-v2 template (Zeron's v2 look) and its blessed base hashes: a v3 ds/screens change must be re-blessed there"
+owner = "Zeron Management (8a6897a4)"
+commits = ["0d52d32b6", "a0f7d5a91", "c43819b23"]
+markers = [
+  ["apps/zgx/ui/templates/zeron-v2/.base.json", '"'],
+  ["apps/zgx/ui/templates/zeron-v2/ds/sidebar.luau", '.'],
+]
+
+[[feature]]
+id = "plugin-device-review"
+title = "Plugins: another of your verified devices may review and allow a plugin here (bound to that device, once); a declined plugin can be reviewed again"
+owner = "Zeron Management (8a6897a4)"
+commits = ["db04e8e91", "238826b48", "f43003adb", "cb1a3ab60", "57ed66fe9"]
+markers = [
+  ["crates/engine/src/plugins/consent_matrix_tests.rs", 'Caller::Peer'],
+  ["crates/engine/src/plugins/reviews.rs", 'a_review_is_good_only_to_whom_it_was_minted_for'],
+]
+
+[[feature]]
+id = "zgx-small-fixes"
+title = "zgx: a reply's table shares its width by its columns; the mention launcher says when its list couldn't be had; a plugin window reload that timed out is retried"
+owner = "Zeron Management (8a6897a4)"
+commits = ["abeb3b9bd", "535fdeb43", "2fa8e0c45"]
+markers = [["apps/zgx/ui/tests/sidebar_activity.test.luau", '.']]
+
+# ---------------------------------------------------------------- engine, MCP, sync
+
+[[feature]]
+id = "stall-watchdog"
+title = "Engine: stall watchdog, run logging, and the ListRuns status RPC"
+owner = "bd5f93ab"
+branch = "engine-stall-watchdog"
+commits = ["9db9af77e"]
+markers = [
+  ["crates/rpc/src/lib.rs", 'LIST_RUNS'],
+  ["crates/engine/src/rpc.rs", 'methods::LIST_RUNS =>'],
+  ["crates/engine/src/sessions/watchdog.rs", 'ListRuns'],
+]
+
+[[feature]]
+id = "registry-poison"
+title = "Registry sync: a refused batch is isolated, not replayed for ever; session rows are bounded and queued ops the room would refuse are shed"
+owner = "Zeron Management (8a6897a4)"
+branch = "registry-poison-batch"
+commits = ["9c9c8efb6", "a8b11e76b"]
+markers = [["crates/sync/src", 'isolat']]
+
+[[feature]]
+id = "phone-tools"
+title = "Agents can use a phone: PhoneCall, phone_* MCP tools (SMS/RCS/MMS read+send+react+attachments+queue, unlock, files, install/grant/force-stop/settings, Shizuku probe, voicemails)"
+owner = "895d268e"
+branch = "phone-tools-engine"
+commits = ["e4fe968f6", "047fd198a", "249155d78", "f536689bc", "8573ff5b1", "c796dcb7f", "d57b282b0", "c674e186a", "b66980792"]
+markers = [
+  ["crates/mcp/src/tools/phone.rs", 'phone_sms_send'],
+  ["crates/mcp/src/tools/phone.rs", 'phone_sms_queue'],
+  ["crates/mcp/src/tools/phone.rs", 'phone_voicemails'],
+  ["crates/mcp/src/tools/phone.rs", 'phone_install_apk'],
+  ["crates/mcp/src/tools/phone.rs", 'phone_shizuku_probe'],
+  ["crates/mcp/src/tools/phone.rs", 'phone_unlock'],
+  ["crates/mcp/src/tools/phone.rs", 'phone_files_hash'],
+  ["crates/mcp/src/tools/phone.rs", 'phone_sms_react'],
+  ["crates/mcp/src/tools/phone.rs", 'phone_sms_attachment'],
+]
+rust = [["zeron-mcp", "phone"]]
+
+[[feature]]
+id = "device-files"
+title = "Device files: list, stat and copy between the account's devices over the relay, a phone's folders included (agents get device_files_list, device_file_stat, device_file_copy, device_file_copy_status)"
+owner = "895d268e"
+branch = "device-files-phone"
+commits = ["e6a1a0215", "fc0faab7e", "5a38a6a77", "dbe5955d3", "6fb8f1eb6", "cdbed4901"]
+markers = [
+  ["crates/mcp/src", 'device_file_copy_status'],
+  ["crates/mcp/src", 'device_files_list'],
+  ["crates/engine/src/device_files.rs", '.'],
+]
+
+[[feature]]
+id = "scheduled-messages"
+title = "schedule_message, list_schedules, cancel_schedule; repeats (cron with a timezone, every_seconds, until, max_runs); a one-minute floor, no daily cap"
+owner = "Zeron Management (8a6897a4)"
+branch = "zeron/scheduled-messages"
+commits = ["2abe55103", "a46745c5c", "c80d0ff5e"]
+markers = [
+  ["crates/mcp/src", 'schedule_message'],
+  ["crates/mcp/src", 'cancel_schedule'],
+  ["crates/mcp/src", 'every_seconds'],
+  ["crates/engine/src/schedule_repeat.rs", '.'],
+]
+
+[[feature]]
+id = "mcp-model-options"
+title = "MCP: list_models returns each model's options; create_chat and create_chats accept them"
+owner = "Zeron Management (8a6897a4)"
+branch = "mcp-model-options"
+commits = ["ed8639927", "e9e97f85f"]
+markers = [
+  ["crates/mcp/src/tools.rs", 'defaultChoice'],
+  ["crates/mcp/src/tools.rs", 'options: Option<serde_json::Map'],
+]
+
+[[feature]]
+id = "mcp-ambiguous-title"
+title = "MCP: a chat key that matches several chats says which chat is which"
+owner = "Zeron Management (8a6897a4)"
+branch = "mcp/ambiguous-chat-title"
+commits = ["744e7dd6a"]
+markers = [["crates/mcp/src/zeron.rs", 'ambiguous']]
