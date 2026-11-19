@@ -102,8 +102,11 @@ commits = ["ae2208beb", "c1dc7b4db"]
 markers = [
   ["apps/zgx/ui/tests/provider_signed_out.test.luau", 'a dead login is marked signed out'],
   ["apps/zgx/ui/locales/en.json", 'usage_as_of'],
+  ["apps/zgx/ui/ds/provider_card.luau", 'needs_signin'],
+  ["apps/zgx/ui/screens/settings/providers.luau", 'on_sign_in'],
 ]
-luau = ["a dead login is marked signed out", "its Sign in again starts the agent's sign-in", "its menu signs in again and offers no switch"]
+luau = ["a dead login is marked signed out", "its Sign in again starts the agent's sign-in", "its menu signs in again and offers no switch", "a healthy saved login still offers its switch", "login per provider it signs in"]
+rust = [["zeron-zgx", "a_login_that_needs_signing_in_says_so_and_dates_its_meters"]]
 
 [[feature]]
 id = "usage-meters-ratelimit"
@@ -111,10 +114,14 @@ title = "Account usage meters: a rate-limited usage check says so (not 'out of q
 owner = "6d0212ed"
 branch = "account-usage-rate-limit-pr"
 commits = ["33c2cad2b", "5653efb08"]
+# (the engine throttle commit is the one picked into v21, not 2d1b49634 on the PR branch)
 markers = [
   ["crates/engine/src/agent_accounts.rs", 'rate-limited by'],
-  ["apps/zgx/ui/ds/locale_en.luau", 'usage_as_of'],
+  ["crates/engine/src/agent_accounts.rs", 'CLAUDE_USAGE_FRESH'],
+  ["crates/engine/src/agent_accounts.rs", 'fn provider_rate_limited'],
 ]
+rust = [["zeron-engine", "claude_rate_limit"], ["zeron-engine", "healthy_claude"], ["zeron-engine", "a_healthy_claude_reading"]]
+# TODO(6d0212ed): the zgx half (rate-limited meters dated 'Usage as of') is being added; then add its marker/test here.
 
 [[feature]]
 id = "send-run-signin"
