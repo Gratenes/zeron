@@ -74,11 +74,24 @@ branch = "claude-zgx-chat-account-picker"
 commits = ["8e126da92", "3c79e0dc1"]
 markers = [
   ["crates/rpc/src/lib.rs", 'PIN_CHAT_ACCOUNT'],
+  ["crates/rpc/src/lib.rs", 'GET_CHAT_ACCOUNT_PIN'],
   ["crates/engine/src/rpc.rs", 'PinChatAccount'],
+  ["crates/engine/src/plugins/agents.rs", 'reason::CHOSEN'],
   ["apps/zgx/src/agents.rs", 'PinChatAccount'],
+  ["apps/zgx/src/agents.rs", 'agents\.pin_chat'],
+  ["apps/zgx/ui/ds/model_picker.luau", 'ds\.model_picker\.this_chat'],
+  ["apps/zgx/ui/screens/chat/composer.luau", 'chat_account = accounts\.chat_account'],
+  ["apps/zgx/ui/screens/chat/lane_tab.luau", 'chat_account = accounts\.chat_account'],
+  ["apps/zgx/ui/templates/zeron-v2/screens/chat/composer.luau", 'chat_account = accounts\.chat_account'],
+  ["apps/zgx/ui/templates/zeron-v2/screens/chat/lane_tab.luau", 'chat_account = accounts\.chat_account'],
   ["apps/zgx/ui/tests/chat_account.test.luau", 'choosing an account pins this chat'],
 ]
-luau = ["a chat's pin is asked after", "choosing an account pins this chat", "choosing Automatic takes the pin back", "a chat on automatic reads"]
+luau = [
+  "a chat's pin is asked after", "choosing an account pins this chat", "choosing Automatic takes the pin back",
+  "a chat on automatic reads", "a chat on automatic still shows the usage", "a login that needs signing in again is shown signed out",
+  "no pin said for the chat", "a chat on a Cloud machine chooses among",
+]
+rust = [["zeron-zgx", "a_chats_account_pin_reads"], ["zeron-engine", "a_persons_choice_pins_the_chat"]]
 
 [[feature]]
 id = "pin-fallback"
@@ -88,10 +101,35 @@ branch = "claude-pin-fallback"
 commits = ["046abf8d5", "f0d5d981e", "e943975c8", "ee44a6547", "4af52cdf9"]
 markers = [
   ["crates/engine/src/agent_accounts.rs", 'needs_signin'],
+  ["crates/engine/src/agent_accounts/pins.rs", 'fn fall_back_from_pin'],
+  ["crates/engine/src/registry.rs", 'fn run_refused'],
   ["crates/proto/src/entities.rs", 'needs_signin'],
   ["apps/zgx/src/agents.rs", '"needs_signin"'],
 ]
-rust = [["zeron-engine", "needs_signin"]]
+rust = [["zeron-engine", "needs_signin"], ["zeron-engine", "a_chat_pinned_to_a_spent_login"], ["zeron-engine", "a_run_refused_its_login"]]
+
+[[feature]]
+id = "claude-identity-guard"
+title = "A chat's CLI stamping its account over ~/.claude.json is not a login switch: the identity stands with its tokens, a login two saved accounts hold is saved into neither, and the live login's folder goes only when the token is its own"
+owner = "553be3e3"
+commits = ["4af52cdf9"]
+markers = [
+  ["crates/engine/src/agent_accounts/identity.rs", 'fn settle_claude_identity'],
+  ["crates/engine/src/agent_accounts.rs", 'claude_live_may_be_saved'],
+  ["crates/engine/src/agent_accounts.rs", 'retire_live_login_dir'],
+]
+rust = [["zeron-engine", "identity::tests"]]
+
+[[feature]]
+id = "remote-catalog-relook"
+title = "A chat on another device keeps its Claude tab: an empty model list is no answer, the last good models stay, and a catalog short of an agent's models is looked at again (20 s to 5 min, bounded) while the composer stays there"
+owner = "553be3e3"
+markers = [
+  ["apps/zgx/src/chat.rs", 'fn models_listed'],
+  ["apps/zgx/src/chat.rs", 'fn relook_later'],
+  ["apps/zgx/src/chat.rs", 'fn relook_delay'],
+]
+rust = [["zeron-zgx", "an_empty_model_list_is_no_answer"], ["zeron-zgx", "a_catalog_short_of_an_agent_the_device_offers"], ["zeron-zgx", "a_short_catalog_is_looked_at_again"]]
 
 [[feature]]
 id = "providers-signed-out"
@@ -139,7 +177,13 @@ id = "claude-rotation"
 title = "claude-rotation plugin: Claude chats rotate over the saved accounts with headroom (plugins-dev)"
 owner = "553be3e3 (owns ~/.zeron-v2/plugins/claude-rotation: never touch it)"
 commits = ["3bd8e6cfd", "ac8c29576"]
-markers = [["apps/zgx/plugins-dev/claude-rotation/service.luau", 'signed out']]
+markers = [
+  ["apps/zgx/plugins-dev/claude-rotation/service.luau", 'signed out'],
+  ["apps/zgx/plugins-dev/claude-rotation/service.luau", 'failing = row ~= nil and row\.error ~= nil'],
+  ["apps/zgx/plugins-dev/claude-rotation/service.luau", 'pcall\(function'],
+]
+# (The plugin's source only: the copy installed in ~/.zeron-v2/plugins is the
+# user's, signed or allowed on the device, and isn't checked here.)
 
 [[feature]]
 id = "claude-200k"

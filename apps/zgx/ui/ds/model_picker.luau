@@ -579,11 +579,19 @@ return ui.component(function(props: Props): Node
 		end
 		return nil
 	end
-	local function in_use(): Account?
-		-- (A chat on an account of its own: that one, or none: automatic.)
+	-- The chat's choice is automatic: no account of its own, so the row says
+	-- "Automatic" and the figure is the account in use's, as it always was.
+	local function automatic(): boolean
 		local pin = chat_pin()
-		if pin then
-			return if pin.account then account_by_id(pin.account) else nil
+		return pin ~= nil and (pin.account == nil or account_by_id(pin.account) == nil)
+	end
+	-- The account whose usage is shown: the chat's own where it has one, else
+	-- the one in use on the device (an automatic chat's ring never went away).
+	local function in_use(): Account?
+		local pin = chat_pin()
+		local own = if pin and pin.account then account_by_id(pin.account) else nil
+		if own then
+			return own
 		end
 		for _, a in accounts() do
 			if a.active then
@@ -607,7 +615,7 @@ return ui.component(function(props: Props): Node
 		local function sync()
 			local pin = chat_pin()
 			local a = in_use()
-			value:set(if a then a.id elseif pin then AUTO else nil)
+			value:set(if pin and automatic() then AUTO elseif a then a.id else nil)
 		end
 		ui.effect(sync)
 		return Dropdown {
@@ -732,7 +740,7 @@ return ui.component(function(props: Props): Node
 					ui.text { account_label, text_size = "$font.size.md", color = "$text.primary", grow = 1, min_w = 0, truncate = true },
 					-- (None in use: none signed in to the model's provider.)
 					ui.show(function(): boolean
-						return in_use() == nil
+						return automatic() or in_use() == nil
 					end, ui.text {
 						function(): string
 							return if chat_pin() then locale.s("ds.model_picker.automatic") else locale.s("ds.model_picker.no_account")
@@ -741,7 +749,9 @@ return ui.component(function(props: Props): Node
 						text_size = "$font.size.md",
 						color = "$text.tertiary",
 					}),
-					PrivateText {
+					ui.show(function(): boolean
+						return not automatic()
+					end, PrivateText {
 						function(): string
 							local a = in_use()
 							return if a then a.email else ""
@@ -752,7 +762,7 @@ return ui.component(function(props: Props): Node
 						color = "$text.tertiary",
 						max_w = 128,
 						shrink = 1,
-					},
+					}),
 					ui.show(function(): boolean
 						local a = in_use()
 						return a ~= nil and a.used ~= nil

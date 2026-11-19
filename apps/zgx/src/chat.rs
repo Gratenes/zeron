@@ -122,6 +122,10 @@ struct Chats {
     /// Which look at `remote` is the latest (`reload_remote`): an older one's
     /// answers, for this device or another, change nothing.
     remote_turn: Cell<u64>,
+    /// How many times the catalog of `remote` has been looked at again for
+    /// being short of an agent's models (`relook_later`); a move to another
+    /// device, or a whole catalog, starts it over.
+    relooks: Cell<usize>,
     /// The look at `remote` settled before all its answers came
     /// (`settle_remote`): its catalog stands complete with what it has, and
     /// answers still to come fill it in without its going back to looking.
@@ -790,6 +794,40 @@ const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_secs(4);
 /// before it's left out (one signed out fails every time).
 const MODEL_RETRIES: usize = 2;
 
+/// A look at another device's catalog that came back short of an agent's
+/// models (one that failed or timed out against an engine stuck or still
+/// starting, or came back empty) is made again, at these distances, while
+/// the composer stays on that device: the picker never keeps a tab missing
+/// for as long as the window lives. The last distance repeats up to
+/// `RELOOKS_MOST` looks, then it's left to the next move to the device.
+const RELOOK_AFTER: [std::time::Duration; 5] = [
+    std::time::Duration::from_secs(20),
+    std::time::Duration::from_secs(40),
+    std::time::Duration::from_secs(80),
+    std::time::Duration::from_secs(160),
+    std::time::Duration::from_secs(300),
+];
+const RELOOKS_MOST: usize = 12;
+
+/// How long before look number `n` (from 0) at a short catalog; none past the
+/// most.
+fn relook_delay(n: usize) -> Option<std::time::Duration> {
+    (n < RELOOKS_MOST).then(|| RELOOK_AFTER[n.min(RELOOK_AFTER.len() - 1)])
+}
+
+/// Whether every agent has answered (`left` is none) and the catalog is still
+/// short of some agent's models (`short`).
+fn all_done_short(short: bool, left: usize) -> bool {
+    short && left == 0
+}
+
+/// A device's answer to `ListModels` as models: a list with something in it.
+/// An empty one (an agent whose models couldn't be found just then) or
+/// anything else is no answer, so it never stands in for a good one.
+fn models_listed(reply: &Json) -> Option<&Vec<Json>> {
+    reply.as_array().filter(|list| !list.is_empty())
+}
+
 /// How many entries a reset may leave to build at once; more go to a worker and
 /// in slices.
 const BUILT_AT_ONCE: usize = 64;
@@ -806,6 +844,14 @@ struct Remote {
     harnesses: Vec<Json>,
     models: HashMap<String, Vec<Json>>,
     ready: bool,
+}
+
+impl Remote {
+    /// An agent the device offers has no models here: its look failed, timed
+    /// out or came back empty. Looked at again (`relook_delay`).
+    fn short(&self) -> bool {
+        self.harnesses.iter().filter_map(|h| h["id"].as_str()).any(|id| self.models.get(id).is_none_or(|m| m.is_empty()))
+    }
 }
 
 /// A catalog looked at ahead of time, kept unless the device has one: one
@@ -1685,6 +1731,7 @@ impl Chats {
         if self.remote.borrow().as_ref().is_some_and(|r| r.device == device) {
             return;
         }
+        self.relooks.set(0);
         let known = self.known_remotes.borrow().get(device).cloned();
         *self.remote.borrow_mut() = Some(known.unwrap_or_else(|| Remote {
             device: device.to_owned(),
@@ -1794,10 +1841,15 @@ impl Chats {
                     if !me.on_remote(&device, turn) {
                         return;
                     }
+                    // (An empty list is no answer either: an agent whose models
+                    // couldn't be found just then must not stand as having none.)
                     match list {
-                        Ok(list) => break Some(list),
-                        Err(error) => {
-                            eprintln!("zeron-zgx: chat: {id}'s models on {device} didn't list: {error}");
+                        Ok(list) if models_listed(&list).is_some() => break Some(list),
+                        other => {
+                            match other {
+                                Err(error) => eprintln!("zeron-zgx: chat: {id}'s models on {device} didn't list: {error}"),
+                                Ok(_) => eprintln!("zeron-zgx: chat: {id}'s models on {device} came back empty"),
+                            }
                             if tries == MODEL_RETRIES {
                                 break None;
                             }
@@ -1810,6 +1862,7 @@ impl Chats {
                     }
                 };
                 left.set(left.get() - 1);
+                let mut short = false;
                 {
                     let mut remote = me.remote.borrow_mut();
                     let Some(r) = remote.as_mut() else { return };
@@ -1828,11 +1881,35 @@ impl Chats {
                         let mut kept = r.clone();
                         kept.ready = whole.get();
                         me.known_remotes.borrow_mut().insert(device.clone(), kept);
+                        short = r.short();
                     }
                 }
                 me.publish_catalog();
+                // Done and still short of an agent's models: asked again
+                // later, as long as the composer stays here.
+                if all_done_short(short, left.get()) {
+                    me.relook_later(device, turn);
+                } else if left.get() == 0 {
+                    me.relooks.set(0);
+                }
             });
         }
+    }
+
+    /// The composer's other device's catalog, found short of an agent's
+    /// models, looked at again after a while (`relook_delay`), unless the
+    /// composer has moved on or a newer look has begun.
+    fn relook_later(self: &Rc<Self>, device: String, turn: u64) {
+        let n = self.relooks.get();
+        let Some(wait) = relook_delay(n) else { return };
+        let me = self.clone();
+        engine::get().spawn(async move {
+            zgx::timer::sleep(wait).await;
+            if me.on_remote(&device, turn) && me.remote.borrow().as_ref().is_some_and(Remote::short) {
+                me.relooks.set(n + 1);
+                me.reload_remote();
+            }
+        });
     }
 
     /// The other devices' catalogs looked at ahead of time, one at a time so
@@ -1852,10 +1929,11 @@ impl Chats {
             for id in harnesses.iter().filter_map(|h| h["id"].as_str()) {
                 let params = json!({ "harness": id, "targetDeviceId": device });
                 match engine::get().call("ListModels", params).await {
-                    Ok(list) => {
+                    Ok(list) if models_listed(&list).is_some() => {
                         models.insert(id.to_owned(), list.as_array().cloned().unwrap_or_default());
                     }
-                    Err(_) => whole = false,
+                    // (An empty list is no answer: kept as short, looked at again.)
+                    _ => whole = false,
                 }
             }
             crate::agents::remember_icons(&harnesses);
@@ -7469,6 +7547,64 @@ mod tests {
         keep_known(&mut known, remote(true, "later"));
         keep_known(&mut known, remote(false, "later"));
         assert_eq!(known["laptop"].models["codex"][0]["id"], "whole");
+    }
+
+    /// A device's answer to `ListModels` that is an empty list, or not a list,
+    /// is no answer: an agent whose models couldn't be found just then (its
+    /// engine stuck or starting) must not read as having none, nor replace a
+    /// good list.
+    #[test]
+    fn an_empty_model_list_is_no_answer() {
+        assert!(models_listed(&json!([{ "id": "opus" }])).is_some());
+        assert!(models_listed(&json!([])).is_none());
+        assert!(models_listed(&json!({ "models": [{ "id": "opus" }] })).is_none());
+        assert!(models_listed(&Json::Null).is_none());
+    }
+
+    /// A device's catalog short of an agent it offers (no models, or none yet)
+    /// is looked at again; one with every agent's models isn't.
+    #[test]
+    fn a_catalog_short_of_an_agent_the_device_offers_is_looked_at_again() {
+        let mut remote = Remote {
+            device: "box".into(),
+            harnesses: vec![json!({ "id": "claude-code" }), json!({ "id": "codex" })],
+            models: HashMap::new(),
+            ready: true,
+        };
+        assert!(remote.short(), "nothing yet");
+        remote.models.insert("codex".into(), vec![json!({ "id": "gpt" })]);
+        assert!(remote.short(), "Claude's models never came: the picker has no Claude tab");
+        remote.models.insert("claude-code".into(), Vec::new());
+        assert!(remote.short(), "an empty list is no models");
+        remote.models.insert("claude-code".into(), vec![json!({ "id": "opus" })]);
+        assert!(!remote.short());
+        // An agent it doesn't offer is not missing.
+        remote.harnesses.retain(|h| h["id"] == "codex");
+        remote.models.remove("claude-code");
+        assert!(!remote.short());
+        // The picker leaves a model-less agent's tab out, as ever; looking again
+        // is what brings it back.
+        let mut by = HashMap::new();
+        by.insert("codex".to_owned(), vec![json!({ "id": "gpt", "label": "GPT" })]);
+        by.insert("claude-code".to_owned(), Vec::new());
+        let value = catalog_of(&[json!({ "id": "claude-code" }), json!({ "id": "codex" })], &by, true, Some("box"));
+        let Some(Value::List(harnesses)) = value.field("harnesses") else { panic!("harnesses") };
+        assert_eq!(harnesses.len(), 1);
+    }
+
+    /// A short catalog is looked at again at growing distances, a bounded
+    /// number of times; and only when every agent has answered and some is
+    /// still short.
+    #[test]
+    fn a_short_catalog_is_looked_at_again_a_bounded_number_of_times() {
+        let secs = |n: usize| relook_delay(n).map(|d| d.as_secs());
+        assert_eq!([secs(0), secs(1), secs(2), secs(3), secs(4)], [Some(20), Some(40), Some(80), Some(160), Some(300)]);
+        assert_eq!(secs(5), Some(300), "the last distance repeats");
+        assert_eq!(secs(RELOOKS_MOST - 1), Some(300));
+        assert_eq!(secs(RELOOKS_MOST), None, "then it's left to the next move to the device");
+        assert!(all_done_short(true, 0));
+        assert!(!all_done_short(true, 2), "agents still to answer");
+        assert!(!all_done_short(false, 0), "whole");
     }
 
     /// A chat on another device names its model before (or without) that
