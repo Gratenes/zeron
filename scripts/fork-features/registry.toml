@@ -263,6 +263,7 @@ markers = [
   ["crates/rpc/src/lib.rs", 'LIST_RUNS'],
   ["crates/engine/src/rpc.rs", 'methods::LIST_RUNS =>'],
   ["crates/engine/src/sessions/watchdog.rs", 'ListRuns'],
+  ["crates/engine/tests/stall_watchdog.rs", 'a_message_a_wedged_parked_run_took_is_sent_again_after_30_s'],
 ]
 
 [[feature]]
