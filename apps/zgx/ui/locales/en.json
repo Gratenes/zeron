@@ -3604,6 +3604,9 @@
         "windows": {
           "title": "Open windows of its own"
         },
+        "scene3d": {
+          "title": "Draw 3D scenes"
+        },
         "tools": {
           "title": "Give your agents tools"
         },
