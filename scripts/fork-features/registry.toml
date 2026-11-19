@@ -266,6 +266,21 @@ markers = [
 ]
 
 [[feature]]
+id = "stall-watchdog-credential"
+title = "Stall watchdog: local runs are judged too (not only Cloud), one agent per chat, automatic updates never hold new runs, staged run starts"
+owner = "bd5f93ab"
+branch = "stall-watchdog-credential"
+commits = ["391264fd5"]
+markers = [
+  ["crates/engine/src/sessions/watchdog.rs", 'is_cloud_platform'],
+  ["crates/engine/src/sessions.rs", 'a run started meanwhile'],
+  ["crates/engine/src/sessions.rs", 'async fn staged'],
+  ["crates/engine/src/harness_updates.rs", 'AUTOMATIC_UPDATE_POLL'],
+  ["crates/engine/tests/stall_watchdog.rs", 'two_sends_at_once_after_a_stop_share_one_agent'],
+]
+rust = [["zeron-engine", "sessions::watchdog"]]
+
+[[feature]]
 id = "registry-poison"
 title = "Registry sync: a refused batch is isolated, not replayed for ever; session rows are bounded and queued ops the room would refuse are shed"
 owner = "Zeron Management (8a6897a4)"
