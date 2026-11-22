@@ -12,17 +12,7 @@
 //!
 //! The host's home folder is the exception: fff would read every file under
 //! it, cloud-only ones included, so home gets a names-only walk instead
-//! ([`crate::names_index`]) and no content search.
-//!
-//! So does a plain folder (outside any git work tree) holding more than
-//! [`MAX_LIVE_FILES`] files, such as a folder of projects. fff would read
-//! every one of them after each scan, and outside a repository its watcher
-//! can't apply the nested repositories' ignore rules: their build output
-//! fills its overflow, and every full overflow is another full rescan and
-//! read. On Windows it also re-walks and re-reads a whole folder for each
-//! write inside it, under the index's write lock. Such a folder's content
-//! search reads its listed files per query instead. See
-//! docs/performance-workspace-search.md.
+//! ([`crate::home_index`]) and no content search.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -37,8 +27,7 @@ use fff_search::{
     SharedFilePicker, SharedFrecency,
 };
 
-use crate::fs_watch::{FsWatch, FsWatchHub};
-use crate::names_index::{MAX_UPDATE_PATHS, NamesIndex, Update};
+use crate::home_index::HomeIndex;
 
 /// An index nobody searched or warmed for this long is dropped.
 pub const IDLE_EVICT: Duration = Duration::from_secs(15 * 60);
@@ -56,21 +45,10 @@ pub const SCAN_WAIT: Duration = Duration::from_millis(300);
 pub const NAME_SCAN_WAIT: Duration = Duration::from_millis(2000);
 /// Interactive content searches return partial results past this budget.
 pub const CONTENT_TIME_BUDGET: Duration = Duration::from_secs(2);
-/// A plain folder holding more files than this gets a names-only index.
-pub const MAX_LIVE_FILES: usize = 50_000;
 const REAPER_INTERVAL: Duration = Duration::from_secs(60);
-/// A names-only index with no live watch is rebuilt in the background on
-/// next use once it is this old; searches keep answering from the old one
-/// meanwhile.
-const NAMES_REFRESH: Duration = Duration::from_secs(60);
-/// Whether a large plain folder's names index follows changes live. One OS
-/// watch covers a whole tree on Windows (ReadDirectoryChangesW) and macOS
-/// (FSEvents). inotify needs one per folder, which on trees this size kept a
-/// core busy (see `diff_sync::watch_targets`), so Linux keeps the
-/// [`NAMES_REFRESH`] walk. Home keeps it everywhere.
-const NAMES_WATCH: bool = cfg!(any(windows, target_os = "macos"));
-/// Watcher paths wait this long, so a burst of writes is one update pass.
-const NAMES_UPDATE_DELAY: Duration = Duration::from_millis(200);
+/// A home index older than this is rebuilt in the background on next use
+/// (it has no watcher); searches keep answering from the old one meanwhile.
+const HOME_REFRESH: Duration = Duration::from_secs(60);
 /// Ceiling for logging a finished scan; a scan still running then is not logged.
 const SCAN_LOG_WAIT: Duration = Duration::from_secs(10 * 60);
 
@@ -152,9 +130,8 @@ struct Inner {
     entries: Mutex<HashMap<PathBuf, Entry>>,
     /// The host's home, canonical; never indexed by fff.
     home: Option<PathBuf>,
-    /// Plain folders past this many files get a names-only index
-    /// ([`MAX_LIVE_FILES`]; tests lower it).
-    max_live_files: usize,
+    home_index: Mutex<HomeEntry>,
+    home_built: Condvar,
     clock: Clock,
     /// Whether indexes run a file watcher; off only for eviction tests, which
     /// need many indexes but no updates (each watcher is an inotify instance).
@@ -174,42 +151,17 @@ impl Drop for Inner {
 }
 
 struct Entry {
-    index: Index,
+    picker: SharedFilePicker,
     last_used: Instant,
     /// A chat warmed it: it serves a conversation, not only a transient
     /// caller such as the new-project folder picker.
     warmed: bool,
 }
 
-#[derive(Clone)]
-enum Index {
-    /// fff: names and contents, kept current by its watcher.
-    Live(SharedFilePicker),
-    /// Names only: home, and large plain folders. Walked again when stale,
-    /// or kept current by a watch where [`NAMES_WATCH`] allows.
-    Names(Arc<NamesEntry>),
-}
-
-struct NamesEntry {
-    root: PathBuf,
-    home: bool,
-    state: Mutex<NamesState>,
-    built: Condvar,
-    /// Set when the folder is watched ([`NAMES_WATCH`]).
-    watch: Mutex<Option<NamesWatch>>,
-    /// Walks started, for the log.
-    walks: AtomicUsize,
-}
-
-struct NamesWatch {
-    watch: FsWatch,
-    /// The root as the watcher spells event paths (canonical).
-    root: PathBuf,
-}
-
+/// The home folder's names-only index, with [`Entry`]'s lifecycle.
 #[derive(Default)]
-struct NamesState {
-    index: Option<Arc<NamesIndex>>,
+struct HomeEntry {
+    index: Option<Arc<HomeIndex>>,
     /// A walk is running; `cancel` stops it when the index is dropped.
     building: Option<Arc<crate::home_index::WalkCancel>>,
     /// The running walk reads the protected folders too.
@@ -237,7 +189,8 @@ impl WorkspaceSearch {
             inner: Arc::new(Inner {
                 entries: Mutex::new(HashMap::new()),
                 home,
-                max_live_files: MAX_LIVE_FILES,
+                home_index: Mutex::new(HomeEntry::default()),
+                home_built: Condvar::new(),
                 clock,
                 watch,
                 reaper_started: std::sync::Once::new(),
@@ -305,6 +258,7 @@ impl WorkspaceSearch {
         }
         let query = normalize_name_query(query);
         let query = query.as_ref();
+        let picker = self.acquire(root, false)?;
         let indexing = !picker.wait_for_scan(wait);
         if limit == 0 {
             return Ok(NameSearch {
@@ -386,23 +340,11 @@ impl WorkspaceSearch {
         limit: usize,
         per_file: usize,
     ) -> Result<ContentSearch, WorkspaceSearchError> {
-        let picker = match self.acquire(root, false)? {
-            Index::Live(picker) => picker,
-            // Home has no content search (see the module docs).
-            Index::Names(names) if names.home => return Ok(ContentSearch::default()),
-            Index::Names(names) => {
-                let Some(index) = names.index(SCAN_WAIT) else {
-                    return Ok(ContentSearch {
-                        indexing: true,
-                        ..Default::default()
-                    });
-                };
-                if limit == 0 || per_file == 0 || query.trim().is_empty() {
-                    return Ok(ContentSearch::default());
-                }
-                return Ok(index.search_content(root, query, limit, per_file, CONTENT_TIME_BUDGET));
-            }
-        };
+        if self.is_home(root) {
+            // Home's index holds names only (see the module docs).
+            return Ok(ContentSearch::default());
+        }
+        let picker = self.acquire(root, false)?;
         let indexing = !picker.wait_for_scan(SCAN_WAIT);
         if limit == 0 || per_file == 0 || query.trim().is_empty() {
             return Ok(ContentSearch {
@@ -465,14 +407,10 @@ impl WorkspaceSearch {
     /// Block until `root`'s index finished its scan and content indexing
     /// (benchmarks); `false` on timeout or when `root` has no index.
     pub fn wait_until_indexed(&self, root: &Path, timeout: Duration) -> bool {
-        let index = lock(&self.inner.entries)
+        let picker = lock(&self.inner.entries)
             .get(root)
-            .map(|entry| entry.index.clone());
-        match index {
-            Some(Index::Live(picker)) => picker.wait_for_indexing_complete(timeout),
-            Some(Index::Names(names)) => names.index(timeout).is_some(),
-            None => false,
-        }
+            .map(|entry| entry.picker.clone());
+        picker.is_some_and(|picker| picker.wait_for_indexing_complete(timeout))
     }
 
     /// Drop every index now (benchmarks measuring memory after eviction).
@@ -482,11 +420,15 @@ impl WorkspaceSearch {
         for (root, entry) in entries {
             release(&root, entry, "explicit");
         }
+        self.release_home(|_| true);
     }
 
     /// Drop `root`'s index now unless a chat warmed it, for a caller done
     /// with an index it may have started. `true` if dropped.
     pub fn release_unless_warmed(&self, root: &Path) -> bool {
+        if self.is_home(root) {
+            return self.release_home(|home| !home.warmed);
+        }
         let removed = {
             let mut entries = lock(&self.inner.entries);
             let warmed = entries.get(root).is_some_and(|entry| entry.warmed);
@@ -501,7 +443,8 @@ impl WorkspaceSearch {
 
     /// Number of live indexes.
     pub fn live(&self) -> usize {
-        lock(&self.inner.entries).len()
+        let home = lock(&self.inner.home_index).index.is_some();
+        lock(&self.inner.entries).len() + usize::from(home)
     }
 
     /// Drop every index idle past [`IDLE_EVICT`] (the reaper runs this every
@@ -523,6 +466,10 @@ impl WorkspaceSearch {
         for (root, entry) in expired {
             release(&root, entry, "idle");
         }
+        self.release_home(|home| {
+            home.last_used
+                .is_some_and(|used| now.saturating_duration_since(used) >= IDLE_EVICT)
+        });
     }
 
     fn is_home(&self, root: &Path) -> bool {
@@ -607,58 +554,39 @@ impl WorkspaceSearch {
     }
 
     /// `warm`: a chat is asking (see [`Entry::warmed`]).
-    fn acquire(&self, root: &Path, warm: bool) -> Result<Index, WorkspaceSearchError> {
+    fn acquire(&self, root: &Path, warm: bool) -> Result<SharedFilePicker, WorkspaceSearchError> {
         self.start_reaper();
         let now = (self.inner.clock)();
-        if let Some(index) = touch(&mut lock(&self.inner.entries), root, now, warm) {
-            return Ok(index);
-        }
-        // Outside the lock: telling a large plain folder apart walks it.
-        let names_only = self.is_home(root) || self.outgrows_live_index(root);
-        let mut entries = lock(&self.inner.entries);
-        if let Some(index) = touch(&mut entries, root, now, warm) {
-            return Ok(index);
-        }
-        // Create first: a root fff refuses (a filesystem root, a vanished
-        // folder) must not cost a healthy index its place.
-        let index = if names_only {
-            Index::Names(Arc::new(NamesEntry {
-                root: root.to_path_buf(),
-                home: self.is_home(root),
-                state: Mutex::default(),
-                built: Condvar::new(),
-                watch: Mutex::new(None),
-                walks: AtomicUsize::new(0),
-            }))
-        } else {
-            Index::Live(create_picker(root, self.inner.watch)?)
+        let mut evicted = None;
+        let picker = {
+            let mut entries = lock(&self.inner.entries);
+            if let Some(entry) = entries.get_mut(root) {
+                entry.last_used = now;
+                entry.warmed |= warm;
+                entry.picker.clone()
+            } else {
+                // Create first: a root fff refuses (a filesystem root, a
+                // vanished folder) must not cost a healthy index its place.
+                let picker = create_picker(root, self.inner.watch)?;
+                if entries.len() >= MAX_LIVE {
+                    evicted = lru_victim(&entries)
+                        .and_then(|victim| entries.remove(&victim).map(|entry| (victim, entry)));
+                }
+                entries.insert(
+                    root.to_path_buf(),
+                    Entry {
+                        picker: picker.clone(),
+                        last_used: now,
+                        warmed: warm,
+                    },
+                );
+                picker
+            }
         };
-        let evicted = if entries.len() >= MAX_LIVE {
-            lru_victim(&entries)
-                .and_then(|victim| entries.remove(&victim).map(|entry| (victim, entry)))
-        } else {
-            None
-        };
-        entries.insert(
-            root.to_path_buf(),
-            Entry {
-                index: index.clone(),
-                last_used: now,
-                warmed: warm,
-            },
-        );
-        drop(entries);
         if let Some((victim, entry)) = evicted {
             release(&victim, entry, "capacity");
         }
-        if let Index::Names(names) = &index
-            && NAMES_WATCH
-            && self.inner.watch
-            && !names.home
-        {
-            names.start_watch();
-        }
-        Ok(index)
+        Ok(picker)
     }
 
     fn start_reaper(&self) {
@@ -689,12 +617,9 @@ fn build_home(
     let Some(inner) = inner.upgrade() else {
         return;
     };
-    let started = Instant::now();
-    let walk = names.walks.fetch_add(1, Ordering::Relaxed) + 1;
-    let index = NamesIndex::build(&names.root, names.home, &cancel);
-    let mut state = lock(&names.state);
+    let mut home = lock(&inner.home_index);
     // Released (or replaced) while walking: drop this result.
-    if !state
+    if !home
         .building
         .as_ref()
         .is_some_and(|building| Arc::ptr_eq(building, &cancel))
@@ -702,57 +627,11 @@ fn build_home(
         return;
     }
     tracing::info!(
-        root = %names.root.display(),
-        home = names.home,
+        root = %root.display(),
         entries = index.len(),
         protected = index.protected,
         scan_ms = started.elapsed().as_millis() as u64,
-        walk,
-        "workspace search names index scanned"
-    );
-    state.index = Some(Arc::new(index));
-    state.building = None;
-    names.built.notify_all();
-    names.schedule_update(&mut state);
-}
-
-/// Apply the queued watcher paths to the index, or walk again when an
-/// update can't.
-fn update_names(names: Weak<NamesEntry>) {
-    std::thread::sleep(NAMES_UPDATE_DELAY);
-    let Some(names) = names.upgrade() else {
-        return;
-    };
-    let root = match lock(&names.watch).as_ref() {
-        Some(watch) => watch.root.clone(),
-        None => names.root.clone(),
-    };
-    let (index, mut changed) = {
-        let mut state = lock(&names.state);
-        state.updating = false;
-        if state.building.is_some() {
-            return; // the walk's end starts another pass
-        }
-        let Some(index) = state.index.clone() else {
-            return; // the first walk lists everything
-        };
-        if std::mem::take(&mut state.rewalk) {
-            state.changed.clear();
-            names.start_walk(&mut state);
-            return;
-        }
-        (index, std::mem::take(&mut state.changed))
-    };
-    changed.sort_unstable();
-    changed.dedup();
-    let started = Instant::now();
-    let update = index.update(&root, &changed);
-    tracing::debug!(
-        root = %names.root.display(),
-        paths = changed.len(),
-        ?update,
-        update_ms = started.elapsed().as_millis() as u64,
-        "workspace search names index updated"
+        "workspace search home index scanned"
     );
     home.index = Some(Arc::new(index));
     home.building = None;
@@ -823,7 +702,7 @@ fn create_picker(root: &Path, watch: bool) -> Result<SharedFilePicker, Workspace
             watch,
             follow_symlinks: false,
             enable_fs_root_scanning: false,
-            // Home gets a `NamesIndex` instead (see the module docs).
+            // Home gets `HomeIndex` instead (see the module docs).
             enable_home_dir_scanning: false,
             ..Default::default()
         },
@@ -857,15 +736,8 @@ fn create_picker(root: &Path, watch: bool) -> Result<SharedFilePicker, Workspace
 /// Stop the index's scan and watcher and free it. The write lock waits for
 /// in-flight searches, so this runs off the caller's thread.
 fn release(root: &Path, entry: Entry, reason: &'static str) {
-    let picker = match entry.index {
-        Index::Live(picker) => picker,
-        Index::Names(names) => {
-            names.cancel();
-            tracing::info!(root = %root.display(), reason, "workspace search names index evicted");
-            return;
-        }
-    };
     let root = root.to_path_buf();
+    let picker = entry.picker;
     picker.cancel();
     let _ = std::thread::Builder::new()
         .name("workspace-search-release".into())
@@ -966,27 +838,9 @@ mod tests {
 
     fn ready(search: &WorkspaceSearch, root: &Path) -> SharedFilePicker {
         search.warm(root).unwrap();
-        let Index::Live(picker) = lock(&search.inner.entries)[root].index.clone() else {
-            panic!("{} has no live index", root.display());
-        };
+        let picker = lock(&search.inner.entries)[root].picker.clone();
         assert!(picker.wait_for_indexing_complete(Duration::from_secs(20)));
         picker
-    }
-
-    fn is_names_only(search: &WorkspaceSearch, root: &Path) -> bool {
-        matches!(
-            lock(&search.inner.entries)
-                .get(root)
-                .map(|entry| &entry.index),
-            Some(Index::Names(_))
-        )
-    }
-
-    /// Plain folders past `max_live_files` files get a names-only index.
-    fn limited(max_live_files: usize) -> WorkspaceSearch {
-        let mut search = WorkspaceSearch::with_clock(Arc::new(Instant::now), true, None);
-        Arc::get_mut(&mut search.inner).unwrap().max_live_files = max_live_files;
-        search
     }
 
     fn names(search: &WorkspaceSearch, root: &Path, query: &str) -> Vec<String> {
@@ -1205,7 +1059,10 @@ mod tests {
         assert!(!found.indexing);
         let paths: Vec<_> = found.matches.iter().map(|m| m.path.as_str()).collect();
         assert_eq!(paths, ["dev/plan.md"]);
-        assert!(is_names_only(&search, &home), "no fff picker for home");
+        assert!(
+            lock(&search.inner.entries).is_empty(),
+            "no fff picker for home"
+        );
         assert_eq!(search.live(), 1);
         assert!(
             search
@@ -1265,131 +1122,6 @@ mod tests {
                 .as_ref()
                 .is_some_and(|index| index.protected)
         );
-    }
-
-    #[test]
-    fn a_large_plain_folder_gets_a_names_index_that_searches_contents() {
-        // A folder of projects: past the limit and outside any repository.
-        let (_dir, root) = folder(&[
-            ("api/src/plan.rs", b"needle"),
-            ("api/src/main.rs", b"fn main() {\n    let needle = 1;\n}\n"),
-            ("web/src/plan.ts", b"needle"),
-            ("web/src/logo.dat", b"needle\0"),
-            ("web/node_modules/pkg/plan.js", b"needle"),
-        ]);
-        let search = limited(2);
-        let found = search
-            .search_names_within(&root, "pln", 20, NameKinds::Files, NAME_SCAN_WAIT)
-            .unwrap();
-        assert!(!found.indexing);
-        let paths: Vec<_> = found.matches.iter().map(|m| m.path.as_str()).collect();
-        assert_eq!(paths, ["api/src/plan.rs", "web/src/plan.ts"], "fuzzy");
-        assert!(is_names_only(&search, &root), "no fff picker");
-        assert_eq!(search.warm(&root).unwrap(), IndexState::Ready);
-
-        let found = search.search_content(&root, "Needle", 50, 3).unwrap();
-        assert!(
-            found.matches.is_empty(),
-            "an uppercase query is case-sensitive"
-        );
-        let found = search.search_content(&root, "needle", 50, 3).unwrap();
-        assert!(!found.truncated && !found.indexing);
-        let mut paths: Vec<_> = found.matches.iter().map(|m| m.path.as_str()).collect();
-        paths.sort_unstable();
-        // The binary file and the dependency folder are skipped.
-        assert_eq!(
-            paths,
-            ["api/src/main.rs", "api/src/plan.rs", "web/src/plan.ts"]
-        );
-        let main = found
-            .matches
-            .iter()
-            .find(|m| m.path == "api/src/main.rs")
-            .unwrap();
-        assert_eq!((main.line, main.column), (2, 8));
-        assert_eq!(main.preview, "let needle = 1;");
-        assert_eq!(main.ranges, [(4, 10)]);
-        let found = search.search_content(&root, "needle", 2, 3).unwrap();
-        assert_eq!(found.matches.len(), 2);
-        assert!(found.truncated);
-        assert!(!search.release_unless_warmed(&root), "a chat warmed it");
-        search.release_all();
-        assert_eq!(search.live(), 0);
-    }
-
-    #[cfg(any(windows, target_os = "macos"))]
-    #[test]
-    fn a_large_plain_folder_follows_changes_without_walking_again() {
-        let (_dir, root) = folder(&[
-            ("api/.git/HEAD", b"ref: refs/heads/main\n"),
-            ("api/.gitignore", b"dist/\n"),
-            ("api/src/plan.rs", b""),
-            ("api/src/main.rs", b""),
-            ("web/src/app.ts", b""),
-        ]);
-        let search = limited(2);
-        let plans = || {
-            let mut found: Vec<String> = search
-                .search_names_within(&root, "plan", 20, NameKinds::Files, NAME_SCAN_WAIT)
-                .unwrap()
-                .matches
-                .into_iter()
-                .map(|found| found.path)
-                .collect();
-            found.sort_unstable();
-            found
-        };
-        assert_eq!(plans(), ["api/src/plan.rs"]);
-        let Index::Names(names) = lock(&search.inner.entries)[&root].index.clone() else {
-            panic!("no names index");
-        };
-        // The watch going live asks for a second walk; wait for it to end.
-        let settled = || {
-            let state = lock(&names.state);
-            names.watched()
-                && names.walks.load(Ordering::Relaxed) == 2
-                && state.building.is_none()
-                && !state.updating
-        };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !settled() {
-            assert!(Instant::now() < deadline, "the watch never settled");
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        std::fs::write(root.join("api/src/plan2.rs"), b"").unwrap();
-        std::fs::create_dir_all(root.join("api/dist")).unwrap();
-        std::fs::write(root.join("api/dist/plan.js"), b"").unwrap();
-        std::fs::create_dir_all(root.join("web/lib/plans")).unwrap();
-        std::fs::write(root.join("web/lib/plans/plan3.ts"), b"").unwrap();
-        std::fs::remove_file(root.join("api/src/plan.rs")).unwrap();
-        let expected = ["api/src/plan2.rs", "web/lib/plans/plan3.ts"];
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while plans() != expected {
-            assert!(Instant::now() < deadline, "found {:?}", plans());
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        // A write into a listed folder: Windows also reports the folder.
-        std::fs::write(root.join("api/src/main.rs"), b"fn main() {}").unwrap();
-        std::thread::sleep(Duration::from_secs(1));
-        assert_eq!(plans(), expected, "the gitignored file stays out");
-        assert_eq!(names.walks.load(Ordering::Relaxed), 2, "no walk since");
-    }
-
-    #[test]
-    fn a_repository_or_a_small_plain_folder_keeps_its_live_index() {
-        let (_repo, repo) = folder(&[
-            (".git/HEAD", b"ref: refs/heads/main\n"),
-            ("a.rs", b""),
-            ("b.rs", b""),
-            ("c.rs", b""),
-        ]);
-        let (_small, small) = folder(&[("a.rs", b""), ("b.rs", b"")]);
-        let search = limited(2);
-        // `ready` fails unless the root got an fff index.
-        ready(&search, &repo);
-        ready(&search, &small);
-        assert_eq!(search.live(), 2);
     }
 
     #[test]
