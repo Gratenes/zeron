@@ -88,6 +88,10 @@ pub mod methods {
     /// The engine's run table with each run's age, silence and agent process,
     /// and the chats that look busy (`{runs, statuses, workingWithoutRun}`).
     pub const LIST_RUNS: &str = "ListRuns";
+    /// Which providers on this device have Code Mode enabled
+    /// (`{supported, enabled}`; set with `{harness, enabled}`).
+    pub const GET_CODE_MODE: &str = "GetCodeMode";
+    pub const SET_CODE_MODE: &str = "SetCodeMode";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
     pub const LIST_SKILLS: &str = "ListSkills";
