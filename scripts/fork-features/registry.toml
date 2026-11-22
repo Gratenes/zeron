@@ -356,6 +356,19 @@ markers = [
 luau = ["setup goes through its steps in order"]  # the wrapper in ui/tests: the cases (incl. "a Zeron without usernames") are in ui/onboarding_order.luau, mounted by it
 
 [[feature]]
+id = "antigravity-stops-when-idle"
+title = "A parked Antigravity adapter pair (a ~920 MB image plus localharness_external) is stopped after the short idle window, not 30 minutes; the other ACP agents keep the long window"
+owner = "Zeron Management (8a6897a4)"
+branch = "antigravity-stops-when-idle"
+commits = ["53fadb604"]
+markers = [
+  ["crates/harness/src/acp/mod.rs", 'self\.spec\.id == HarnessId::Antigravity'],
+  ["crates/harness/tests/acp.rs", 'only_antigravity_stops_when_idle'],
+  ["crates/harness/tests/antigravity_resume_live.rs", '#\[ignore'],
+]
+rust = [["zeron-harness", "only_antigravity_stops_when_idle"]]
+
+[[feature]]
 id = "registry-poison"
 title = "Registry sync: a refused batch is isolated, not replayed for ever; session rows are bounded and queued ops the room would refuse are shed"
 owner = "Zeron Management (8a6897a4)"

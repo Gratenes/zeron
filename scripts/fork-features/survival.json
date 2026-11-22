@@ -1,6 +1,7 @@
 {
  "activity-working": 0.97,
  "agent-login-logs": 0.97,
+ "antigravity-stops-when-idle": 0.97,
  "chat-account-picker": 0.75,
  "claude-200k": 0.51,
  "claude-rotation": 0.97,
