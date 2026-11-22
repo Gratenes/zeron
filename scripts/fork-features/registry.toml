@@ -342,6 +342,20 @@ markers = [
 rust = [["zeron-engine", "sign_in_poll_logging"]]
 
 [[feature]]
+id = "zgx-onboarding-no-username"
+title = "Setup finishes on an edge without usernames (a self-hosted one answering /username with 404 skips the username and card steps), and a local engine follows a sign-in"
+owner = "Zeron Management (8a6897a4)"
+branch = "zgx-onboarding-no-username"
+commits = ["983a071c9"]
+markers = [
+  ["apps/zgx/src/auth.rs", '\(404, _\) => Err\("unsupported"\)'],
+  ["apps/zgx/ui/screens/onboarding/state.luau", 'M\.no_names'],
+  ["apps/zgx/ui/screens/onboarding/actions.luau", 'no_usernames'],
+  ["apps/zgx/ui/onboarding_order.luau", 'a Zeron without usernames passes over the username and card'],
+]
+luau = ["a Zeron without usernames passes over"]
+
+[[feature]]
 id = "registry-poison"
 title = "Registry sync: a refused batch is isolated, not replayed for ever; session rows are bounded and queued ops the room would refuse are shed"
 owner = "Zeron Management (8a6897a4)"
