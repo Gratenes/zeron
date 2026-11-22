@@ -85,3 +85,4 @@ fork commits' survival floor (`--bless`).
 | `scheduled-messages` | schedule_message, list_schedules, cancel_schedule; repeats (cron with a timezone, every_seconds, until, max_runs); a one-minute floor, no daily cap | Zeron Management (8a6897a4) | `zeron/scheduled-messages` | `2abe55103`, `a46745c5c`, `c80d0ff5e` | markers only |
 | `mcp-model-options` | MCP: list_models returns each model's options; create_chat and create_chats accept them | Zeron Management (8a6897a4) | `mcp-model-options` | `ed8639927`, `e9e97f85f` | markers only |
 | `mcp-ambiguous-title` | MCP: a chat key that matches several chats says which chat is which | Zeron Management (8a6897a4) | `mcp/ambiguous-chat-title` | `744e7dd6a` | markers only |
+| `zgx-windows-tray` | zgx on Windows: closing the window keeps Zeron in the notification area (tray icon, Reopen, a close-to-tray setting) | zgx tabs + multi-window + Windows tray (cf305aba) | `zgx-windows-tray` | `d1832edfe` | markers only |

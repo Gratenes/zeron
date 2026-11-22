@@ -27,5 +27,6 @@
  "windows-zgx": 0.89,
  "zgx-onboarding-no-username": 0.97,
  "zgx-pin": 0.0,
- "zgx-small-fixes": 0.94
+ "zgx-small-fixes": 0.94,
+ "zgx-windows-tray": 0.97
 }

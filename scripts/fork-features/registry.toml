@@ -443,3 +443,16 @@ owner = "Zeron Management (8a6897a4)"
 branch = "mcp/ambiguous-chat-title"
 commits = ["744e7dd6a"]
 markers = [["crates/mcp/src/zeron.rs", 'ambiguous']]
+
+[[feature]]
+id = "zgx-windows-tray"
+title = "zgx on Windows: closing the window keeps Zeron in the notification area (tray icon, Reopen, a close-to-tray setting)"
+owner = "zgx tabs + multi-window + Windows tray (cf305aba)"
+branch = "zgx-windows-tray"
+commits = ["d1832edfe"]
+markers = [
+  ["apps/zgx/src/tray/win32.rs", '.'],
+  ["apps/zgx/src/tray.rs", 'pub fn reopen'],
+  ["apps/zgx/src/main.rs", 'tray::install'],
+  ["apps/zgx/ui/screens/settings/prefs.luau", 'close_to_tray'],
+]
