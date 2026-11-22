@@ -47,8 +47,10 @@
 //!                                afresh; "existing" on signing in)
 //!   account.cancel (an action)   gives up the sign-in waiting on the browser
 //!   account.sign_out             nil
-//!   account.username             your username, or nil
-//!   account.check_username(name) { available, reason = invalid | reserved | taken }
+//!   account.username             your username, or nil; unsupported (an
+//!                                edge without usernames, which answers 404)
+//!   account.check_username(name) { available, reason = invalid | reserved | taken };
+//!                                unsupported
 //!   account.claim_username(name) your card; taken, reserved, invalid,
 //!                                already_claimed, not_ready, rate_limited
 //!   account.card(name)           that card, or nil
@@ -763,6 +765,9 @@ impl Auth {
     async fn username(&self) -> Result<Value, Outcome> {
         match self.authed("GET", "/username".into(), None).await? {
             (200, body) => Ok(body["username"].as_str().map_or(Value::Nil, Value::from)),
+            // An edge without usernames (a self-hosted one, older than
+            // cards): there's no username to claim, and setup passes over it.
+            (404, _) => Err("unsupported"),
             _ => Err("failed"),
         }
     }
@@ -794,6 +799,7 @@ impl Auth {
                 ("available", Value::Bool(body["available"].as_bool() == Some(true))),
                 ("reason", body["reason"].as_str().map_or(Value::Nil, Value::from)),
             ])),
+            (404, _) => Err("unsupported"),
             (429, _) => Err("rate_limited"),
             _ => Err("failed"),
         }

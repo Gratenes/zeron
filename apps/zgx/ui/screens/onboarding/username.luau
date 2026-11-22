@@ -29,6 +29,9 @@ export type Props = {
 	on_signed_out: () -> (),
 	-- Already has one (claimed elsewhere a moment ago): past this step.
 	on_has_one: () -> (),
+	-- Zeron has no usernames (a self-hosted edge without them): past this
+	-- step and the card.
+	on_unsupported: (() -> ())?,
 }
 
 -- How long the typing has to rest before Zeron is asked.
@@ -74,6 +77,9 @@ return function(props: Props): Node
 			end
 			if err.message == "signed_out" then
 				props.on_signed_out()
+			elseif err.message == "unsupported" and props.on_unsupported then
+				state.answer("username")
+				props.on_unsupported()
 			else
 				state.answer("username")
 			end
@@ -111,6 +117,8 @@ return function(props: Props): Node
 				end
 				if err.message == "signed_out" then
 					props.on_signed_out()
+				elseif err.message == "unsupported" and props.on_unsupported then
+					props.on_unsupported()
 				else
 					check:set("unknown")
 				end
