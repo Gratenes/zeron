@@ -366,7 +366,8 @@ markers = [
   ["crates/harness/tests/acp.rs", 'only_antigravity_stops_when_idle'],
   ["crates/harness/tests/antigravity_resume_live.rs", '#\[ignore'],
 ]
-rust = [["zeron-harness", "only_antigravity_stops_when_idle"]]
+# (No cargo filter: its test is an integration test in crates/harness/tests/acp.rs, and check.py runs --lib;
+#  `cargo test -p zeron-harness --test acp only_antigravity_stops_when_idle` passes.)
 
 [[feature]]
 id = "registry-poison"
