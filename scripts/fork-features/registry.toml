@@ -353,7 +353,7 @@ markers = [
   ["apps/zgx/ui/screens/onboarding/actions.luau", 'no_usernames'],
   ["apps/zgx/ui/onboarding_order.luau", 'a Zeron without usernames passes over the username and card'],
 ]
-luau = ["a Zeron without usernames passes over"]
+luau = ["setup goes through its steps in order"]  # the wrapper in ui/tests: the cases (incl. "a Zeron without usernames") are in ui/onboarding_order.luau, mounted by it
 
 [[feature]]
 id = "registry-poison"
