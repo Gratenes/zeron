@@ -3614,6 +3614,14 @@ impl Harness for AcpHarness {
     fn stops_turn_in_place(&self) -> bool {
         true
     }
+    /// Antigravity: a parked adapter pair (`agy_acp_server.par`, a ~920 MB
+    /// image, plus `localharness_external`) is stopped after the short idle
+    /// window instead of 30 minutes; `session/resume` brings the whole
+    /// conversation back in the next process (tests/antigravity_resume_live.rs).
+    /// Other ACP agents keep the long window until their resume is checked.
+    fn stops_when_idle(&self) -> bool {
+        self.spec.id == HarnessId::Antigravity
+    }
     /// The default comparison plus the access the run resolves to: it
     /// ignores `auto_approve`, which makes a run full access.
     fn same_runtime(&self, live: &RunRequest, next: &RunRequest) -> bool {
