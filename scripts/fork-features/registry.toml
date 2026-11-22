@@ -328,6 +328,20 @@ markers = [
 rust = [["zeron-engine", "sessions::watchdog"]]
 
 [[feature]]
+id = "agent-login-logs"
+title = "Agent sign-in is logged at INFO: start (with whether a URL and callback came back), a poll's changes, a failure to start or poll, and cancel"
+owner = "Zeron Management (8a6897a4)"
+branch = "engine-agent-login-logs"
+commits = ["84cbc22cc"]
+markers = [
+  ["crates/engine/src/agent_accounts.rs", 'agent sign-in failed to start'],
+  ["crates/engine/src/agent_accounts.rs", 'agent sign-in poll failed'],
+  ["crates/engine/src/agent_accounts.rs", 'agent sign-in cancelled'],
+  ["crates/engine/src/agent_accounts.rs", 'sign_in_poll_logging_tracks_changes_and_forgets_finished_logins'],
+]
+rust = [["zeron-engine", "sign_in_poll_logging"]]
+
+[[feature]]
 id = "registry-poison"
 title = "Registry sync: a refused batch is isolated, not replayed for ever; session rows are bounded and queued ops the room would refuse are shed"
 owner = "Zeron Management (8a6897a4)"
