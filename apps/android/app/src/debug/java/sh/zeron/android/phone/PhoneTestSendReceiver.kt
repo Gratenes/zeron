@@ -47,7 +47,7 @@ class PhoneTestSendReceiver : BroadcastReceiver() {
                     "queue" -> {
                         val mode = intent.getStringExtra("mode") ?: "ok"
                         var tries = 0
-                        return@runCatching PhoneSendQueue.enqueue(context, "5590", "Test person", intent.getStringExtra("text") ?: "queued hello", "busy", false) { force ->
+                        return@runCatching PhoneSendQueue.enqueue(context, "5590", "Test person", intent.getStringExtra("text") ?: "queued hello", "busy", false, duplicateOf = if (mode == "dup") ({ _ -> true }) else null) { force ->
                             tries++
                             when {
                                 mode == "busy2" && tries <= 2 && !force -> throw PhoneBusyException("still busy")
@@ -57,6 +57,7 @@ class PhoneTestSendReceiver : BroadcastReceiver() {
                             }
                         }.toString()
                     }
+                    "queuecancel" -> return@runCatching PhoneSendQueue.cancel(context, intent.getIntExtra("id", -1)).toString()
                     "queueact" -> { PhoneSendQueue.act(context, intent.getIntExtra("id", -1), intent.getStringExtra("do") ?: ""); return@runCatching PhoneSendQueue.status(null).toString() }
                     "queuestatus" -> return@runCatching PhoneSendQueue.status(null).toString()
                     "files" -> {
