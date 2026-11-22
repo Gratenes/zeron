@@ -3634,3 +3634,19 @@ for raw in sys.stdin:
     assert_eq!(dones(&events), vec![(DoneStatus::Interrupted, None)]);
 }
 
+
+/// Antigravity resumes whole (tests/antigravity_resume_live.rs), so its parked
+/// adapter pair is stopped after the short idle window; the other ACP agents
+/// keep the long one.
+#[test]
+fn only_antigravity_stops_when_idle() {
+    assert!(AcpHarness::antigravity().stops_when_idle());
+    for other in [
+        AcpHarness::grok(),
+        AcpHarness::devin(),
+        AcpHarness::fx(),
+        AcpHarness::hermes(),
+    ] {
+        assert!(!other.stops_when_idle(), "{:?}", other.id());
+    }
+}
