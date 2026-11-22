@@ -866,6 +866,9 @@ struct Inner {
     /// removal and cause the wrong live account to be signed out.
     ops: tokio::sync::Mutex<()>,
     flows: Mutex<HashMap<String, LoginFlow>>,
+    /// The last (status, url present) each sign-in's poll reported, so only a
+    /// change is logged, never one line per 1.5s poll.
+    login_polls: Mutex<HashMap<String, (AgentLoginStatus, bool)>>,
     /// `"{harness}:{accountKey}"` → usage state; mirrored to disk.
     usage: Mutex<HashMap<String, UsageEntry>>,
     /// Accounts with a usage probe in flight — overlapping forced lists (the
@@ -981,6 +984,7 @@ impl AgentAccounts {
                 endpoints,
                 ops: tokio::sync::Mutex::new(()),
                 flows: Mutex::new(HashMap::new()),
+                login_polls: Mutex::new(HashMap::new()),
                 usage: Mutex::new(usage),
                 inflight_probes: Mutex::new(std::collections::HashSet::new()),
                 inflight_refreshes: Mutex::new(std::collections::HashSet::new()),
@@ -1821,8 +1825,27 @@ impl AgentAccounts {
         if sign_in_runs_cli(harness) && !self.agent_installed(harness) {
             return Ok(self.start_installing_login(harness, provider, requester));
         }
-        self.start_installed_login(harness, provider, requester)
-            .await
+        let started = self
+            .start_installed_login(harness, provider, requester)
+            .await;
+        match &started {
+            Ok(start) => tracing::info!(
+                harness = harness.as_str(),
+                login_id = %start.login_id,
+                has_url = !start.url.is_empty(),
+                callback_port = start.callback_port.is_some(),
+                remote = requester.is_some(),
+                mode = ?start.mode,
+                "agent sign-in started"
+            ),
+            Err(error) => tracing::warn!(
+                harness = harness.as_str(),
+                remote = requester.is_some(),
+                error = %zeron_harness::redact::redact_output(&error.to_string()),
+                "agent sign-in failed to start"
+            ),
+        }
+        started
     }
 
     /// `harness`'s sign-in, its CLI (when it runs one) installed: the
@@ -3295,6 +3318,64 @@ impl AgentAccounts {
     }
 
     pub async fn poll_login(&self, login_id: &str) -> Result<AgentLoginPoll, EngineError> {
+        let harness = self.flow_harness(login_id);
+        let polled = self.poll_login_inner(login_id).await;
+        self.log_poll_change(harness, login_id, &polled);
+        polled
+    }
+
+    /// The harness a pending sign-in belongs to (`None`: no such flow).
+    fn flow_harness(&self, login_id: &str) -> Option<HarnessId> {
+        match lock(&self.inner.flows).get(login_id)? {
+            LoginFlow::Claude { .. } => Some(HarnessId::ClaudeCode),
+            LoginFlow::Spawned { harness, .. }
+            | LoginFlow::Task { harness, .. }
+            | LoginFlow::Installing { harness, .. } => Some(*harness),
+        }
+    }
+
+    /// One INFO line when a sign-in's poll status or url presence changes;
+    /// never the url itself, a message, or a token.
+    fn log_poll_change(
+        &self,
+        harness: Option<HarnessId>,
+        login_id: &str,
+        polled: &Result<AgentLoginPoll, EngineError>,
+    ) {
+        let harness = harness.map_or("unknown", HarnessId::as_str);
+        let mut seen = lock(&self.inner.login_polls);
+        match polled {
+            Ok(poll) => {
+                let now = (poll.status, poll.url.is_some());
+                if seen.get(login_id) != Some(&now) {
+                    tracing::info!(
+                        harness,
+                        %login_id,
+                        status = ?poll.status,
+                        has_url = now.1,
+                        callback_port = poll.callback_port.is_some(),
+                        "agent sign-in poll changed"
+                    );
+                }
+                if poll.status == AgentLoginStatus::Pending {
+                    seen.insert(login_id.to_string(), now);
+                } else {
+                    seen.remove(login_id);
+                }
+            }
+            Err(error) => {
+                seen.remove(login_id);
+                tracing::info!(
+                    harness,
+                    %login_id,
+                    error = %zeron_harness::redact::redact_output(&error.to_string()),
+                    "agent sign-in poll failed"
+                );
+            }
+        }
+    }
+
+    async fn poll_login_inner(&self, login_id: &str) -> Result<AgentLoginPoll, EngineError> {
         self.sweep_flows();
         if let Some(poll) = self.poll_task_login(login_id) {
             return Ok(poll);
@@ -3558,6 +3639,7 @@ impl AgentAccounts {
     /// Drop a flow's bookkeeping, and with it any callback route it published.
     fn remove_flow(&self, login_id: &str) -> Option<LoginFlow> {
         self.inner.callback_routes.remove(login_id);
+        lock(&self.inner.login_polls).remove(login_id);
         lock(&self.inner.flows).remove(login_id)
     }
 
@@ -3567,7 +3649,10 @@ impl AgentAccounts {
     pub fn cancel_login(&self, login_id: &str) {
         let flow = self.remove_flow(login_id);
         match flow {
-            Some(LoginFlow::Spawned { child, home, .. }) => {
+            Some(LoginFlow::Spawned {
+                child, home, harness, ..
+            }) => {
+                tracing::info!(%login_id, ?harness, "agent sign-in cancelled");
                 if let Some(c) = lock(&child).as_mut() {
                     let _ = c.start_kill();
                 }
@@ -3595,7 +3680,10 @@ impl AgentAccounts {
                     self.cancel_login(&started);
                 }
             }
-            _ => {}
+            Some(LoginFlow::Claude { .. }) => {
+                tracing::info!(%login_id, harness = "claude-code", "agent sign-in cancelled");
+            }
+            None => {}
         }
     }
 
@@ -7188,6 +7276,36 @@ mod login_tests {
         );
         std::fs::remove_file(acp.join("acp_token.json")).unwrap();
         assert_eq!(detect_antigravity_login(&home, false).await, None);
+    }
+
+    #[tokio::test]
+    async fn sign_in_poll_logging_tracks_changes_and_forgets_finished_logins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let accounts = AgentAccounts::new(config(tmp.path()));
+        let poll = |status, url: Option<&str>| {
+            Ok(AgentLoginPoll {
+                code: None,
+                status,
+                message: None,
+                url: url.map(str::to_string),
+                callback_port: None,
+            })
+        };
+        let seen = || lock(&accounts.inner.login_polls).get("flow").copied();
+        let h = Some(HarnessId::Antigravity);
+        accounts.log_poll_change(h, "flow", &poll(AgentLoginStatus::Pending, None));
+        assert_eq!(seen(), Some((AgentLoginStatus::Pending, false)));
+        accounts.log_poll_change(
+            h,
+            "flow",
+            &poll(AgentLoginStatus::Pending, Some("https://x.test/?code=SECRET")),
+        );
+        assert_eq!(seen(), Some((AgentLoginStatus::Pending, true)));
+        accounts.log_poll_change(h, "flow", &poll(AgentLoginStatus::Done, None));
+        assert_eq!(seen(), None);
+        // An unknown login errors; the poll wrapper never leaves state behind.
+        assert!(accounts.poll_login("gone").await.is_err());
+        assert!(lock(&accounts.inner.login_polls).is_empty());
     }
 
     #[tokio::test]
