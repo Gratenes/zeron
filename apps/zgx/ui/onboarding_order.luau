@@ -62,6 +62,7 @@ type Run = {
 	name_done: boolean?,
 	org_done: boolean?,
 	org_admin: boolean?,
+	no_names: boolean?,
 	passed: { string }?,
 }
 
@@ -71,6 +72,7 @@ local function run(r: Run): string
 	state.name_done:set(r.name_done == true)
 	state.org_done:set(r.org_done == true)
 	state.org_admin:set(r.org_admin == true)
+	state.no_names:set(r.no_names == true)
 	state.claimed:set(false)
 	state.device_done:set({})
 	state.step:set("signin")
@@ -174,6 +176,37 @@ test("the username turning out to be had moves on to the card", function()
 	state.step:set("username")
 	actions.has_username()
 	expect(state.step:peek()).to_be("card")
+end)
+
+test("a Zeron without usernames passes over the username and card, on to the organization", function()
+	-- (A self-hosted edge: `/username` answers 404, `unsupported`.)
+	expect(run { path = "signed_in", no_names = true }).to_be("appearance")
+	expect(forward("appearance")).to_equal({ "appearance", "org", "invite", "github", "providers", "done" })
+	local _, count = state.position("org")
+	expect(count).to_be(6)
+	-- Found out on the username step itself (the answer at sign-in came
+	-- late): on to the organization, past the card.
+	run { path = "signed_in" }
+	state.step:set("username")
+	actions.no_usernames()
+	expect(state.step:peek()).to_be("org")
+	-- Or on the card: the same.
+	run { path = "signed_in" }
+	state.step:set("card")
+	actions.no_usernames()
+	expect(state.step:peek()).to_be("org")
+	-- Elsewhere it only leaves the path.
+	run { path = "signed_in" }
+	state.step:set("appearance")
+	actions.no_usernames()
+	expect(state.step:peek()).to_be("appearance")
+	actions.next()
+	expect(state.step:peek()).to_be("org")
+	-- Welcomed back to a Zeron without usernames: nothing left but done.
+	state.welcome = true
+	expect(run { path = "signed_in", no_names = true }).to_be("done")
+	state.welcome = false
+	state.no_names:set(false)
 end)
 
 test("the organization turning out to be had moves on by its role", function()

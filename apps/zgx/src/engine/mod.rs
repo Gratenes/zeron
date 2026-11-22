@@ -361,6 +361,13 @@ impl Engine {
                 && error != "closed"
             {
                 eprintln!("zeron-zgx: engine: didn't stop: {error}");
+                // Not stuck restarting on a connection that stays: asked
+                // again in a moment (a local engine must not outlive a
+                // sign-in, or the account's chats look empty).
+                zgx::timer::sleep(Duration::from_secs(3)).await;
+                let me = get();
+                me.restarting.set(false);
+                me.follow_session();
             }
         });
     }
@@ -416,12 +423,24 @@ impl Engine {
                     self.scope.borrow_mut().take();
                     self.restarting.set(false);
                     // Which workspace it opened: whether a session change
-                    // needs it started again.
+                    // needs it started again. Asked until it answers while
+                    // this connection lasts: unknown, a local engine would
+                    // never be started again on a sign-in (an engine still
+                    // coming up can fail the first ask).
                     let (me, info) = (self.clone(), rpc.clone());
                     self.spawn(async move {
-                        if let Ok(answer) = info.call("EngineInfo", json!({})).await {
-                            *me.scope.borrow_mut() = answer["workspaceScope"].as_str().map(Into::into);
-                            me.follow_session();
+                        for attempt in 0..20 {
+                            if attempt > 0 {
+                                zgx::timer::sleep(Duration::from_millis(500)).await;
+                            }
+                            if info.is_closed() {
+                                return;
+                            }
+                            if let Ok(answer) = info.call("EngineInfo", json!({})).await {
+                                *me.scope.borrow_mut() = answer["workspaceScope"].as_str().map(Into::into);
+                                me.follow_session();
+                                return;
+                            }
                         }
                     });
                     let listeners = self.listeners.borrow().clone();

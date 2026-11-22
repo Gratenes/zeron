@@ -22,6 +22,11 @@ end
 function M.next()
 	local step = state.step:peek()
 	M.finished(step)
+	M.past(step)
+end
+
+-- To the step after `step` in the active path, `step` not marked finished.
+function M.past(step: state.Step)
 	local order = state.order()
 	-- From where it stands in the full path (a step that just left the
 	-- path, naming the organization once the account turned out to be in
@@ -112,6 +117,7 @@ function M.signed_in()
 	state.card:set(nil)
 	state.card_dealt:set(false)
 	state.name_done:set(false)
+	state.no_names:set(false)
 	M.forget_org()
 	local pending = 3
 	local account_done: { string } = {}
@@ -140,7 +146,12 @@ function M.signed_in()
 	api.username():after(function(name: string?)
 		state.name_done:set(name ~= nil)
 		answered()
-	end, answered)
+	end, function(err: any)
+		if type(err) == "table" and err.message == "unsupported" then
+			state.no_names:set(true)
+		end
+		answered()
+	end)
 	api.orgs():after(function(orgs: { api.Org })
 		local org = M.existing_org(orgs)
 		if org then
@@ -229,6 +240,7 @@ end
 function M.skip_sign_in()
 	state.path:set("skipped")
 	state.name_done:set(false)
+	state.no_names:set(false)
 	M.start_run({})
 end
 
@@ -253,6 +265,17 @@ function M.has_username()
 	M.next()
 end
 
+-- Zeron turned out to have no usernames (`unsupported`: a self-hosted edge
+-- without them): claiming one and its card leave the path, and a run
+-- standing on either goes on to the step after them (the organization).
+function M.no_usernames()
+	local step = state.step:peek()
+	state.no_names:set(true)
+	if step == "username" or step == "card" then
+		M.past(step)
+	end
+end
+
 -- Signed out (asked for, or the session went): back to the start.
 function M.signed_out()
 	state.wall_again:set(true)
@@ -261,6 +284,7 @@ function M.signed_out()
 	state.signin:set("ready")
 	state.path:set("skipped")
 	state.name_done:set(false)
+	state.no_names:set(false)
 	state.claimed:set(false)
 	M.forget_org()
 	state.step:set("signin")

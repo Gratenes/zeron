@@ -67,6 +67,10 @@ M.path = ui.state("path", "skipped" :: Path)
 -- The account had its username when it signed in: claiming one isn't a
 -- step of this run (`username` leaves the path; its card still shows).
 M.name_done = ui.state("name_done", false)
+-- The account's Zeron has no usernames (a self-hosted edge that answers
+-- `/username` with 404: `unsupported`): claiming one and its card leave
+-- the way through, which goes on to the organization.
+M.no_names = ui.state("no_names", false)
 -- A username was claimed in this run.
 M.claimed = ui.state("claimed", false)
 -- The account's card, once claimed or asked for (kept as state, so a hot
@@ -108,10 +112,21 @@ M.appearance = ui.persist("appearance", "system" :: Appearance)
 -- The organization worked in: the one made, or the one the account was in.
 M.last_org = ui.persist("last_org", "")
 
--- The way through this run takes.
+-- The way through this run takes (without a username or card where
+-- Zeron has none).
 local function way(): { Step }
 	local path = M.path:get()
-	return if M.welcome and path == "signed_in" then M.WELCOME else M.PATHS[path]
+	local steps = if M.welcome and path == "signed_in" then M.WELCOME else M.PATHS[path]
+	if not M.no_names:get() then
+		return steps
+	end
+	local out: { Step } = {}
+	for _, s in steps do
+		if s ~= "username" and s ~= "card" then
+			table.insert(out, s)
+		end
+	end
+	return out
 end
 
 -- The active path's steps, less the ones this run passes over.
