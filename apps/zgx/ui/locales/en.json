@@ -2474,6 +2474,7 @@
       "star": "Star on GitHub",
       "copied": "{what} copied",
       "menu": {
+        "open_in_new_tab": "Open in New Tab",
         "sections": "Sections",
         "new_section": "New section",
         "path": "Path",
@@ -2625,7 +2626,9 @@
         "shell_close": "Close",
         "shell_reload": "Reload Zeron",
         "shell_reload_interface": "Reload interface",
-        "shell_dictate": "Hold to dictate"
+        "shell_dictate": "Hold to dictate",
+        "shell_new_tab": "New tab",
+        "shell_reopen_tab": "Reopen closed tab"
       },
       "group": {
         "sessions": "Sessions",
@@ -2796,6 +2799,10 @@
       "stop_waiting": "Stop waiting",
       "stop_waiting_failed": "Couldn't stop waiting",
       "wake_failed": "Couldn't wake this chat"
+    },
+    "tabs": {
+      "keep": "Keep Tab Open",
+      "reopen": "Reopen Closed Tab"
     }
   },
   "onboarding": {

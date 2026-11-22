@@ -22,6 +22,7 @@ local sessions = require("@account/sessions")
 local appearance = require("@app/screens/shell/appearance")
 local art = require("@app/screens/shell/art")
 local boundary = require("@app/screens/shell/boundary")
+local session_tabs = require("@app/screens/shell/session_tabs")
 
 export type Props = {
 	files: State<boolean>,
@@ -276,6 +277,10 @@ return function(props: Props): Node
 					grow = 1,
 					min_w = 0,
 					h_full = true,
+					-- (Said by the chat's tab while there are tabs: below.)
+					opacity = function(): number
+						return if session_tabs.any() then 0 else 1
+					end,
 					gap = "$zeron.space.tight",
 					items = "center",
 					ui.presence(function(): string
@@ -685,6 +690,41 @@ return function(props: Props): Node
 			chosen:set(true)
 		end
 	end
+	-- The chats open, along the top bar over the page, in the title's place
+	-- (shell/session_tabs, the default's strip): a tab each chat kept open, and
+	-- the one a click in the sidebar replaces, its title in italics, until it's
+	-- kept. One chat at a time here, so a chat dragged onto a tab doesn't join
+	-- it (`join`). Over the strip that moves the window: the tabs take their
+	-- presses, the room between them still moves it.
+	local function page_x(): number
+		-- (The row ends at the window's right: where it starts is what its width
+		-- leaves, followed as the sidebar moves.)
+		return props.width() - (row_ref.width or props.width())
+	end
+	table.insert(
+		pane,
+		ui.show(
+			function(): boolean
+				return session_tabs.any() and not on_plugin() and not expanded()
+			end,
+			session_tabs.Strip {
+				join = false,
+				window_x = page_x,
+				-- (To the page's right edge: the files beside it have tabs of their own.)
+				width = function(): number
+					return props.width() - (if shown:get() then open_w:get() else 0)
+				end,
+				start = function(): number
+					return page_x() + title_left(false, true)
+				end,
+				-- (Clear of the title bar's controls at the right, and their room.)
+				right = function(): number
+					return TITLE_RIGHT - 10 + ds.TitleBar.actions_right()
+				end,
+			}
+		)
+	)
+
 	local beside = ui.column {
 		id = "shell-files",
 		hook = "shell.files",

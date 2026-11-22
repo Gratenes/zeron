@@ -35,6 +35,10 @@ local M = {}
 M.LIST = {
 	{ id = "shell.new_chat", title = "New chat", key = "cmd+n", group = "Sessions", menu = "File", reserved = true },
 	{ id = "shell.new_project", title = "New project", key = "cmd+shift+n", group = "Sessions", menu = "File", reserved = true },
+	-- (⌘T is the browser tab's New Browser Tab while its page has the keyboard:
+	-- screens/shell/init hands it there.)
+	{ id = "shell.new_tab", title = "New tab", key = "cmd+t", group = "Sessions", menu = "File", reserved = true },
+	{ id = "shell.reopen_tab", title = "Reopen closed tab", key = "cmd+shift+t", group = "Sessions", menu = "File", reserved = true },
 	{ id = "shell.archive", title = "Archive session", key = "cmd+shift+a", group = "Sessions", menu = "File", reserved = true },
 	{ id = "shell.pin", title = "Pin or unpin this session", key = "cmd+shift+p", group = "Sessions", menu = "File", reserved = true },
 	{ id = "shell.model_picker", title = "Choose model", key = "cmd+/", group = "Sessions", menu = "View", reserved = true },
@@ -46,7 +50,9 @@ M.LIST = {
 	-- Settings shows it and no other takes its key; it acts while a browser
 	-- tab shows.)
 	{ id = "panel.annotate", title = "Annotate Element", key = "cmd+shift+i", group = "Panels", menu = "View", elsewhere = true },
-	{ id = "panel.new_browser_tab", title = "New Browser Tab", key = "cmd+t", group = "Panels", menu = "File", elsewhere = true },
+	-- (No key of its own: ⌘T is New tab's, which hands it here while a
+	-- browser page has the keyboard.)
+	{ id = "panel.new_browser_tab", title = "New Browser Tab", key = "", group = "Panels", menu = "File", elsewhere = true },
 	{ id = "panel.focus_address", title = "Open Location", key = "cmd+l", group = "Panels", menu = "View", elsewhere = true },
 	{ id = "panel.reload_page", title = "Reload Page", key = "cmd+shift+r", group = "Panels", menu = "View", elsewhere = true },
 	{ id = "shell.next_session", title = "Next session", key = "ctrl+tab", group = "Go", menu = "Go", reserved = true },

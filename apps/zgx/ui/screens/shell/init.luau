@@ -138,6 +138,31 @@ return function(): Node
 			shared.focus:add(1)
 		end
 	end
+	-- ⌘T: a new chat in a tab of its own (the preview tab stays), or, with a
+	-- browser tab's page or bar holding the keyboard, a new browser tab
+	-- (screens/panel/browser). ⌘⇧T: the last tab closed, back.
+	runs["shell.new_tab"] = function()
+		local browser: any = boundary.load("@app/screens/panel/browser")
+		if browser and browser.new_tab_with_keyboard and browser.new_tab_with_keyboard() then
+			return
+		end
+		local tabs: any = boundary.load("@app/screens/shell/session_tabs")
+		if tabs and tabs.new_tab then
+			tabs.new_tab()
+		else
+			route.new_chat()
+		end
+		local shared: any = boundary.load("@app/screens/chat/shared")
+		if shared and shared.focus then
+			shared.focus:add(1)
+		end
+	end
+	runs["shell.reopen_tab"] = function()
+		local tabs: any = boundary.load("@app/screens/shell/session_tabs")
+		if tabs and tabs.reopen_closed then
+			tabs.reopen_closed()
+		end
+	end
 	runs["shell.palette"] = function()
 		view.palette:set(not view.palette:peek())
 	end

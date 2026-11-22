@@ -154,9 +154,19 @@ end
 command("panel.annotate", ui.t("panel.browser.command.annotate"):get(), "View", "cmd+shift+i", function(s)
 	s.toggle()
 end)
-command("panel.new_browser_tab", ui.t("panel.browser.command.new_tab"):get(), "File", "cmd+t", function(s)
+command("panel.new_browser_tab", ui.t("panel.browser.command.new_tab"):get(), "File", "", function(s)
 	s.new_tab()
 end)
+-- ⌘T is the shell's New tab (a chat's): while the browser tab showing has
+-- the keyboard (its page or its bar), it's this browser's new tab instead.
+-- True if it was.
+function M.new_tab_with_keyboard(): boolean
+	if showing and showing.keyboard() then
+		showing.new_tab()
+		return true
+	end
+	return false
+end
 -- (A palette open over the page takes ⌘L, as its own: New project's folder
 -- path to edit.)
 local CommandPalette = require("@ds/command_palette")

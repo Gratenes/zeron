@@ -194,7 +194,12 @@ function M.new_id(): string
 	return `{string.sub(s, 1, 8)}-{string.sub(s, 9, 12)}-{string.sub(s, 13, 16)}-{string.sub(s, 17, 20)}-{string.sub(s, 21, 32)}`
 end
 
+-- Each message sent, said (`chat.sent`: its session, "" for a new chat's
+-- first), for the top bar's tabs to keep the tab it was sent from
+-- (screens/shell/split).
+local sent = ui.shared("chat.sent", nil :: any)
 function M.send(req: Request): any
+	sent:set({ session = req.session or "" })
 	return ui.call("chat.send", req)
 end
 

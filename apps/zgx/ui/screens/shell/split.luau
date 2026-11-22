@@ -30,6 +30,19 @@
 --                           pane's head): the panes' drop zones show then
 --   split.MAX               the most chats in a split
 --
+-- Tabs (the top bar's, shell/session_tabs): a chat alone opened from the
+-- sidebar takes the *preview* tab, the one tab a click elsewhere replaces, as
+-- a code editor's. A tab is *kept* (stays until closed) once it's asked for
+-- (`open_in_new_tab`, `new_tab`), a message is sent from it, it's dragged
+-- or double-clicked (`keep`), or it holds chats composed together.
+--
+--   split.kept(key)         whether a tab stays (tracked)
+--   split.keep(key)         a tab kept
+--   split.open_in_new_tab(id)  a chat in a kept tab of its own (its own if it
+--                           has one), shown
+--   split.new_tab()         a new chat, in a tab of its own once it's made
+--   split.reopen_closed()   the last tab closed, back (true if there was one)
+--
 -- Resizing the window or sliding the sidebar runs none of this: a box's
 -- edges are each a percentage of the page plus points (zgx's terminal
 -- example's way), which zgx resolves at every size; they're worked out
@@ -48,7 +61,8 @@ M.GAP = (ui.theme.get("zeron.inset.gap") :: number?) or 4
 
 -- (`shares`: how a row or a column divides among its parts, a share each, summing
 -- to 1; none: equally. A divider dragged sets them.)
-export type Node = { kind: string, id: string?, children: { Node }?, shares: { number }?, key: string? }
+-- (`kept`, a tab's: it stays until closed, not replaced by the next chat opened.)
+export type Node = { kind: string, id: string?, children: { Node }?, shares: { number }?, key: string?, kept: boolean? }
 -- An edge: `p` of the page's length, plus `q` points.
 export type Edge = { p: number, q: number }
 export type Box = { left: Edge, right: Edge, top: Edge, bottom: Edge }
@@ -388,12 +402,24 @@ local function fresh_key(first: string, list: { Node }): string
 	return key
 end
 
--- A tree as a tab, keeping that tab's key.
-local function keyed(tree: Node, key: string): Node
+-- A tree as a tab, keeping that tab's key (and that it's kept, `kept`).
+local function keyed(tree: Node, key: string, kept: boolean?): Node
 	local out = table.clone(tree)
 	out.key = key
+	if kept then
+		out.kept = true
+	end
 	return out
 end
+
+-- Whether a tab stays until it's closed: kept, or chats composed together.
+local function is_kept(t: Node): boolean
+	return t.kept == true or #leaves(t) >= 2
+end
+
+-- The next chat opened with no tab gets a kept one of its own, not the preview's
+-- (`new_tab`, a new chat's first message).
+local own_tab_next = ui.state("split.own_tab_next", false)
 
 M.focused = ui.computed(function(): string?
 	local c = route.chat:get()
@@ -426,7 +452,7 @@ local function taken_out(list: { Node }, id: string, except: string?): { Node }
 		else
 			local rest = without(t, id)
 			if rest then
-				table.insert(out, keyed(rest, key))
+				table.insert(out, keyed(rest, key, is_kept(t)))
 			end
 		end
 	end
@@ -493,10 +519,10 @@ ui.effect(function()
 		trees:set(out)
 	end
 end)
--- A chat focused with no tab takes the one tab for a chat alone, in its place, or a
--- new one at the end: navigating replaces it, until chats are composed in it. (As the
--- focus moves, not as the tabs change: a tab just closed, the focus on its way to
--- another, doesn't come back.)
+-- A chat focused with no tab takes the preview tab, in its place, or a new one at the
+-- end: navigating replaces it, until it's kept. (As the focus moves, not as the tabs
+-- change: a tab just closed, the focus on its way to another, doesn't come back.)
+-- Asked for a tab of its own (`own_tab_next`), a kept one at the end instead.
 ui.effect(function()
 	local id = M.focused:get()
 	if not id then
@@ -507,14 +533,19 @@ ui.effect(function()
 	if not t then
 		local tab = leaf(id)
 		tab.key = fresh_key(id, list)
+		local own = own_tab_next:peek()
+		if own then
+			tab.kept = true
+			own_tab_next:set(false)
+		end
 		local more: { Node } = {}
 		local placed = false
 		for _, other in list do
-			if #leaves(other) >= 2 then
-				table.insert(more, other)
-			elseif not placed then
+			if not own and not placed and not is_kept(other) then
 				table.insert(more, tab)
 				placed = true
+			else
+				table.insert(more, other)
 			end
 		end
 		if not placed then
@@ -523,27 +554,27 @@ ui.effect(function()
 		trees:set(more)
 	end
 end)
--- One tab for a chat alone, however it came to be more (a split left with one, tabs
--- kept from before): the focused chat's, else the last.
+-- One preview tab, however it came to be more (tabs kept from before there were kept
+-- tabs): the focused chat's, else the last.
 ui.effect(function()
 	local list = trees:get()
 	local focused = M.focused:peek()
 	local keep: Node? = nil
-	local alone = 0
+	local previews = 0
 	for _, t in list do
-		if #leaves(t) == 1 then
-			alone += 1
+		if not is_kept(t) then
+			previews += 1
 			if not (keep and focused and holds(keep, focused)) then
 				keep = t
 			end
 		end
 	end
-	if alone <= 1 then
+	if previews <= 1 then
 		return
 	end
 	local out: { Node } = {}
 	for _, t in list do
-		if #leaves(t) >= 2 or t == keep then
+		if is_kept(t) or t == keep then
 			table.insert(out, t)
 		end
 	end
@@ -571,17 +602,149 @@ function M.current_key(): string?
 	return if t then key_of(t) else nil
 end
 
--- Those tabs closed, and forgotten: a chat of theirs opened again gets a tab of its
--- own.
+-- The tabs closed, the last first, for `reopen_closed` (kept across launches).
+local CLOSED_MAX = 20
+local closed_tabs = ui.persist("shell_session_tabs_closed", {} :: { Node })
+
+-- Those tabs closed: a chat of theirs opened again gets a tab of its own. Each is
+-- remembered to come back (`reopen_closed`).
 function M.close_tabs(keys: { string })
 	local list: { Node } = {}
+	local gone: { Node } = {}
 	for _, t in trees:peek() do
 		if not table.find(keys, key_of(t)) then
 			table.insert(list, t)
+		else
+			table.insert(gone, t)
 		end
+	end
+	if #gone > 0 then
+		local remembered = table.clone(gone)
+		for _, t in closed_tabs:peek() do
+			if #remembered >= CLOSED_MAX then
+				break
+			end
+			table.insert(remembered, t)
+		end
+		closed_tabs:set(remembered)
 	end
 	trees:set(list)
 end
+
+-- Whether a tab stays until it's closed.
+function M.kept(key: string): boolean
+	local t = tab_with_key(trees:get(), key)
+	return t ~= nil and is_kept(t)
+end
+
+-- A tab kept: the next chat opened takes a tab of its own.
+function M.keep(key: string)
+	local list = trees:peek()
+	local out: { Node } = {}
+	local changed = false
+	for _, t in list do
+		if key_of(t) == key and not is_kept(t) then
+			table.insert(out, keyed(t, key, true))
+			changed = true
+		else
+			table.insert(out, t)
+		end
+	end
+	if changed then
+		trees:set(out)
+	end
+end
+
+-- The tab with `id` kept, if it has one.
+local function keep_chat(id: string)
+	for _, t in trees:peek() do
+		if holds(t, id) then
+			M.keep(key_of(t))
+			return
+		end
+	end
+end
+
+-- A chat in a kept tab: its own if it's in one already, else a new one at the end.
+-- Shown.
+function M.open_in_new_tab(id: string)
+	local list = trees:peek()
+	local there = false
+	for _, t in list do
+		if holds(t, id) then
+			there = true
+			M.keep(key_of(t))
+			break
+		end
+	end
+	if not there then
+		local tab = leaf(id)
+		tab.key = fresh_key(id, list)
+		tab.kept = true
+		local more = table.clone(list)
+		table.insert(more, tab)
+		trees:set(more)
+	end
+	route.open_session(id)
+end
+
+-- A new chat, its tab one of its own once it's made (the preview stays).
+function M.new_tab()
+	own_tab_next:set(true)
+	route.new_chat()
+end
+
+-- The last tab closed, back at the end, kept, and shown: those whose chats are all
+-- gone are passed over. True if one came back.
+function M.reopen_closed(): boolean
+	local list = closed_tabs:peek()
+	local there = known:peek()
+	for i, t in list do
+		local alive: Node? = t
+		for _, id in leaves(t) do
+			if there and not there[id] then
+				alive = without(alive, id)
+			end
+		end
+		if alive then
+			local rest = table.clone(list)
+			table.remove(rest, i)
+			closed_tabs:set(rest)
+			local tabs = trees:peek()
+			-- (Its chats out of any tab they're in now.)
+			for _, id in leaves(alive) do
+				tabs = taken_out(tabs, id, nil)
+			end
+			local back = keyed(alive, fresh_key(leaves(alive)[1], tabs), true)
+			local more = table.clone(tabs)
+			table.insert(more, back)
+			trees:set(more)
+			route.open_session(leaves(alive)[1])
+			return true
+		end
+	end
+	if #list > 0 then
+		closed_tabs:set({})
+	end
+	return false
+end
+
+-- A message sent from a chat keeps its tab; a new chat's first one, the tab its
+-- chat is about to have (chat/store `send`, which says each).
+local sent = ui.shared("chat.sent", nil :: any)
+ui.effect(function()
+	local s = sent:get()
+	if type(s) ~= "table" then
+		return
+	end
+	-- (Heard once: a reload doesn't hear it again.)
+	sent:set(nil)
+	if type(s.session) == "string" and s.session ~= "" then
+		keep_chat(s.session)
+	else
+		own_tab_next:set(true)
+	end
+end)
 
 -- A tab moved to where another stands.
 function M.move_tab(key: string, onto: string)
@@ -598,8 +761,9 @@ function M.move_tab(key: string, onto: string)
 	if not from or not to then
 		return
 	end
-	local moved = table.remove(list, from)
-	table.insert(list, to, moved :: Node)
+	local moved = table.remove(list, from) :: Node
+	-- (Moved by hand: it stays.)
+	table.insert(list, to, keyed(moved, key_of(moved), true))
 	trees:set(list)
 end
 
@@ -996,7 +1160,8 @@ function M.close(id: string)
 		if key_of(t) ~= key then
 			table.insert(list, t)
 		elseif rest then
-			table.insert(list, keyed(rest, key))
+			-- (What's left stays a tab of its own, as the split was.)
+			table.insert(list, keyed(rest, key, true))
 		end
 	end
 	trees:set(list)

@@ -547,6 +547,43 @@ fn zeron_v2_is_installed_as_zeron_s_and_runs_one_page() {
     assert!(near(app.bounds("shell-page").y, 42.));
 }
 
+/// Zeron v2's top bar has the chats' tabs (shell/session_tabs), one chat a
+/// page: a chat opened replaces the preview tab, a double-clicked one stays,
+/// ⌘T gives the next chat a tab of its own, ⌘W closes the chat's tab and ⌘⇧T
+/// brings it back; nothing is composed side by side.
+#[test]
+fn zeron_v2_has_the_top_bar_tabs() {
+    let root = scratch("v2-tabs");
+    let t = root.join("templates");
+    live::sync_zeron(&ui(), &t).unwrap();
+    let v2 = compose(&t, "zeron-v2").join("shell_fixture.luau");
+    let mut app = mount_at(&v2, &root.join("state"));
+    let tab = |app: &mut TestApp, id: &str| app.find(&format!("#session-tab-{id}")).is_some();
+    open(&mut app, "Fix the build");
+    assert!(tab(&mut app, "a1"), "the chat open has its tab");
+    let page = app.bounds("shell-page");
+    let strip = app.bounds("#session-tab-a1");
+    assert!(strip.x >= page.x && strip.y < 42., "on the page's top bar: {strip:?} in {page:?}");
+    open(&mut app, "Write the docs");
+    assert!(!tab(&mut app, "a1") && tab(&mut app, "a2"), "the preview tab replaced");
+    app.double_click("#session-tab-a2");
+    app.frames(20);
+    open(&mut app, "Tidy the tests");
+    assert!(tab(&mut app, "a2") && tab(&mut app, "a3"), "a double-clicked tab stays");
+    assert!(app.host.run_command("shell.new_tab"));
+    app.frames(20);
+    open(&mut app, "Fix the build");
+    assert!(tab(&mut app, "a1") && tab(&mut app, "a2") && tab(&mut app, "a3"), "⌘T: a tab of its own");
+    assert!(app.host.run_command("shell.close"));
+    app.frames(30);
+    assert!(!tab(&mut app, "a1") && tab(&mut app, "a3"), "⌘W closed the chat's tab");
+    assert!(app.host.run_command("shell.reopen_tab"));
+    app.frames(30);
+    assert!(tab(&mut app, "a1"), "⌘⇧T brought it back");
+    assert_eq!(panes(&mut app), 0, "v2 has no split chats");
+    assert!(app.error().is_none(), "{:?}", app.error());
+}
+
 // ── Drop indicators stand over the composers ────────────────────────────────
 
 /// Whether `over` is in front of `under` at `(x, y)`: both under the point,
