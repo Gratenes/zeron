@@ -456,3 +456,16 @@ markers = [
   ["apps/zgx/src/main.rs", 'tray::install'],
   ["apps/zgx/ui/screens/settings/prefs.luau", 'close_to_tray'],
 ]
+
+[[feature]]
+id = "zgx-chat-tabs"
+title = "zgx: many chat tabs on the top bar (preview tab, kept tabs, Ctrl+T, reopen closed tab), in Zeron v2 too"
+owner = "zgx tabs + multi-window + Windows tray (cf305aba)"
+branch = "zgx-chat-tabs"
+commits = ["6d4ba37b6"]
+markers = [
+  ["apps/zgx/ui/screens/shell/session_tabs.luau", 'preview'],
+  ["apps/zgx/ui/templates/zeron-v2/screens/shell/page.luau", 'session_tabs'],
+  ["apps/zgx/src/split_tests.rs", 'zeron_v2_has_the_top_bar_tabs'],
+]
+rust = [["zeron-zgx", "zeron_v2_has_the_top_bar_tabs"]]
