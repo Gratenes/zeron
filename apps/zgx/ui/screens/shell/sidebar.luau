@@ -1185,6 +1185,22 @@ local function menu(id: string): { any }?
 		end
 	end
 	local entries = {
+		-- (A tab of its own on the top bar, kept: shell/split. Not a side chat's:
+		-- those open in their parent's panel.)
+		if side
+			then false
+			else {
+				label = locale.s("shell.sidebar.menu.open_in_new_tab"),
+				icon = "plus",
+				on_select = function()
+					local splits: any = boundary.load("@app/screens/shell/split")
+					if splits and splits.open_in_new_tab then
+						splits.open_in_new_tab(id)
+					else
+						route.open_session(id)
+					end
+				end,
+			},
 		{
 			label = locale.s("common.rename"),
 			icon = "pen",

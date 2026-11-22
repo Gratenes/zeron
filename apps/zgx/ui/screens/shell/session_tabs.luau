@@ -1,11 +1,18 @@
 -- The tabs on the top bar over the page (`splits` keeps them): one for each two chats
--- or more composed together, and one for a chat alone, which navigating replaces. Each
--- shows its panes' tiles stacked (three at most) with the pane focused last in front,
--- and its title. A chat dragged onto one joins it. A click goes there, a
--- drag reorders them, its × closes the tab, and a split with it (the sessions go on,
--- in the sidebar).
+-- or more composed together, one for each chat kept open, and the preview tab, a chat
+-- alone that navigating replaces (its title in italics) until it's kept: sent from,
+-- double-clicked, dragged, or opened in a tab of its own (⌘T, the sidebar's "Open in
+-- New Tab"). Each shows its panes' tiles stacked (three at most) with the pane focused
+-- last in front, and its title, and in its corner whether a chat of it needs you, is
+-- at work, failed or finished unseen. A chat dragged onto one joins it (`join`). A
+-- click goes there, a drag reorders them, its × closes the tab, and a split with it
+-- (the sessions go on, in the sidebar); ⌘⇧T brings the last closed back.
 --
---   session_tabs.Strip { window_x = fn, width = fn, start = fn, right = fn }
+--   session_tabs.Strip { window_x = fn, width = fn, start = fn, right = fn, join = bool? }
+--   session_tabs.any()          whether there are tabs (tracked)
+--   session_tabs.new_tab()      ⌘T: a new chat, in a tab of its own once made
+--   session_tabs.reopen_closed() ⌘⇧T
+--   session_tabs.close_showing() ⌘W
 
 local ds = require("@ds")
 local ContextMenu = require("@ds/context_menu")
@@ -95,9 +102,19 @@ local function stack_of(key: string): { string }
 end
 
 -- What a tab's corner says: of its chats, any awaiting a person first, else any
--- at work or waiting on its background work (the sidebar's order of what's
--- most pressing).
-local TAB_STATES = { approval = true, input = true, working = true, waiting = true, connecting = true }
+-- failed, at work or waiting on its background work, else any finished since it
+-- was seen (the sidebar's order of what's most pressing).
+local TAB_STATES = {
+	approval = true,
+	input = true,
+	failed = true,
+	limited = true,
+	working = true,
+	waiting = true,
+	connecting = true,
+	plan = true,
+	done = true,
+}
 local function tab_state(key: string): string?
 	local best: string? = nil
 	for _, id in splits.panes(key) do
@@ -144,19 +161,31 @@ end)
 local function close(key: string)
 	local before = shown:peek()
 	local at = table.find(before, key)
-	local alone = #splits.panes(key) == 1
 	local was_showing = splits.current_key() == key
 	splits.close_tabs({ key })
 	if was_showing then
-		-- The one beside it, else a new chat. (A chat alone: always a new chat.)
+		-- The one beside it, else a new chat.
 		local after = shown:peek()
-		local next_key = if at and not alone then after[math.min(at, #after)] else nil
+		local next_key = if at then after[math.min(at, #after)] else nil
 		if next_key then
 			route.open_session(face(next_key))
 		else
 			route.new_chat()
 		end
 	end
+end
+
+-- Whether there are tabs to show.
+function M.any(): boolean
+	return #shown:get() > 0
+end
+
+-- ⌘T and ⌘⇧T (screens/shell/init).
+function M.new_tab()
+	splits.new_tab()
+end
+function M.reopen_closed(): boolean
+	return splits.reopen_closed()
 end
 
 -- The tab showing closed, or the chat alone (⌘W): true if there was one.
@@ -333,9 +362,14 @@ local function still_face(key: string): Node
 	}
 end
 
-local Tab = ui.component(function(props: { chat: string, strip: any }): Node
+local Tab = ui.component(function(props: { chat: string, strip: any, join: boolean }): Node
 	local id = props.chat
 	local strip = props.strip
+	local join = props.join
+	-- The preview tab: replaced by the next chat opened, until it's kept.
+	local function preview(): boolean
+		return not splits.kept(id)
+	end
 	local hovered = ui.use_state(false)
 	-- A chat held over it, that dropping would bring in.
 	local held = ui.use_state(false)
@@ -355,7 +389,14 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 		ring = "$radius.lg",
 		shrink = 0,
 		items = function(): { any }
-			return {
+			local entries: { any } = {}
+			-- (The preview tab: kept, it stays.)
+			if preview() then
+				table.insert(entries, { label = ui.t("shell.tabs.keep"):get(), icon = "pin", on_select = function()
+					splits.keep(id)
+				end })
+			end
+			for _, e in {
 				{ label = ui.t("panel.tab.close"):get(), icon = "close-thin", on_select = function()
 					close(id)
 				end },
@@ -368,7 +409,14 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 				{ label = ui.t("panel.tab.close_right"):get(), on_select = function()
 					close_many(others(id, "right"), id)
 				end },
-			}
+				{ separator = true },
+				{ label = ui.t("shell.tabs.reopen"):get(), shortcut = "cmd+shift+t", on_select = function()
+					splits.reopen_closed()
+				end },
+			} do
+				table.insert(entries, e)
+			end
+			return entries
 		end,
 		ui.row {
 			id = `session-tab-{id}`,
@@ -401,6 +449,10 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 			end,
 			on_click = function()
 				route.open_session(face(id))
+			end,
+			-- (Double-clicked, the preview tab stays.)
+			on_double_click = function()
+				splits.keep(id)
 			end,
 			on_aux_click = function(e: any)
 				if e.button == "middle" then
@@ -443,7 +495,7 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 			-- (A tab of these goes to the strip's own drop: a chat, a sidebar's
 			-- row or a pane's head, comes here.)
 			drop_when = function(payload: any): boolean
-				return carried(payload) ~= nil
+				return join and carried(payload) ~= nil
 			end,
 			on_drag_over = function(payload: any)
 				local chat = carried(payload)
@@ -471,7 +523,7 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 			-- panes. (Not a pane's: its source would go, ending the drag.)
 			on_drag_spring = function(payload: any): boolean
 				local chat = carried(payload)
-				if not chat or payload.split_pane or not held:peek() or active() then
+				if not join or not chat or payload.split_pane or not held:peek() or active() then
 					return false
 				end
 				route.open_session(face(id))
@@ -489,6 +541,7 @@ local Tab = ui.component(function(props: { chat: string, strip: any }): Node
 				min_w = 0,
 				text_size = "$font.size.sm",
 				weight = "$font.weight.medium",
+				italic = preview,
 			},
 			ui.row {
 				w = SLOT,
@@ -529,7 +582,10 @@ end)
 -- `window_x`: how far the page's room stands from the window's left, followed
 -- as the sidebar moves. `width`: the window's. `start`: where the tabs start
 -- in the window. `right`: how far they keep from its right edge.
-function M.Strip(props: { window_x: () -> number, width: () -> number, start: () -> number, right: () -> number }): Node
+-- `join`: a chat dragged onto a tab joins it, composed together (false where the page
+-- shows one chat at a time: Zeron v2's).
+function M.Strip(props: { window_x: () -> number, width: () -> number, start: () -> number, right: () -> number, join: boolean? }): Node
+	local join = props.join ~= false
 	-- Each edge fades in full as soon as tabs run a little past it: a band only
 	-- as wide as the overflow (`fade_overflow`) is a hard edge while that's a
 	-- few points. Over the last few, as the end comes to rest, it goes.
@@ -675,7 +731,7 @@ function M.Strip(props: { window_x: () -> number, width: () -> number, start: ()
 					items = "center",
 					strip.Highlight(),
 					ui.each(strip.order, function(id: string): Node
-						return Tab { chat = id, strip = strip }
+						return Tab { chat = id, strip = strip, join = join }
 					end, {
 						key = function(id: string): string
 							return id

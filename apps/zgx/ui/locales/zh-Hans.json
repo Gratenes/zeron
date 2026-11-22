@@ -2439,6 +2439,7 @@
       "star": "在 GitHub 上加星标",
       "copied": "已拷贝{what}",
       "menu": {
+        "open_in_new_tab": "在新标签页中打开",
         "sections": "分区",
         "new_section": "新建分区",
         "path": "路径",
@@ -2590,7 +2591,9 @@
         "shell_close": "关闭",
         "shell_reload": "重新启动 Zeron",
         "shell_reload_interface": "重新加载界面",
-        "shell_dictate": "按住听写"
+        "shell_dictate": "按住听写",
+        "shell_new_tab": "新标签页",
+        "shell_reopen_tab": "重新打开已关闭的标签页"
       },
       "group": {
         "sessions": "会话",
@@ -2759,6 +2762,10 @@
       "stop_waiting": "停止等待",
       "stop_waiting_failed": "无法停止等待",
       "wake_failed": "无法唤醒此会话"
+    },
+    "tabs": {
+      "keep": "保持标签页打开",
+      "reopen": "重新打开已关闭的标签页"
     }
   },
   "onboarding": {
