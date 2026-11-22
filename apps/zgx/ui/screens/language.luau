@@ -59,6 +59,18 @@ ui.effect(function()
 	pcall(ui.invoke, "app.quit_words", words)
 end)
 
+-- The notification area icon's tooltip and menu (src/tray.rs, Windows'), in
+-- the language shown.
+ui.effect(function()
+	local words = {
+		tip = ui.t("tray.tip"):get(),
+		show = ui.t("tray.show"):get(),
+		quit = ui.t("tray.quit"):get(),
+	}
+	-- (Only the main window on Windows has it.)
+	pcall(ui.invoke, "app.tray_words", words)
+end)
+
 function M.options(): { { value: string, label: string } }
 	local out = {}
 	for _, l in M.LANGUAGES do

@@ -1217,6 +1217,11 @@
         "on": "Chats keep working, and other devices can reach them.",
         "off": "When you quit, Zeron stops once its chats are done.",
         "terms": "background quit close engine agents running stop memory battery"
+      },
+      "close_to_tray": {
+        "label": "Keep Zeron in the notification area",
+        "description": "Closing the window hides it there; click the icon to come back. Quit from the icon's menu.",
+        "terms": "tray notification area system tray close window minimize background taskbar"
       }
     },
     "engine": {
@@ -3957,5 +3962,10 @@
       "imported_toast": "{count, plural, one {Theme imported} other {# themes imported}}",
       "imported_body": "It's under Yours."
     }
+  },
+  "tray": {
+    "tip": "Zeron",
+    "show": "Show Zeron",
+    "quit": "Quit Zeron"
   }
 }

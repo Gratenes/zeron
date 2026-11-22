@@ -1217,6 +1217,11 @@
         "on": "对话会继续进行，其他设备也能访问它们。",
         "off": "退出时，Zeron 会在对话完成后停止。",
         "terms": "后台 退出 关闭 引擎 智能体 运行 停止 内存 电池 background quit close engine agents"
+      },
+      "close_to_tray": {
+        "label": "将 Zeron 保留在通知区域",
+        "description": "关闭窗口时将其隐藏到通知区域；点击图标即可返回。从图标菜单退出。",
+        "terms": "托盘 通知区域 系统托盘 关闭 窗口 最小化 后台 任务栏 tray notification area close window"
       }
     },
     "engine": {
@@ -3957,5 +3962,10 @@
       "imported_toast": "{count, plural, one {已导入主题} other {已导入 # 个主题}}",
       "imported_body": "它在“你的”中。"
     }
+  },
+  "tray": {
+    "tip": "Zeron",
+    "show": "显示 Zeron",
+    "quit": "退出 Zeron"
   }
 }
