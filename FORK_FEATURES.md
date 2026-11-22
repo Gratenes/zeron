@@ -87,3 +87,4 @@ fork commits' survival floor (`--bless`).
 | `mcp-ambiguous-title` | MCP: a chat key that matches several chats says which chat is which | Zeron Management (8a6897a4) | `mcp/ambiguous-chat-title` | `744e7dd6a` | markers only |
 | `zgx-windows-tray` | zgx on Windows: closing the window keeps Zeron in the notification area (tray icon, Reopen, a close-to-tray setting) | zgx tabs + multi-window + Windows tray (cf305aba) | `zgx-windows-tray` | `d1832edfe` | markers only |
 | `zgx-chat-tabs` | zgx: many chat tabs on the top bar (preview tab, kept tabs, Ctrl+T, reopen closed tab), in Zeron v2 too | zgx tabs + multi-window + Windows tray (cf305aba) | `zgx-chat-tabs` | `6d4ba37b6` | cargo `zeron-zgx zeron_v2_has_the_top_bar_tabs` |
+| `phone-sms-queue-cancel` | phone_sms_queue: a `cancel` boolean next to `id`; failed or expired texts are not to be resent (crates part of android-mine c5baa43e7) | 895d268e | `android-mine` |  | cargo `zeron-mcp phone` |

@@ -469,3 +469,15 @@ markers = [
   ["apps/zgx/src/split_tests.rs", 'zeron_v2_has_the_top_bar_tabs'],
 ]
 rust = [["zeron-zgx", "zeron_v2_has_the_top_bar_tabs"]]
+
+[[feature]]
+id = "phone-sms-queue-cancel"
+title = "phone_sms_queue: a `cancel` boolean next to `id`; failed or expired texts are not to be resent (crates part of android-mine c5baa43e7)"
+owner = "895d268e"
+branch = "android-mine"
+commits = []
+markers = [
+  ["crates/mcp/src/tools/phone.rs", '"cancel": \{ "type": "boolean"'],
+  ["crates/mcp/src/tools/phone.rs", 'do NOT resend'],
+]
+rust = [["zeron-mcp", "phone"]]
