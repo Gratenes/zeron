@@ -8,6 +8,8 @@
 --   prefs.escape_stops:get()        Escape stops the running agent (no dialog or menu open)
 --   prefs.close_panel_with_last_tab:get()  closing the panel's last tab closes it too
 --   prefs.compact_transcript:get()  thinking and tool calls folded in a transcript
+--   prefs.close_to_tray:get()       Windows: closing the window keeps Zeron in the
+--                                   notification area (src/tray.rs)
 --   prefs.open_links:get()          "zeron" | "external": a web link in a chat opens in
 --                                   the panel's browser tab, or the default browser
 --   prefs.hide_emails:get()        email addresses drawn blurred (ds.PrivateText,
@@ -47,6 +49,13 @@ M.compact_transcript = ui.persist("settings_compact_transcript", false)
 local compact_shown = ui.shared("chat.compact", false)
 ui.effect(function()
 	compact_shown:set(M.compact_transcript:get())
+end)
+-- Windows: closing the window keeps Zeron in the notification area (on by
+-- default), told to the host, which hides the window instead (src/tray.rs).
+M.close_to_tray = ui.persist("settings_close_to_tray", true)
+local close_to_tray_told = ui.shared("app.close_to_tray", true)
+ui.effect(function()
+	close_to_tray_told:set(M.close_to_tray:get())
 end)
 -- (The shipping app's `open_web_links_in_zeron`, on by default.)
 M.open_links = ui.persist("settings_open_links", "zeron")

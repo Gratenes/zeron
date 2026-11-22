@@ -73,6 +73,7 @@ mod settings;
 mod system_sound;
 mod terminal;
 mod tool_details;
+mod tray;
 mod themes;
 mod transparency;
 #[cfg(windows)]
@@ -386,10 +387,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         application = application
             .application_id("sh.zeron.app")?
             .on_application_event(|event, _| {
-                if let zgx_desktop::ApplicationEvent::OpenUrls(urls) = event {
-                    for url in urls {
-                        links::open(&url);
+                match event {
+                    zgx_desktop::ApplicationEvent::OpenUrls(urls) => {
+                        for url in urls {
+                            links::open(&url);
+                        }
                     }
+                    // Launched again while running (on Windows, hidden in the
+                    // notification area perhaps): its window in front
+                    // (src/tray.rs).
+                    zgx_desktop::ApplicationEvent::Reopen => tray::reopen(),
                 }
             });
     }
@@ -615,6 +622,8 @@ fn open_main(cx: &mut WindowContext, inspect: bool) {
     host.shared("window", "main");
     // Plugins and your templates (src/plugins): the main window's alone.
     plugins::install(cx, &host);
+    // Closing it on Windows keeps Zeron in the notification area (src/tray.rs).
+    tray::install(cx, &host);
     // The host's own toasts over it (a template in preview, a switch you
     // didn't make, signing keys, safe mode at launch).
     let chrome = plugins::host_bar::view(cx, host.shared("zeron.locale", "en").signal());
@@ -764,8 +773,11 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
     // How much the desktop blurs behind the glass (`window.blur`), for the
     // glass's tint (ds/material).
     desktop_blur::install(cx, &host);
+    // (As the window's own close button asks: on Windows the main window may
+    // keep to the notification area instead, src/tray.rs. ⌘W on a chat
+    // alone, the last of them, comes here.)
     let window = cx.window.clone();
-    host.action("close", move |_| window.close());
+    host.action("close", move |_| window.request_close());
     // Full screen, entered or left (`ui.invoke("window.full_screen", on)`),
     // as the green button does: macOS animates it, and `ui.window`'s
     // full_screen and its transition say so (a fixture drives the title

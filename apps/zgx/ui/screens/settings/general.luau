@@ -22,7 +22,7 @@ local M = {}
 M.ID = "general"
 M.TITLE = "General"
 
-search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"), {
+local searched = {
 	{ key = "language", title = ui.t("settings.general.language.label"), terms = ui.t("settings.general.language.terms") },
 	{ key = "send_with", title = ui.t("settings.general.send_with.label"), terms = ui.t("settings.general.send_with.terms") },
 	{ key = "compact_mode", title = ui.t("settings.general.compact_mode.label"), terms = ui.t("settings.general.compact_mode.terms") },
@@ -34,7 +34,12 @@ search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"
 	{ key = "thread_naming", title = ui.t("settings.general.thread_naming.label"), terms = ui.t("settings.general.thread_naming.terms") },
 	{ key = "worktrees", title = ui.t("settings.general.worktrees.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.worktrees.terms") },
 	{ key = "commit_credit", title = ui.t("settings.general.commit_credit.label"), section = ui.t("settings.general.git"), terms = ui.t("settings.general.commit_credit.terms") },
-})
+}
+-- (Windows' alone, after "Keep Zeron running": src/tray.rs.)
+if ui.shared("platform", ""):peek() == "windows" then
+	table.insert(searched, 7, { key = "close_to_tray", title = ui.t("settings.general.close_to_tray.label"), terms = ui.t("settings.general.close_to_tray.terms") })
+end
+search.index(M.ID, ui.t("settings.general.title"), ui.t("settings.general.terms"), searched)
 
 -- The engine's settings for this Mac, as last heard: nil until asked.
 type Credit = { enabled: boolean, cloud: boolean? }
@@ -297,6 +302,16 @@ function M.view(): Node
 						return background:get() == nil
 					end),
 				}),
+				-- Closing the window keeps Zeron in the notification area
+				-- (src/tray.rs): Windows' alone, and last, so elsewhere the
+				-- group simply ends before it.
+				if ui.shared("platform", ""):peek() == "windows"
+					then row("close_to_tray", {
+						label = ui.t("settings.general.close_to_tray.label"),
+						description = ui.t("settings.general.close_to_tray.description"),
+						control = ds.Switch { value = prefs.close_to_tray, label = ui.t("settings.general.close_to_tray.label") },
+					})
+					else nil,
 			},
 		},
 		ds.Settings.Section {
