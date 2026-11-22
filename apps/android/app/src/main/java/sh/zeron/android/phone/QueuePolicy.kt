@@ -13,4 +13,19 @@ object QueuePolicy {
 
     /** What a retry that threw means: busy → back to waiting; anything else → the text has failed. */
     fun afterAttempt(busy: Boolean): String = if (busy) "queued" else "failed"
+
+    private fun digits(s: String) = s.filter { it.isDigit() }.takeLast(10)
+
+    /** The same person and the same text (case and surrounding space aside): a second request is the first one again. */
+    fun sameRequest(numberA: String, textA: String, numberB: String, textB: String): Boolean =
+        digits(numberA).isNotEmpty() && digits(numberA) == digits(numberB) && textA.trim().equals(textB.trim(), ignoreCase = true)
+
+    /** What an agent is told to do after each outcome (null when there is nothing to add). */
+    fun advice(state: String): String? = when (state) {
+        "failed", "expired" -> "Do NOT resend: the text may have been sent by hand or may still go out. Ask the user first."
+        "superseded" -> "Nothing to do: the same text was already sent from the phone."
+        "cancelled", "handed" -> "Do not resend unless the user asks."
+        "queued", "sending" -> "Not sent yet. Do not resend; cancel it with phone_sms_queue {cancel: true} if it is no longer wanted."
+        else -> null
+    }
 }

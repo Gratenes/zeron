@@ -34,9 +34,9 @@ object PhoneSendQueue {
 
     class Entry(
         val id: Int, val number: String, val name: String?, val preview: String, val reason: String,
-        val wantRcs: Boolean, val created: Long, val run: (Boolean) -> JSONObject,
+        val wantRcs: Boolean, val created: Long, val duplicateOf: ((Long) -> Boolean)?, val run: (Boolean) -> JSONObject,
     ) {
-        @Volatile var state: String = "queued" // queued, sending, sent, failed, expired, cancelled, handed
+        @Volatile var state: String = "queued" // queued, sending, sent, failed, expired, cancelled, handed, superseded
         @Volatile var detail: String? = null
         @Volatile var result: JSONObject? = null
         @Volatile var finished: Long = 0
@@ -47,16 +47,22 @@ object PhoneSendQueue {
     @Volatile private var worker: Thread? = null
 
     /** Queues [run] (called with `force` true when the person tapped Send now) and tells the agent so. */
-    fun enqueue(context: Context, number: String, name: String?, preview: String, reason: String, wantRcs: Boolean, run: (Boolean) -> JSONObject): JSONObject {
+    fun enqueue(context: Context, number: String, name: String?, preview: String, reason: String, wantRcs: Boolean, duplicateOf: ((Long) -> Boolean)? = null, run: (Boolean) -> JSONObject): JSONObject {
         val app = context.applicationContext
-        val e = Entry(ids.getAndIncrement(), number, name, preview, reason, wantRcs, System.currentTimeMillis(), run)
+        // The same text to the same person is already waiting: say so, don't queue a second copy.
+        entries.values.firstOrNull { (it.state == "queued" || it.state == "sending") && QueuePolicy.sameRequest(it.number, it.preview, number, preview) }?.let { e ->
+            return JSONObject().put("ok", true).put("queued", true).put("alreadyQueued", true).put("state", e.state).put("queueId", e.id).put("to", number)
+                .put("sent", false).put("deliveryConfirmed", false)
+                .put("note", "ALREADY QUEUED as ${e.id}, NOT SENT YET: this exact text to this person is already waiting for the phone to be free, so it was not queued again. Read it with phone_sms_queue {id: ${e.id}}, or cancel it with phone_sms_queue {id: ${e.id}, cancel: true}. Do not resend.")
+        }
+        val e = Entry(ids.getAndIncrement(), number, name, preview, reason, wantRcs, System.currentTimeMillis(), duplicateOf, run)
         entries[e.id] = e
         PhoneActionLog.add(app, "sms_send", "queued a text to ${name ?: number}: the person is using the phone", true, null)
         notifyQueued(app, e)
         startWorker(app)
         return JSONObject().put("ok", true).put("queued", true).put("state", "queued").put("queueId", e.id).put("to", number)
             .put("sent", false).put("deliveryConfirmed", false)
-            .put("note", "QUEUED, NOT SENT YET: the person is using the phone, so the text waits for it to be free (it is retried when they have been idle ${IDLE_MS / 1000} s or the screen is off, for up to ${LIFETIME_MS / 60_000} min). They have a notification with Send now / Edit / Cancel. Read the outcome with phone_sms_queue {id: ${e.id}}; do not resend meanwhile, and do not tell anyone it went.")
+            .put("note", "QUEUED, NOT SENT YET: the person is using the phone, so the text waits for it to be free (it is retried when they have been idle ${IDLE_MS / 1000} s or the screen is off, for up to ${LIFETIME_MS / 60_000} min). They have a notification with Send now / Edit / Cancel. Read the outcome with phone_sms_queue {id: ${e.id}}, or cancel it with phone_sms_queue {id: ${e.id}, cancel: true}. Do not resend meanwhile (a second copy would queue and could be sent twice), and do not tell anyone it went.")
     }
 
     /** What phone_sms_queue says: one entry (by id) or every recent one. */
@@ -64,10 +70,23 @@ object PhoneSendQueue {
         val list = JSONArray()
         entries.values.filter { id == null || it.id == id }.sortedBy { it.id }.forEach { e ->
             list.put(JSONObject().put("queueId", e.id).put("to", e.number).put("state", e.state).put("detail", e.detail ?: JSONObject.NULL)
-                .put("preview", e.preview.take(60)).put("ageSeconds", (System.currentTimeMillis() - e.created) / 1000).put("result", e.result ?: JSONObject.NULL))
+                .put("preview", e.preview.take(60)).put("ageSeconds", (System.currentTimeMillis() - e.created) / 1000).put("result", e.result ?: JSONObject.NULL)
+                .put("advice", QueuePolicy.advice(e.state) ?: JSONObject.NULL))
         }
         if (id != null && list.length() == 0) throw PhoneToolException("no queued text $id (it may be older than the phone remembers, or Zeron restarted)")
-        return JSONObject().put("queue", list).put("note", "state: queued/sending (not sent yet), sent (result has providerState; chats give no delivery receipt), failed, expired (gave up after ${LIFETIME_MS / 60_000} min), cancelled or handed (the person took it into Messages to edit).")
+        return JSONObject().put("queue", list).put("note", "state: queued/sending (not sent yet), sent (result has providerState; chats give no delivery receipt), failed, expired (gave up after ${LIFETIME_MS / 60_000} min), superseded (the same text was already sent from the phone), cancelled or handed (the person took it into Messages to edit). After failed or expired: do NOT resend, ask the user first.")
+    }
+
+    /** An agent cancels a text still waiting. One already being sent (or finished) can't be taken back: it says so. */
+    fun cancel(context: Context, id: Int): JSONObject {
+        val e = entries[id] ?: throw PhoneToolException("no queued text $id (it may be older than the phone remembers, or Zeron restarted)")
+        val app = context.applicationContext
+        val cancelled = synchronized(e) {
+            if (e.state == "queued") { e.state = "cancelled"; true } else false
+        }
+        if (cancelled) finish(app, e, "cancelled", "cancelled", null)
+        return JSONObject().put("queueId", id).put("state", e.state).put("cancelled", cancelled)
+            .put("note", if (cancelled) "Cancelled: it will not be sent." else "Not cancelled: it is already ${e.state}. ${QueuePolicy.advice(e.state) ?: ""}".trim())
     }
 
     private fun startWorker(app: Context) {
@@ -101,6 +120,11 @@ object PhoneSendQueue {
             if (e.state != "queued") return
             e.state = "sending"
         }
+        // The person (or another send) may have sent this very text meanwhile: never send it twice.
+        if (e.duplicateOf?.let { runCatching { it(e.created) }.getOrDefault(false) } == true) {
+            finish(app, e, "superseded", "the same text to this number was already sent from the phone", null)
+            return
+        }
         try {
             val result = e.run(force)
             finish(app, e, "sent", null, result)
@@ -121,6 +145,7 @@ object PhoneSendQueue {
         when (state) {
             "sent" -> post(app, e, "Text to $who sent", "\"${e.preview.take(80)}\"", actions = false, quiet = true)
             "failed" -> post(app, e, "Text to $who failed", "${detail.orEmpty()}: \"${e.preview.take(60)}\"", actions = false, quiet = false)
+            "superseded" -> post(app, e, "Text to $who not sent again", "It was already sent: \"${e.preview.take(60)}\"", actions = false, quiet = true)
             "expired" -> post(app, e, "Text to $who was not sent", "The phone wasn't free for ${LIFETIME_MS / 60_000} minutes: \"${e.preview.take(60)}\"", actions = false, quiet = false)
             else -> manager.cancel(notificationId(e))
         }
@@ -148,7 +173,8 @@ object PhoneSendQueue {
             .setCategory(Notification.CATEGORY_MESSAGE).setAutoCancel(true)
             .setContentIntent(PendingIntent.getActivity(app, 0, Intent(app, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
         if (actions) {
-            b.setOngoing(false).setTimeoutAfter(LIFETIME_MS)
+            // Can't be swiped away by mistake; if it is dismissed anyway, that cancels the text (see the delete intent).
+            b.setOngoing(true).setTimeoutAfter(LIFETIME_MS).setDeleteIntent(action("cancel", 4))
             b.addAction(0, "Send now", action("now", 1)).addAction(0, "Edit", action("edit", 2)).addAction(0, "Cancel", action("cancel", 3))
         } else {
             b.setTimeoutAfter(if (quiet) 10_000L else 6 * 60 * 60_000L)
@@ -161,7 +187,7 @@ object PhoneSendQueue {
         val app = context.applicationContext
         val e = entries[id] ?: return
         when (what) {
-            "cancel" -> if (e.state == "queued") { finish(app, e, "cancelled", "the person cancelled it", null) }
+            "cancel" -> runCatching { cancel(app, id) }
             "edit" -> if (e.state == "queued") {
                 // Messages opens on the conversation with the text in the compose box: the person edits and sends.
                 finish(app, e, "handed", "the person took it into Google Messages to edit and send", null)

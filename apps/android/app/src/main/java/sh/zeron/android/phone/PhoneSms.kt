@@ -348,7 +348,7 @@ class PhoneSms(private val context: Context) {
                 sendViaMessages(number, text, wantRcs, force = false)
             } catch (e: PhoneBusyException) {
                 // Never just die because the person is on the phone: wait for them to be done, and say so.
-                PhoneSendQueue.enqueue(context, number, contactName(number), text, e.message.orEmpty(), wantRcs) { force -> sendViaMessages(number, text, wantRcs, force) }
+                PhoneSendQueue.enqueue(context, number, contactName(number), text, e.message.orEmpty(), wantRcs, duplicateOf = { since -> findSent(number, text, since) != null }) { force -> sendViaMessages(number, text, wantRcs, force) }
             }
             else -> sendSms(number, text)
         }
@@ -362,8 +362,20 @@ class PhoneSms(private val context: Context) {
         if (!force && PhoneUnlock.personActiveWithin(PhoneSendQueue.IDLE_MS)) {
             throw PhoneBusyException("The person is using the phone right now.")
         }
+        // The person is in Messages themselves (maybe with a draft): not taking it over, wait until they leave it.
+        if (!force && service.foregroundPackage() == "com.google.android.apps.messaging") {
+            throw PhoneBusyException("The person has Google Messages open.")
+        }
         val started = System.currentTimeMillis()
-        val transport = service.sendInMessages(number, text, requireRcs)
+        val transport = try {
+            service.sendInMessages(number, text, requireRcs)
+        } catch (e: PhoneToolException) {
+            // Failing before anything was tapped Send is safe to try once more, after getting out of the way.
+            if (e is PhoneBusyException || e.message?.startsWith("Google Messages didn't open a compose box") != true) throw e
+            service.pressHome()
+            Thread.sleep(3_000)
+            service.sendInMessages(number, text, requireRcs)
+        }
         // The proof is in the message database a moment later, in the conversation with that person.
         val seen = awaitSent(number, text, started, 24)
         service.pressHome()

@@ -108,7 +108,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
             "settings_get" -> system.settingsGet(args.optString("namespace"), args.optString("key"))
             "shizuku_probe" -> system.probe()
             "voicemails" -> PhoneVoicemails.recent(context, args.optInt("limit", 10).coerceIn(1, 50))
-            "sms_queue" -> PhoneSendQueue.status(args.optInt("id", -1).takeIf { it >= 0 })
+            "sms_queue" -> if (args.optBoolean("cancel")) PhoneSendQueue.cancel(context, args.optInt("id", -1).takeIf { it >= 0 } ?: throw PhoneToolException("name the queued text to cancel: id")) else PhoneSendQueue.status(args.optInt("id", -1).takeIf { it >= 0 })
             "sms_attachment" -> sms.attachment(args.optString("message_id"), args.optString("part_id"))
             "sms_react" -> sms.react(
                 args.optString("message_id").takeIf { it.isNotBlank() }, args.optString("thread_id").takeIf { it.isNotBlank() },
@@ -215,7 +215,7 @@ class PhoneTools(private val context: Context, private val settings: PhoneSettin
         "sms_read" -> "read texts from ${a.optString("thread_id").ifEmpty { a.optString("address") }}"
         "sms_send" -> "sent a message (${a.optString("text").length} characters) to ${a.optString("to").ifEmpty { "thread " + a.optString("thread_id") }}"
         "sms_attachment" -> "saved attachment ${a.optString("part_id")} of ${a.optString("message_id")}"
-        "sms_queue" -> "checked queued texts"
+        "sms_queue" -> if (a.optBoolean("cancel")) "cancelled queued text ${a.optInt("id")}" else "checked queued texts"
         "voicemails" -> "read recent voicemails"
         "install_apk" -> "asked to install ${a.optString("path").substringAfterLast('/')}"
         "grant" -> "${if (a.optBoolean("revoke")) "revoked" else "granted"} ${a.optString("permission").substringAfterLast('.')} ${if (a.optBoolean("revoke")) "from" else "to"} ${a.optString("package")}"

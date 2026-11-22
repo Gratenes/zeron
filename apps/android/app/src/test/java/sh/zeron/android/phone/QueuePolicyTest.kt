@@ -24,4 +24,19 @@ class QueuePolicyTest {
     }
 }
 
+class QueueDuplicateTest {
+    @Test fun theSameTextToTheSamePersonIsTheSameRequest() {
+        assertEquals(true, QueuePolicy.sameRequest("+19124240954", "Hey, are you free?", "(912) 424-0954", "  hey, are you free?  "))
+        assertEquals(false, QueuePolicy.sameRequest("+19124240954", "Hey", "+19124240955", "Hey"))
+        assertEquals(false, QueuePolicy.sameRequest("+19124240954", "Hey", "+19124240954", "Hey!"))
+        assertEquals(false, QueuePolicy.sameRequest("", "Hey", "", "Hey"))
+    }
+
+    @Test fun failedAndExpiredTextsTellTheAgentNotToResend() {
+        for (s in listOf("failed", "expired")) assertEquals(true, QueuePolicy.advice(s)!!.startsWith("Do NOT resend"))
+        assertEquals(true, QueuePolicy.advice("queued")!!.contains("cancel"))
+        assertEquals(null, QueuePolicy.advice("sent"))
+    }
+}
+
 private const val PhoneSendQueue_LIFETIME = 10 * 60_000L

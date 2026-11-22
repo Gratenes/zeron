@@ -182,8 +182,11 @@ pub(super) fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "phone_sms_queue",
-            description: "What happened to texts that phone_sms_send queued because the person was using the phone: with `id` (the queueId from the send) the one, else all recent ones. State is queued or sending (NOT sent yet), sent, failed, expired (the phone wasn't free for 10 min), cancelled or handed (the person took it into Messages to edit). Never report a queued text as sent.",
-            input_schema: schema(json!({ "id": { "type": "integer", "description": "The queueId returned by phone_sms_send." } }), &[]),
+            description: "What happened to texts that phone_sms_send queued because the person was using the phone: with `id` (the queueId from the send) the one, else all recent ones. State is queued or sending (NOT sent yet), sent, failed, expired (the phone wasn't free for 10 min), cancelled or handed (the person took it into Messages to edit). Never report a queued text as sent. A failed or expired one: do NOT resend (it may have gone out by hand or may still go), ask the user first. Cancel a waiting one with `cancel: true` and its `id`; the same text to the same person is never queued twice.",
+            input_schema: schema(json!({
+                "id": { "type": "integer", "description": "The queueId returned by phone_sms_send." },
+                "cancel": { "type": "boolean", "description": "With id: cancel that text if it is still waiting (it will not be sent). One already being sent can't be taken back." }
+            }), &[]),
         },
         ToolDef {
             name: "phone_sms_attachment",

@@ -323,10 +323,11 @@ class PhoneAccessibilityService : AccessibilityService() {
             throw PhoneToolException("Google Messages can't be opened here (${e.javaClass.simpleName}): is it installed?")
         }
         var screen: MessagesScreen? = null
-        for (i in 0 until 25) {
+        for (i in 0 until 45) {
             Thread.sleep(400)
-            val root = rootInActiveWindow ?: continue
-            if (root.packageName?.toString() != messages) continue
+            // The window can be something else for a moment (the shade, a switch of apps): ask Messages again, twice.
+            if ((i == 14 || i == 28) && screen?.field == null) runCatching { startActivity(intent) }
+            val root = messagesRoot() ?: continue
             screen = scanMessages(root)
             if (screen.send != null && screen.field != null) break
         }
@@ -395,7 +396,12 @@ class PhoneAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun messagesRoot(): AccessibilityNodeInfo? = rootInActiveWindow?.takeIf { it.packageName?.toString() == "com.google.android.apps.messaging" }
+    /** Google Messages' window: the active one, else any other window of it (the shade or a heads-up can be the active one). */
+    private fun messagesRoot(): AccessibilityNodeInfo? {
+        val messages = "com.google.android.apps.messaging"
+        rootInActiveWindow?.takeIf { it.packageName?.toString() == messages }?.let { return it }
+        return runCatching { windows.firstNotNullOfOrNull { w -> w.root?.takeIf { it.packageName?.toString() == messages } } }.getOrNull()
+    }
 
     /**
      * Opens Google Messages with files to send to [number]: first straight into the conversation, else through
