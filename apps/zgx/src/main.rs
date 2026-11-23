@@ -668,13 +668,31 @@ fn script_host(cx: &mut WindowContext, entry: &str) -> ScriptHost {
 
 /// `script_host`, its script at `path` (the main window's, in its template's
 /// folder).
+/// How long a window's scripts may take to load (`Limits::load`): the whole
+/// interface is one load, `app.luau` requiring some 250 modules (compiled as
+/// it goes, the window's plugins' too), and zgx's own budget, 500 ms of CPU
+/// in a release build, is one script's. On a slower Windows laptop that load
+/// ran past it on every launch, each time at another module, and the reload
+/// that brings the plugins in (and its retries) did too: a window with no
+/// plugins, or none at all (zeronsh/zeron#1472). A debug build's budget, 5 s,
+/// still stops a script that never ends. Each call's budget stays zgx's.
+const LOAD_BUDGET: Duration = Duration::from_secs(5);
+
+fn window_limits() -> zgx_script::Limits {
+    let limits = zgx_script::Limits::default();
+    zgx_script::Limits { load: limits.load.max(LOAD_BUDGET), ..limits }
+}
+
 fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptHost {
     // Zeron's design system, lent to the window's plugins (`@ds`).
     let lent = path.clone();
     // A long chat's heap, past 32 MB, collected aiming for 150% of what's in
     // use rather than Luau's double: its rows' nodes, which the collector
     // can't see the size of, go sooner (zgx #1837, the carry it replaces).
-    let host = plugins::lend_design_system(ScriptHost::new(&cx.ui.runtime, path).app_id(APP_ID).large_heap_goal(150), &lent);
+    let host = plugins::lend_design_system(
+        ScriptHost::new(&cx.ui.runtime, path).app_id(APP_ID).large_heap_goal(150).limits(window_limits()),
+        &lent,
+    );
     // The network, for `ui.fetch` and remote images: the app's scripts, and
     // plugins granted "network" (zgx's own transport; a plugin without the
     // grant reaches none).
@@ -1407,6 +1425,19 @@ fn fonts() -> impl Iterator<Item = Result<FontData, Box<dyn std::error::Error>>>
     ]
     .into_iter()
     .map(|bytes| FontData::new(Arc::<[u8]>::from(bytes)).map_err(Into::into))
+}
+
+#[cfg(test)]
+mod load_budget_tests {
+    /// The window's scripts load within 5 s, however zgx's default budget
+    /// stands, and each call keeps zgx's own.
+    #[test]
+    fn a_window_s_load_budget_is_five_seconds_and_its_calls_zgx_s() {
+        let (ours, theirs) = (super::window_limits(), zgx_script::Limits::default());
+        assert!(ours.load >= std::time::Duration::from_secs(5), "{:?}", ours.load);
+        assert_eq!(ours.call, theirs.call);
+        assert_eq!((ours.memory, ours.plugin_memory), (theirs.memory, theirs.plugin_memory));
+    }
 }
 
 #[cfg(test)]
