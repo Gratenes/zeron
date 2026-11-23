@@ -481,3 +481,15 @@ markers = [
   ["crates/mcp/src/tools/phone.rs", 'do NOT resend'],
 ]
 rust = [["zeron-mcp", "phone"]]
+
+[[feature]]
+id = "zgx-load-budget"
+title = "zgx: a window's scripts get a 5 s load budget, not zgx's 500 ms (blank window on slower laptops, zeronsh/zeron#1472)"
+owner = "Zeron Management (8a6897a4)"
+branch = "zgx-load-budget"
+commits = ["c71c2fdde"]
+markers = [
+  ["apps/zgx/src/main.rs", 'const LOAD_BUDGET'],
+  ["apps/zgx/src/main.rs", 'limits\(window_limits\(\)\)'],
+]
+rust = [["zeron-zgx", "a_window_s_load_budget_is_five_seconds"]]
