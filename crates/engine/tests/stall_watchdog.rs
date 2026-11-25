@@ -277,6 +277,7 @@ fn request(prompt: &str) -> RunRequest {
         resume: None,
         extra_mcp: Vec::new(),
         code_mode: false,
+        zeron_mcp_only: false,
     }
 }
 

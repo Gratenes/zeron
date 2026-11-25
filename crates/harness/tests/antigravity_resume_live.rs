@@ -43,6 +43,7 @@ fn request(cwd: &str, prompt: &str, resume: Option<String>) -> RunRequest {
         access: Default::default(),
         plan: false,
         code_mode: false,
+        zeron_mcp_only: false,
         attachments: Vec::new(),
         worktree: None,
         resume,
