@@ -754,7 +754,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local expanded = props.expanded or ui.use_state({} :: { [string]: boolean })
 	-- Whether a folded place still lists its sessions in a state.
 	local keep_active: State<boolean> = details.keep_active or ui.use_state(true)
-	local show_unreachable: State<boolean> = details.unreachable or ui.use_state(true)
+	local fx: any = {}
+	fx.show_unreachable = details.unreachable or ui.use_state(true)
 	-- The first nine sessions the list shows, by id: their jump (⌘1–⌘9).
 	local slots = ui.use_state({} :: { [string]: number })
 	local function hinting(): boolean
@@ -765,7 +766,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- panel home's lists' too).
 	-- (Chats named alike, by title: each is told apart by where it runs, by
 	-- its id and nothing else, in a compact row too. See `alike`.)
-	local alike_titles = ui.computed(function(): { [string]: number }
+	fx.alike_titles = ui.computed(function(): { [string]: number }
 		local count: { [string]: number } = {}
 		for _, s in index:get().by_id do
 			local t = string.lower(s.title)
@@ -773,19 +774,19 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		end
 		return count
 	end)
-	local function alike(s: Session): boolean
-		return (alike_titles:get()[string.lower(s.title)] or 0) > 1
+	function fx.alike(s: Session): boolean
+		return (fx.alike_titles:get()[string.lower(s.title)] or 0) > 1
 	end
 	local function detail(s: Session, by: Organize): string
 		local p = project_of(s.id)
 		-- (A chat sharing its title shows where it runs, whatever the view
 		-- shows: else the rows read the same.)
-		return SessionRow.detail(if p then p.name else nil, s.device, s.branch, by, details.location:get() or alike(s), details.branch:get())
+		return SessionRow.detail(if p then p.name else nil, s.device, s.branch, by, details.location:get() or fx.alike(s), details.branch:get())
 	end
 	-- A session's height: regular, two lines while it has a second to show
 	-- (a compact row too while its title is another's).
 	local function session_h(s: Session, by: Organize): number
-		if (compact:get() and not alike(s)) or detail(s, by) == "" then
+		if (compact:get() and not fx.alike(s)) or detail(s, by) == "" then
 			return SLOT
 		end
 		return TALL
@@ -802,13 +803,12 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- Activity view's one flat list), and whether they're unfolded (folded
 	-- until opened, kept per session); the fold
 	-- itself is played where the list's folds are (`toggle_side`, below).
-	local function nesting(): boolean
+	function fx.nesting(): boolean
 		return details.side_chats ~= nil and details.side_chats:get() and not act_now()
 	end
-	local function side_open(id: string): boolean
+	function fx.side_open(id: string): boolean
 		return folded:get()[`side_open:{id}`] == true
 	end
-	local toggle_side: (id: string) -> ()
 	-- The list's scroll position, and its element.
 	local list_offset = props.offset or ui.use_state(0)
 	local list_view = ui.ref()
@@ -1196,7 +1196,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local function session_glyph(s: Session, strong: () -> boolean, row: (() -> Session)?): Node
 		local cur = row or now_of(s)
 		local function rail_offline(): boolean
-			return railed() and cur().status == nil and show_unreachable:get() and cur().offline == true
+			return railed() and cur().status == nil and fx.show_unreachable:get() and cur().offline == true
 		end
 		-- (On the rail, its state's glyph, one of its kind.)
 		return ui.div {
@@ -1329,23 +1329,23 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- The fold on a session with side chats nested under it: its chevron in
 	-- the row's line, down while they show, right once they're folded away
 	-- (they in a state still stay, as a group's do: `keep_active`).
-	local function side_fold_toggle(s: Session, cur: () -> Session, off: boolean): Node?
+	function fx.side_fold_toggle(s: Session, cur: () -> Session, off: boolean): Node?
 		if off or not details.side_chats then
 			return nil
 		end
 		return ui.show(
 			function(): boolean
-				return nesting() and #(cur().side_chats or {}) > 0
+				return fx.nesting() and #(cur().side_chats or {}) > 0
 			end,
 			ui.presence(function(): string
-				return if side_open(s.id) then "open" else "closed"
+				return if fx.side_open(s.id) then "open" else "closed"
 			end, function(kind: string): Node
 				local open = kind == "open"
 				return corner(
 					if open then "ds.sidebar.side_chats_fold" else "ds.sidebar.side_chats_unfold",
 					if open then "alt-arrow-down" else "alt-arrow-right",
 					function()
-						toggle_side(s.id)
+						fx.toggle_side(s.id)
 					end
 				)
 			end)
@@ -1355,16 +1355,16 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	-- (the subagents pill, the unreachable glyph), its slot kept empty (the
 	-- chevron's 22 wide), so every status item ends at one column, the
 	-- chevron's left edge, on every row.
-	local function side_fold_spacer(cur: () -> Session, off: boolean): Node?
+	function fx.side_fold_spacer(cur: () -> Session, off: boolean): Node?
 		if off or not details.side_chats then
 			return nil
 		end
 		return ui.show(function(): boolean
 			local row = cur()
-			if not nesting() or #(row.side_chats or {}) > 0 then
+			if not fx.nesting() or #(row.side_chats or {}) > 0 then
 				return false
 			end
-			return (row.subagents or 0) > 0 or (show_unreachable:get() and row.offline == true)
+			return (row.subagents or 0) > 0 or (fx.show_unreachable:get() and row.offline == true)
 		end, ui.div { shrink = 0, w = 22, h = 22 })
 	end
 	local function session_row(s: Session, by: Organize, place: Place?): Node
@@ -1411,7 +1411,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 		-- The session as it stands: what the row shows of it follows it.
 		local cur = now_of(s)
 		local function second_line(): boolean
-			return (not compact:get() or alike(cur())) and detail(cur(), by_here:get()) ~= ""
+			return (not compact:get() or fx.alike(cur())) and detail(cur(), by_here:get()) ~= ""
 		end
 		-- Regular's second line: where it runs, and on what (its branch's
 		-- glyph leading while the branch shows).
@@ -1602,12 +1602,12 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 						SessionRow.unreachable(function(): Session
 							return cur()
 						end, function(): boolean
-							return show_unreachable:get()
+							return fx.show_unreachable:get()
 						end, function(): boolean
-							return nesting() and not side_open(s.id)
+							return fx.nesting() and not fx.side_open(s.id)
 						end),
-						side_fold_toggle(s, cur, in_flyout or on_shelf:peek()),
-						side_fold_spacer(cur, in_flyout or on_shelf:peek()),
+						fx.side_fold_toggle(s, cur, in_flyout or on_shelf:peek()),
+						fx.side_fold_spacer(cur, in_flyout or on_shelf:peek()),
 						-- Its state (or time) at rest; under the pointer, archive (on
 						-- the shelf, unarchive); ⌘ held alone, its jump's keys.
 						SessionRow.Corner {
@@ -1931,7 +1931,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			}
 		end
 		local function away(list: { Session }): boolean
-			return show_unreachable:get() and pressing(list) == nil and any_offline(list)
+			return fx.show_unreachable:get() and pressing(list) == nil and any_offline(list)
 		end
 		if type(sessions) == "table" then
 			local most = pressing(sessions)
@@ -2654,7 +2654,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	end
 	-- A session's side chats nested under it: folded until opened (kept with
 	-- the sections' folds, as `side_open:<id>`).
-	local function side_fold(id: string): Fold
+	function fx.side_fold(id: string): Fold
 		return fold_of(`side:{id}`, function(): boolean
 			return folded:peek()[`side_open:{id}`] == true
 		end, function(on: boolean)
@@ -2663,8 +2663,8 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			folded:set(f)
 		end)
 	end
-	toggle_side = function(id: string)
-		local f = side_fold(id)
+	fx.toggle_side = function(id: string)
+		local f = fx.side_fold(id)
 		fold_set(f, not f.is_open())
 	end
 	-- A group's sessions past its first few: shown ("Show N more") or not.
@@ -2950,7 +2950,7 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				-- open always; not while it's being dragged.
 				local kids = if nest and not dragged then s.side_chats else nil
 				if kids and #kids > 0 then
-					local f = side_fold(s.id)
+					local f = fx.side_fold(s.id)
 					local key = `side:{s.id}`
 					local within: { [string]: boolean } = {}
 					local past = 0
