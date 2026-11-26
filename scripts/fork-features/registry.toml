@@ -30,9 +30,9 @@ base = "origin/main"
 # box drawing in zgx-terminal, the panic banner that clears itself). A merge
 # that brings upstream's pin back changes this line in Cargo.toml: check.py
 # fails until the new pin is shown to carry them and this is updated.
-zgx_pin = "fbd383f935e1c975f23e42f44d9741160c5b7079"
-# (Gratenes/zgx pc-local-7a8d5a42: upstream 7a8d5a429 + the five commits below, in order.)
-zgx_pin_carries = ["73d25a40", "1eccff91", "3a5cca56", "c4231aae", "fbd383f9"]
+zgx_pin = "bf2afcacb2264931516b35823a4d58bff03317bd"
+# (Gratenes/zgx pc-local-b9e744dd: upstream b9e744ddd + the five commits below, in order.)
+zgx_pin_carries = ["71403fb2", "9098a738", "07eca5b0", "a18bd8f5", "bf2afcac"]
 
 # ---------------------------------------------------------------- zgx (the app)
 

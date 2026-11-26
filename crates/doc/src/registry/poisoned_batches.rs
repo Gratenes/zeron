@@ -26,6 +26,7 @@ fn session(chat: &str, tasks: Vec<BackgroundTask>) -> zeron_proto::Session {
         last_turn_outcome: None,
         terminal_activity: None,
         waiting: None,
+        blocked_on_wait: false,
     }
 }
 
@@ -108,11 +109,7 @@ fn a_waiting_row_with_long_labels_is_bounded_too() {
     row.waiting = Some(SessionWaiting {
         since: ts(1_000),
         on: (0..30)
-            .map(|n| WaitingOn {
-                id: format!("w-{n}"),
-                kind: WaitingKind::Process,
-                label: "y".repeat(5_000),
-            })
+            .map(|n| WaitingOn::runtime(format!("w-{n}"), WaitingKind::Process, "y".repeat(5_000)))
             .collect(),
     });
     doc.upsert_session(&row).unwrap();

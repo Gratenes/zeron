@@ -921,6 +921,8 @@ pub(crate) struct RawSession {
     /// peer's) costs the wait, not the row.
     #[serde(default, deserialize_with = "lenient_waiting")]
     waiting: Option<zeron_proto::SessionWaiting>,
+    #[serde(default)]
+    blocked_on_wait: bool,
 }
 
 fn lenient_waiting<'de, D>(deserializer: D) -> Result<Option<zeron_proto::SessionWaiting>, D::Error>
@@ -945,6 +947,7 @@ impl From<RawSession> for Session {
             running_subagents: raw.running_subagents,
             background_tasks: raw.background_tasks,
             waiting: raw.waiting,
+            blocked_on_wait: raw.blocked_on_wait,
         }
     }
 }
@@ -1064,6 +1067,7 @@ mod tests {
             running_subagents: 0,
             background_tasks: Vec::new(),
             waiting: None,
+            blocked_on_wait: false,
         }
     }
 
